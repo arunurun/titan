@@ -33,11 +33,14 @@ def main() -> int:
         return 1
 
     client = create_client(url, key)
-    res = client.table("session_config").select("breeze_session_token").eq("id", 1).limit(1).execute()
+    res = client.table("session_config").select("breeze_session_token").limit(1).execute()
     data = getattr(res, "data", None) or []
     if not data:
         print(
-            "session_config has no row id=1; run sql/create_session_config.sql and set breeze_session_token.",
+            "session_config returned no rows. Fix one of:\n"
+            "  1) Supabase SQL Editor: run sql/create_session_config.sql (creates row id=1).\n"
+            "  2) GitHub secret SUPABASE_KEY = Settings → API → service_role (not anon).\n"
+            "  3) Table Editor: add a row with a non-empty breeze_session_token.",
             file=sys.stderr,
         )
         return 1

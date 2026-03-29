@@ -25,7 +25,7 @@ def test_inject_writes_github_env(inject_mod, tmp_path):
     os.environ.setdefault("SUPABASE_KEY", "sk")
 
     mock_client = MagicMock()
-    mock_client.table.return_value.select.return_value.eq.return_value.limit.return_value.execute.return_value = MagicMock(
+    mock_client.table.return_value.select.return_value.limit.return_value.execute.return_value = MagicMock(
         data=[{"breeze_session_token": "tok=123"}]
     )
 
