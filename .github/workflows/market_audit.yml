@@ -13,10 +13,12 @@ name: Market audit (Titan V12.0)
 on:
   workflow_dispatch:
   schedule:
-    # NSE cash session window in IST, converted to UTC (GitHub uses UTC). Mon–Fri only.
-    # 9:15–15:30 IST = 03:45–10:00 UTC. Hourly at :15 IST → :45 past the hour UTC; last slot 15:30 IST → 10:00 UTC.
+    # NSE cash session window in IST, converted to UTC (GitHub schedule is always UTC).
+    # Weekday field is UTC: Mon–Fri = 1–5 in UTC (early IST Monday before ~05:30 IST is still Sunday UTC).
+    # :15 past each hour IST → :45 UTC; 11:00 IST = 05:30 UTC; 11:15 IST = 05:45 UTC; 15:30 IST = 10:00 UTC.
     - cron: "45 3 * * 1-5"
     - cron: "45 4 * * 1-5"
+    - cron: "30 5 * * 1-5"
     - cron: "45 5 * * 1-5"
     - cron: "45 6 * * 1-5"
     - cron: "45 7 * * 1-5"

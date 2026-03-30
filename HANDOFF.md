@@ -23,7 +23,7 @@ ICICI session tokens are short-lived. Before each scheduled run (or when this ap
 
 ## Schedule (GitHub)
 
-Workflow runs **weekdays (Mon–Fri)** during **09:15–15:30 IST**: hourly at **:15** past each hour, plus **15:30 IST** (GitHub cron in UTC; see `market_audit.yml`). ICICI session tokens still expire independently—refresh when the API reports expiry.
+Workflow runs **weekdays** during **09:15–15:30 IST** (crons are **UTC**; see `market_audit.yml`). Includes **11:00 IST** and **11:15 IST** slots. GitHub may delay runs a few minutes. ICICI session tokens still expire independently.
 
 ## Automating Breeze session refresh?
 
