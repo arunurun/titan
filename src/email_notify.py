@@ -24,7 +24,8 @@ def _smtp_config() -> dict[str, object] | None:
     if not to_addrs:
         return None
     user = os.environ.get("SMTP_USER", "").strip()
-    password = os.environ.get("SMTP_PASSWORD", "").strip()
+    # Gmail app passwords are often pasted as "xxxx xxxx xxxx xxxx"; SMTP expects no spaces.
+    password = os.environ.get("SMTP_PASSWORD", "").strip().replace(" ", "")
     if user and not password:
         logger.warning("SMTP_USER is set but SMTP_PASSWORD is empty; skipping email.")
         return None
