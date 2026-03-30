@@ -23,7 +23,16 @@ ICICI session tokens are short-lived. Before each scheduled run (or when this ap
 
 ## Schedule (GitHub)
 
-Workflow runs **weekdays** during **09:15–15:30 IST** (crons are **UTC**; see `market_audit.yml`). Includes **11:00 IST** and **11:15 IST** slots. GitHub may delay runs a few minutes. ICICI session tokens still expire independently.
+Workflow runs **weekdays** during **09:15–15:30 IST** (crons are **UTC**; see `market_audit.yml`). Includes **11:00 IST** and **11:15 IST** slots. ICICI session tokens still expire independently.
+
+### If a scheduled run does not appear
+
+1. **GitHub often delays** scheduled jobs (sometimes **15–60+ minutes**); see [schedule event](https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#schedule).
+2. **Default branch** must be the branch that contains `.github/workflows/market_audit.yml` (usually `main`).
+3. **Settings → Actions → General**: Actions must be allowed; workflow must not be disabled under **Actions** tab.
+4. **Forks**: scheduled workflows **do not run** on forks (only on the upstream repo you own).
+5. After changing `schedule`, allow **up to ~1 hour** for the scheduler to pick up new crons.
+6. In **Actions**, filter runs by **event = schedule** (not only `workflow_dispatch`).
 
 ## Automating Breeze session refresh?
 
