@@ -1,11 +1,18 @@
 """inject_breeze_session_from_supabase.py (CI helper)."""
 
+import base64
 import importlib.util
+import json
 import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+def _fake_supabase_jwt(role: str) -> str:
+    payload = base64.urlsafe_b64encode(json.dumps({"role": role}).encode()).decode().rstrip("=")
+    return f"h.{payload}.s"
 
 
 @pytest.fixture
@@ -52,3 +59,18 @@ def test_inject_prefers_repository_secret_skips_supabase(inject_mod, tmp_path, m
         assert inject_mod.main() == 0
     mock_create.assert_not_called()
     assert "secret-token-xyz" in gh.read_text(encoding="utf-8")
+
+
+def test_jwt_role_from_supabase_key(inject_mod):
+    assert inject_mod.jwt_role_from_supabase_key(_fake_supabase_jwt("anon")) == "anon"
+    assert inject_mod.jwt_role_from_supabase_key(_fake_supabase_jwt("service_role")) == "service_role"
+
+
+def test_inject_rejects_anon_supabase_key(inject_mod, tmp_path, monkeypatch):
+    monkeypatch.delenv("BREEZE_SESSION_TOKEN", raising=False)
+    monkeypatch.setenv("GITHUB_ENV", str(tmp_path / "ghenv"))
+    monkeypatch.setenv("SUPABASE_URL", "https://x.supabase.co")
+    monkeypatch.setenv("SUPABASE_KEY", _fake_supabase_jwt("anon"))
+    with patch.object(inject_mod, "create_client") as mock_create:
+        assert inject_mod.main() == 1
+    mock_create.assert_not_called()

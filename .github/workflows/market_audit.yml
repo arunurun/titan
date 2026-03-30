@@ -3,7 +3,7 @@
 #
 # Repository secrets: SUPABASE_URL, SUPABASE_KEY (service role: read session_config + write audit_logs),
 #   BREEZE_API_KEY, BREEZE_SECRET, GEMINI_API_KEY
-# Optional: BREEZE_SESSION_TOKEN — if set, inject step skips Supabase (paste daily token in GitHub instead).
+# Recommended: BREEZE_SESSION_TOKEN — daily Breeze token; if set, bash writes GITHUB_ENV (no Supabase read).
 #
 # If the repo root is not the Titan folder, set defaults.run.working-directory below (e.g. Titan).
 
@@ -35,12 +35,25 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # Prefer env-based secret so bash sees the token reliably; then Python only if empty.
       - name: Load Breeze session token (secret or Supabase)
         env:
+          BREEZE_SESSION_TOKEN: ${{ secrets.BREEZE_SESSION_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          BREEZE_SESSION_TOKEN: ${{ secrets.BREEZE_SESSION_TOKEN }}
-        run: python scripts/inject_breeze_session_from_supabase.py
+        run: |
+          set -e
+          if [ -n "${BREEZE_SESSION_TOKEN:-}" ]; then
+            d=$(openssl rand -hex 16)
+            {
+              echo "BREEZE_SESSION_TOKEN<<$d"
+              echo "$BREEZE_SESSION_TOKEN"
+              echo "$d"
+            } >> "$GITHUB_ENV"
+            echo "Loaded BREEZE_SESSION_TOKEN from repository secret."
+          else
+            python scripts/inject_breeze_session_from_supabase.py
+          fi
 
       - name: Live market audit
         env:

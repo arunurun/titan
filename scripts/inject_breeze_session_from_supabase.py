@@ -1,15 +1,16 @@
 """
 Load BREEZE_SESSION_TOKEN into GITHUB_ENV for GitHub Actions (used by main.py --live).
 
-Resolution order:
-1) If env BREEZE_SESSION_TOKEN is non-empty (e.g. repository secret), use it — no Supabase read.
-2) Else read from Supabase table `session_config` (requires SUPABASE_URL + service_role SUPABASE_KEY).
+Used when the workflow does not already inject from repository secret BREEZE_SESSION_TOKEN
+(see market_audit.yml: bash writes GITHUB_ENV first; this script handles Supabase-only path).
 
-Local: typically use .env; this script targets CI.
+Requires: SUPABASE_URL + SUPABASE_KEY (must be service_role JWT if RLS is on), table session_config.
 """
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 import secrets
 import sys
@@ -17,8 +18,24 @@ import sys
 from supabase import create_client
 
 
+def jwt_role_from_supabase_key(key: str) -> str | None:
+    """Return JWT `role` claim from a Supabase key, or None if not a standard JWT."""
+    try:
+        parts = key.split(".")
+        if len(parts) != 3:
+            return None
+        payload_b64 = parts[1]
+        pad = (4 - len(payload_b64) % 4) % 4
+        payload_b64 += "=" * pad
+        raw = base64.urlsafe_b64decode(payload_b64.encode("ascii"))
+        data = json.loads(raw.decode("utf-8"))
+        r = data.get("role")
+        return str(r) if r is not None else None
+    except Exception:
+        return None
+
+
 def _append_github_env_multiline(name: str, value: str, path: str) -> None:
-    """Write name=value safely (handles special characters per Actions file syntax)."""
     if "\n" in value or "\r" in value:
         print("ERROR: token must not contain newlines", file=sys.stderr)
         sys.exit(1)
@@ -30,7 +47,7 @@ def _append_github_env_multiline(name: str, value: str, path: str) -> None:
 def _write_token_to_github_env(token: str, source: str) -> int:
     gh_env = os.environ.get("GITHUB_ENV")
     if not gh_env:
-        print("GITHUB_ENV not set; not printing token. Use in Actions only.", file=sys.stderr)
+        print("GITHUB_ENV not set; this script is intended for GitHub Actions.", file=sys.stderr)
         return 1
     _append_github_env_multiline("BREEZE_SESSION_TOKEN", token, gh_env)
     print(f"Injected BREEZE_SESSION_TOKEN into GITHUB_ENV ({source}).")
@@ -45,14 +62,23 @@ def main() -> int:
 
     override = (os.environ.get("BREEZE_SESSION_TOKEN") or "").strip()
     if override:
-        return _write_token_to_github_env(override, "repository secret / env")
+        return _write_token_to_github_env(override, "environment BREEZE_SESSION_TOKEN")
 
     url = os.environ.get("SUPABASE_URL", "").strip()
     key = os.environ.get("SUPABASE_KEY", "").strip()
     if not url or not key:
         print(
-            "Set repository secret BREEZE_SESSION_TOKEN, or supply SUPABASE_URL + SUPABASE_KEY "
-            "to read session_config.",
+            "Add repository secret BREEZE_SESSION_TOKEN, or set SUPABASE_URL + SUPABASE_KEY for session_config.",
+            file=sys.stderr,
+        )
+        return 1
+
+    role = jwt_role_from_supabase_key(key)
+    if role == "anon":
+        print(
+            "SUPABASE_KEY is the anon key; PostgREST returns no rows under RLS.\n"
+            "Use the service_role key from Supabase → Project Settings → API,\n"
+            "or add repository secret BREEZE_SESSION_TOKEN (daily Breeze token).",
             file=sys.stderr,
         )
         return 1
@@ -63,16 +89,16 @@ def main() -> int:
     if not data:
         print(
             "session_config returned no rows. Fix one of:\n"
-            "  1) Repository secret BREEZE_SESSION_TOKEN (paste daily Breeze token).\n"
-            "  2) Supabase SQL: run sql/create_session_config.sql then set breeze_session_token.\n"
-            "  3) GitHub secret SUPABASE_KEY = service_role (not anon) if using RLS.",
+            "  1) Repository secret BREEZE_SESSION_TOKEN (Settings → Secrets → Actions).\n"
+            "  2) Supabase SQL: sql/create_session_config.sql + non-empty breeze_session_token.\n"
+            "  3) SUPABASE_KEY must be service_role (not anon).",
             file=sys.stderr,
         )
         return 1
     token = (data[0].get("breeze_session_token") or "").strip()
     if not token:
         print(
-            "breeze_session_token is empty in Supabase; set repository secret BREEZE_SESSION_TOKEN or edit Table Editor.",
+            "breeze_session_token is empty in Supabase; set secret BREEZE_SESSION_TOKEN or edit Table Editor.",
             file=sys.stderr,
         )
         return 1
