@@ -4,12 +4,23 @@ import pandas as pd
 import pytest
 
 from breeze_client import (
+    create_breeze_session,
     fetch_nifty_data,
     fetch_nifty_option_metrics,
     fetch_nifty_option_metrics_with_expiry_fallback,
     volume_absorption_ratio,
 )
 from config_loader import TitanConfig
+
+
+@patch("breeze_client.BreezeConnect")
+def test_create_breeze_session_expired_raises_actionable(mock_cls):
+    api = MagicMock()
+    api.generate_session.side_effect = Exception("Session key is expired.")
+    mock_cls.return_value = api
+    cfg = make_cfg()
+    with pytest.raises(RuntimeError, match="Breeze session token expired"):
+        create_breeze_session(cfg)
 
 
 def make_cfg():

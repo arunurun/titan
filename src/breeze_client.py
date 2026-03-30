@@ -26,10 +26,20 @@ logger = logging.getLogger(__name__)
 def create_breeze_session(config: _BreezeCredentials) -> BreezeConnect:
     """Create a Breeze client and authenticate (reuse for multiple API calls in one run)."""
     breeze = BreezeConnect(api_key=config.breeze_api_key)
-    breeze.generate_session(
-        api_secret=config.breeze_secret,
-        session_token=config.breeze_session_token,
-    )
+    try:
+        breeze.generate_session(
+            api_secret=config.breeze_secret,
+            session_token=config.breeze_session_token,
+        )
+    except Exception as e:
+        msg = str(e).lower()
+        if "session" in msg and ("expired" in msg or "expire" in msg):
+            raise RuntimeError(
+                "Breeze session token expired. Get a new session from ICICI (browser login), then update: "
+                "local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. "
+                "Run: python scripts/breeze_session.py"
+            ) from e
+        raise
     return breeze
 
 

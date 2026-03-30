@@ -14,6 +14,13 @@
 
 **Or:** Supabase SQL `sql/create_session_config.sql` + Table Editor non-empty token + **`SUPABASE_KEY` = service_role** (not anon).
 
+## “Session key is expired” (Breeze)
+
+ICICI session tokens are short-lived. Before each scheduled run (or when this appears):
+
+1. Log in via browser / run `python scripts/breeze_session.py` to refresh.
+2. Update **GitHub secret `BREEZE_SESSION_TOKEN`**, local **`.env`**, and **Supabase `session_config`** so they all match the new token.
+
 ## Verify
 
 ```powershell
