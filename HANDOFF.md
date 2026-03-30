@@ -21,6 +21,10 @@ ICICI session tokens are short-lived. Before each scheduled run (or when this ap
 1. Log in via browser / run `python scripts/breeze_session.py` to refresh.
 2. Update **GitHub secret `BREEZE_SESSION_TOKEN`**, local **`.env`**, and **Supabase `session_config`** so they all match the new token.
 
+## Schedule (GitHub)
+
+Workflow uses cron `*/15 * * * *` (every **15 minutes**, UTC). ICICI session expiry will cause failures until you refresh the token—often several times per day if you run this frequently.
+
 ## Verify
 
 ```powershell

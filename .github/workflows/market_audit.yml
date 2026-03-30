@@ -1,5 +1,5 @@
-# Private repo recommended. Paste the daily Breeze session token into Supabase `session_config`
-# (Table Editor → row id=1 → breeze_session_token) before ~09:15 IST, or use workflow_dispatch after pasting.
+# Private repo recommended. ICICI Breeze session tokens expire quickly—if this runs often,
+# refresh BREEZE_SESSION_TOKEN (GitHub secret / Supabase) whenever the API returns "session expired".
 #
 # Repository secrets: SUPABASE_URL, SUPABASE_KEY (service role: read session_config + write audit_logs),
 #   BREEZE_API_KEY, BREEZE_SECRET, GEMINI_API_KEY
@@ -12,9 +12,8 @@ name: Market audit (Titan V12.0)
 on:
   workflow_dispatch:
   schedule:
-    # 09:15 IST = 03:45 UTC; 11:30 IST = 06:00 UTC (weekdays, India no DST)
-    - cron: "45 3 * * 1-5"
-    - cron: "0 6 * * 1-5"
+    # Every 15 minutes (UTC). GitHub may start a few minutes late.
+    - cron: "*/15 * * * *"
 
 permissions:
   contents: read
