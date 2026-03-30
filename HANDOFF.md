@@ -23,7 +23,21 @@ ICICI session tokens are short-lived. Before each scheduled run (or when this ap
 
 ## Schedule (GitHub)
 
-Workflow uses cron `*/15 * * * *` (every **15 minutes**, UTC). ICICI session expiry will cause failures until you refresh the token—often several times per day if you run this frequently.
+Workflow uses cron `0 * * * *` (every **hour** at minute **:00 UTC**). ICICI session tokens still expire independently—refresh when the API reports expiry.
+
+## Automating Breeze session refresh?
+
+**Fully automatic refresh is not supported by ICICI in a safe, ToS-compliant way for this project.** Breeze issues `API_Session` only after **browser login** (often **OTP**). There is no documented “refresh token” you can call from GitHub Actions with only `BREEZE_API_KEY` + `BREEZE_SECRET`.
+
+**Practical options:**
+
+| Approach | Notes |
+|----------|--------|
+| **Manual** | Run `python scripts/breeze_session.py`, then paste the token into GitHub **Secrets** and/or **Supabase `session_config`**. |
+| **Semi-automated** | A **local scheduled task** (Windows Task Scheduler) that opens the script each morning; you complete OTP once, then copy the token to GitHub/Supabase. |
+| **Not recommended** | Headless browser + stored banking credentials: brittle, high risk, may violate ICICI terms. |
+
+If ICICI ever documents an unattended session API, you could wire a small job to update `session_config`—until then, keep the human-in-the-loop step.
 
 ## Verify
 

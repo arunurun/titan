@@ -12,8 +12,8 @@ name: Market audit (Titan V12.0)
 on:
   workflow_dispatch:
   schedule:
-    # Every 15 minutes (UTC). GitHub may start a few minutes late.
-    - cron: "*/15 * * * *"
+    # Every hour at :00 UTC. GitHub may start a few minutes late.
+    - cron: "0 * * * *"
 
 permissions:
   contents: read
