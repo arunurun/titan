@@ -4,6 +4,7 @@
 !.env.example
 config/.env
 config/.env.*
+!config/.env.example
 
 # Python
 __pycache__/
