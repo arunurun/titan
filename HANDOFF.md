@@ -39,6 +39,10 @@ Workflow runs **weekdays (Mon–Fri)** during **09:15–15:30 IST**: hourly at *
 
 If ICICI ever documents an unattended session API, you could wire a small job to update `session_config`—until then, keep the human-in-the-loop step.
 
+## Optional: email after each successful `--live`
+
+Set `SMTP_HOST`, `SMTP_PORT` (default 587), `SMTP_USER`, `SMTP_PASSWORD`, `EMAIL_FROM`, `EMAIL_TO` (comma-separated). Same post text as Supabase. In GitHub, add matching **repository secrets** (see `market_audit.yml` `Live market audit` env).
+
 ## Verify
 
 ```powershell

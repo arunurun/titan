@@ -34,6 +34,7 @@ if str(SRC) not in sys.path:
 from brain import generate_titan_narrative
 from compliance import compliance_scan
 from config_loader import load_config
+from email_notify import send_success_post_email
 from titan_engine import (
     calculate_absorption_ratio,
     calculate_intent_score,
@@ -132,6 +133,7 @@ def run_live() -> None:
         audit["option_chain_unavailable"] = True
     post = generate_titan_narrative(audit, api_key=cfg.gemini_api_key)
     save_audit_log({"audit": audit, "post": post}, cfg)
+    send_success_post_email(post)
     print(format_social_post(post))
 
 

@@ -4,6 +4,7 @@
 # Repository secrets: SUPABASE_URL, SUPABASE_KEY (service role: read session_config + write audit_logs),
 #   BREEZE_API_KEY, BREEZE_SECRET, GEMINI_API_KEY
 # Recommended: BREEZE_SESSION_TOKEN — daily Breeze token; if set, bash writes GITHUB_ENV (no Supabase read).
+# Optional email: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, EMAIL_FROM, EMAIL_TO, SMTP_USE_TLS
 #
 # If the repo root is not the Titan folder, set defaults.run.working-directory below (e.g. Titan).
 
@@ -69,4 +70,11 @@ jobs:
           BREEZE_API_KEY: ${{ secrets.BREEZE_API_KEY }}
           BREEZE_SECRET: ${{ secrets.BREEZE_SECRET }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          SMTP_USE_TLS: ${{ secrets.SMTP_USE_TLS }}
         run: python main.py --live
