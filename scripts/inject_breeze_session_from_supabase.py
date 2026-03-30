@@ -1,9 +1,11 @@
 """
-Load BREEZE_SESSION_TOKEN from Supabase `session_config` into GITHUB_ENV (GitHub Actions).
+Load BREEZE_SESSION_TOKEN into GITHUB_ENV for GitHub Actions (used by main.py --live).
 
-Requires: SUPABASE_URL, SUPABASE_KEY (service role recommended), table session_config row id=1.
+Resolution order:
+1) If env BREEZE_SESSION_TOKEN is non-empty (e.g. repository secret), use it — no Supabase read.
+2) Else read from Supabase table `session_config` (requires SUPABASE_URL + service_role SUPABASE_KEY).
 
-Local test: set env and run without GITHUB_ENV — prints token to stdout only if safe (avoid in CI logs).
+Local: typically use .env; this script targets CI.
 """
 
 from __future__ import annotations
@@ -25,11 +27,34 @@ def _append_github_env_multiline(name: str, value: str, path: str) -> None:
         f.write(f"{name}<<{delim}\n{value}\n{delim}\n")
 
 
+def _write_token_to_github_env(token: str, source: str) -> int:
+    gh_env = os.environ.get("GITHUB_ENV")
+    if not gh_env:
+        print("GITHUB_ENV not set; not printing token. Use in Actions only.", file=sys.stderr)
+        return 1
+    _append_github_env_multiline("BREEZE_SESSION_TOKEN", token, gh_env)
+    print(f"Injected BREEZE_SESSION_TOKEN into GITHUB_ENV ({source}).")
+    return 0
+
+
 def main() -> int:
+    gh_env = os.environ.get("GITHUB_ENV")
+    if not gh_env:
+        print("GITHUB_ENV not set; this script is intended for GitHub Actions.", file=sys.stderr)
+        return 1
+
+    override = (os.environ.get("BREEZE_SESSION_TOKEN") or "").strip()
+    if override:
+        return _write_token_to_github_env(override, "repository secret / env")
+
     url = os.environ.get("SUPABASE_URL", "").strip()
     key = os.environ.get("SUPABASE_KEY", "").strip()
     if not url or not key:
-        print("SUPABASE_URL and SUPABASE_KEY are required", file=sys.stderr)
+        print(
+            "Set repository secret BREEZE_SESSION_TOKEN, or supply SUPABASE_URL + SUPABASE_KEY "
+            "to read session_config.",
+            file=sys.stderr,
+        )
         return 1
 
     client = create_client(url, key)
@@ -38,25 +63,21 @@ def main() -> int:
     if not data:
         print(
             "session_config returned no rows. Fix one of:\n"
-            "  1) Supabase SQL Editor: run sql/create_session_config.sql (creates row id=1).\n"
-            "  2) GitHub secret SUPABASE_KEY = Settings → API → service_role (not anon).\n"
-            "  3) Table Editor: add a row with a non-empty breeze_session_token.",
+            "  1) Repository secret BREEZE_SESSION_TOKEN (paste daily Breeze token).\n"
+            "  2) Supabase SQL: run sql/create_session_config.sql then set breeze_session_token.\n"
+            "  3) GitHub secret SUPABASE_KEY = service_role (not anon) if using RLS.",
             file=sys.stderr,
         )
         return 1
     token = (data[0].get("breeze_session_token") or "").strip()
     if not token:
-        print("breeze_session_token is empty; paste today token in Supabase Table Editor.", file=sys.stderr)
+        print(
+            "breeze_session_token is empty in Supabase; set repository secret BREEZE_SESSION_TOKEN or edit Table Editor.",
+            file=sys.stderr,
+        )
         return 1
 
-    gh_env = os.environ.get("GITHUB_ENV")
-    if gh_env:
-        _append_github_env_multiline("BREEZE_SESSION_TOKEN", token, gh_env)
-        print("Injected BREEZE_SESSION_TOKEN into GITHUB_ENV for subsequent steps.")
-    else:
-        print("GITHUB_ENV not set; not printing token. Use in Actions only.", file=sys.stderr)
-        return 1
-    return 0
+    return _write_token_to_github_env(token, "Supabase session_config")
 
 
 if __name__ == "__main__":

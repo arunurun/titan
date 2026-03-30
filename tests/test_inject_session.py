@@ -18,7 +18,8 @@ def inject_mod():
     return mod
 
 
-def test_inject_writes_github_env(inject_mod, tmp_path):
+def test_inject_writes_github_env(inject_mod, tmp_path, monkeypatch):
+    monkeypatch.delenv("BREEZE_SESSION_TOKEN", raising=False)
     gh = tmp_path / "ghenv"
     os.environ["GITHUB_ENV"] = str(gh)
     os.environ.setdefault("SUPABASE_URL", "https://x.supabase.co")
@@ -35,6 +36,19 @@ def test_inject_writes_github_env(inject_mod, tmp_path):
         text = gh.read_text(encoding="utf-8")
         assert "BREEZE_SESSION_TOKEN" in text
         assert "tok=123" in text
+        mock_client.table.assert_called_once()
     finally:
         if "GITHUB_ENV" in os.environ and os.environ["GITHUB_ENV"] == str(gh):
             del os.environ["GITHUB_ENV"]
+
+
+def test_inject_prefers_repository_secret_skips_supabase(inject_mod, tmp_path, monkeypatch):
+    monkeypatch.setenv("BREEZE_SESSION_TOKEN", "secret-token-xyz")
+    gh = tmp_path / "ghenv"
+    monkeypatch.setenv("GITHUB_ENV", str(gh))
+
+    mock_create = MagicMock()
+    with patch.object(inject_mod, "create_client", mock_create):
+        assert inject_mod.main() == 0
+    mock_create.assert_not_called()
+    assert "secret-token-xyz" in gh.read_text(encoding="utf-8")

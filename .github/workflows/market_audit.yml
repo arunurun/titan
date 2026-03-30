@@ -1,8 +1,9 @@
 # Private repo recommended. Paste the daily Breeze session token into Supabase `session_config`
 # (Table Editor → row id=1 → breeze_session_token) before ~09:15 IST, or use workflow_dispatch after pasting.
 #
-# Repository secrets: SUPABASE_URL, SUPABASE_KEY (service role: can read session_config + write audit_logs),
+# Repository secrets: SUPABASE_URL, SUPABASE_KEY (service role: read session_config + write audit_logs),
 #   BREEZE_API_KEY, BREEZE_SECRET, GEMINI_API_KEY
+# Optional: BREEZE_SESSION_TOKEN — if set, inject step skips Supabase (paste daily token in GitHub instead).
 #
 # If the repo root is not the Titan folder, set defaults.run.working-directory below (e.g. Titan).
 
@@ -34,10 +35,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Load Breeze session token from Supabase
+      - name: Load Breeze session token (secret or Supabase)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          BREEZE_SESSION_TOKEN: ${{ secrets.BREEZE_SESSION_TOKEN }}
         run: python scripts/inject_breeze_session_from_supabase.py
 
       - name: Live market audit
