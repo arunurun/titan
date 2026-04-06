@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
@@ -12,8 +13,16 @@ from typing import Any
 from google import genai
 from google.genai import types
 
+try:
+    from google.genai.errors import APIError as GenaiAPIError
+except ImportError:
+    GenaiAPIError = None  # type: ignore[misc, assignment]
+
+logger = logging.getLogger(__name__)
+
 from compliance import compliance_scan
 from config_loader import parse_gemini_api_keys_from_env
+from json_util import sanitize_for_json
 
 TITAN_V12_SYSTEM_INSTRUCTION = """You are Titan V12.0 Forensic Analyst.
 Protocol:
@@ -50,10 +59,53 @@ def _resolve_gemini_keys(
     return list(parse_gemini_api_keys_from_env())
 
 
+def _is_retryable_gemini_error(err_s: str) -> bool:
+    """Quota, rate limits, and transient server/load errors (retry with backoff or next key)."""
+    lower = err_s.lower()
+    if "429" in err_s or "RESOURCE_EXHAUSTED" in err_s or "quota" in lower:
+        return True
+    # 503 UNAVAILABLE / model overload — common on flash-lite free tier peaks
+    if "503" in err_s or "UNAVAILABLE" in err_s or "high demand" in lower:
+        return True
+    if "502" in err_s or "504" in err_s or "timeout" in lower:
+        return True
+    return False
+
+
+_RETRYABLE_HTTP_CODES = frozenset({429, 500, 502, 503, 504})
+
+
+def _is_retryable_gemini_exception(exc: BaseException) -> bool:
+    """
+    Detect retryable errors even when message text is odd or nested (SDK / tenacity).
+    google.genai.errors.APIError uses .code (HTTP status), not .status_code.
+    """
+    chain: list[BaseException] = []
+    cur: BaseException | None = exc
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        chain.append(cur)
+        if GenaiAPIError is not None and isinstance(cur, GenaiAPIError):
+            code = getattr(cur, "code", None)
+            if isinstance(code, int) and code in _RETRYABLE_HTTP_CODES:
+                return True
+        code = getattr(cur, "status_code", None)
+        if isinstance(code, int) and code in _RETRYABLE_HTTP_CODES:
+            return True
+        nxt = cur.__cause__ or cur.__context__
+        cur = nxt if isinstance(nxt, BaseException) else None
+
+    for e in chain:
+        if _is_retryable_gemini_error(str(e)):
+            return True
+    return False
+
+
 def _generate(keys: list[str], model: str, user_text: str) -> str:
     """
-    Try keys in order. On quota errors (429), switch to the next key before long backoff.
-    On the last key, retry with backoff (same as single-key behavior).
+    Try keys in order. On quota (429) or transient API errors (503 overload, etc.),
+    switch to the next key when available; otherwise backoff and retry.
     """
     if not keys:
         raise ValueError("No Gemini API keys configured")
@@ -70,15 +122,15 @@ def _generate(keys: list[str], model: str, user_text: str) -> str:
                 return (resp.text or "").strip()
             except Exception as e:
                 last_err = e
-                err_s = str(e)
-                is_quota = (
-                    "429" in err_s
-                    or "RESOURCE_EXHAUSTED" in err_s
-                    or "quota" in err_s.lower()
-                )
-                if not is_quota:
+                if not _is_retryable_gemini_exception(e):
                     raise
+                err_s = str(e)
                 if ki + 1 < len(keys):
+                    logger.info(
+                        "Gemini transient/quota error on key %s/%s; trying next API key",
+                        ki + 1,
+                        len(keys),
+                    )
                     break
                 if attempt >= 5:
                     raise
@@ -146,7 +198,7 @@ def generate_titan_narrative(
     keys = _resolve_gemini_keys(api_keys, api_key)
     prompt = (
         "Audit payload (JSON):\n"
-        + json.dumps(audit_data, default=str, indent=2)
+        + json.dumps(sanitize_for_json(audit_data), default=str, indent=2)
         + "\n\nRespond with the post body only."
     )
 
