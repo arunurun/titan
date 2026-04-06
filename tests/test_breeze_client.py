@@ -47,7 +47,12 @@ def test_fetch_nifty_data_success(mock_breeze_cls):
 
 
 @patch("breeze_client.BreezeConnect")
-def test_fetch_equity_data_passes_symbol_exchange(mock_breeze_cls):
+def test_fetch_equity_data_passes_symbol_exchange(mock_breeze_cls, monkeypatch):
+    # Avoid live ICICI scrip download in unit test; RELIANCE maps to RELIND on real master.
+    monkeypatch.setattr(
+        "breeze_client.resolve_breeze_stock_code",
+        lambda sym, ex: sym.strip().upper(),
+    )
     api = MagicMock()
     api.get_historical_data.return_value = {
         "Success": [{"close": 50.0, "volume": 1000, "datetime": "2024-01-01"}],

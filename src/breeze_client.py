@@ -11,6 +11,8 @@ import pandas as pd
 from breeze_connect import BreezeConnect
 from zoneinfo import ZoneInfo
 
+from breeze_scrip_master import resolve_breeze_stock_code
+
 IST = ZoneInfo("Asia/Kolkata")
 
 
@@ -209,17 +211,22 @@ def fetch_equity_data(
     Retries up to `max_retries` times with exponential backoff on failure.
     """
     breeze = breeze or create_breeze_session(config)
-    sc = stock_code.strip().upper()
+    sc_raw = stock_code.strip().upper()
     ex = exchange_code.strip().upper()
     if ex not in ("NSE", "BSE"):
         raise ValueError(f"exchange_code must be NSE or BSE, got {exchange_code!r}")
+
+    # Breeze expects ICICI scrip codes (e.g. BHAELE), not always NSE tickers (e.g. BEL).
+    sc = resolve_breeze_stock_code(sc_raw, ex)
+    if sc != sc_raw:
+        logger.info("Breeze stock_code resolved %s (%s) -> %s", sc_raw, ex, sc)
 
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=lookback_calendar_days)
     from_date = start.strftime("%Y-%m-%dT00:00:00.000Z")
     to_date = end.strftime("%Y-%m-%dT23:59:59.999Z")
 
-    label = f"{sc} ({ex})"
+    label = f"{sc_raw}->{sc} ({ex})" if sc != sc_raw else f"{sc} ({ex})"
     last_err: Exception | None = None
     for attempt in range(max_retries + 1):
         try:
