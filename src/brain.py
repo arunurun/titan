@@ -20,6 +20,17 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
+def _env_truthy(name: str, *, default: bool = True) -> bool:
+    """Parse GEMINI_* style flags: empty -> default; 0/false/off -> False."""
+    raw = os.environ.get(name, "").strip().lower()
+    if raw == "":
+        return default
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return raw in ("1", "true", "yes", "on")
+
+
 from compliance import compliance_scan
 from config_loader import parse_gemini_api_keys_from_env
 from json_util import sanitize_for_json
@@ -193,14 +204,19 @@ def generate_titan_narrative(
     Runs a deterministic policy check; raises if violations remain after one retry.
     Model: pass model_name, or set GEMINI_MODEL (default gemini-2.5-flash-lite).
     Pass api_keys (or set GEMINI_API_KEY / GEMINI_API_KEYS / GEMINI_API_KEY_2 in env) to rotate on 429.
+    Set GEMINI_COMPLIANCE_RETRY=false to skip the second API call when the first draft fails compliance
+    (saves quota; narrative may fail instead of repairing).
     """
     resolved_model = (model_name or os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash-lite").strip()
     keys = _resolve_gemini_keys(api_keys, api_key)
-    prompt = (
-        "Audit payload (JSON):\n"
-        + json.dumps(sanitize_for_json(audit_data), default=str, indent=2)
-        + "\n\nRespond with the post body only."
+    compact = _env_truthy("GEMINI_COMPACT_PROMPT", default=True)
+    payload = sanitize_for_json(audit_data)
+    json_body = (
+        json.dumps(payload, default=str, separators=(",", ":"), ensure_ascii=False)
+        if compact
+        else json.dumps(payload, default=str, indent=2)
     )
+    prompt = "Audit payload (JSON):\n" + json_body + "\n\nRespond with the post body only."
 
     def _gen(user_text: str) -> str:
         try:
@@ -211,6 +227,11 @@ def generate_titan_narrative(
     text = _gen(prompt)
     if _policy_check_passes(text):
         return text
+    if not _env_truthy("GEMINI_COMPLIANCE_RETRY", default=True):
+        raise ValueError(
+            "[Gemini] Policy check failed on first draft; narrative blocked "
+            "(GEMINI_COMPLIANCE_RETRY=false, no repair call)"
+        )
     repair = (
         "Your previous draft failed compliance (forbidden wording). "
         "Rewrite the same insights using neutral forensic language only. "

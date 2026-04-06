@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock, patch
 
+import pytest
 from google.genai.errors import ClientError
 
 from brain import TITAN_V12_SYSTEM_INSTRUCTION, generate_titan_narrative
@@ -70,6 +71,17 @@ def test_generate_titan_narrative_policy_pass(mock_client_cls):
     out = generate_titan_narrative({"x": 1}, api_key="dummy")
     assert "positioning" in out.lower() or "index" in out.lower()
     mock_client_cls.assert_called_once_with(api_key="dummy")
+
+
+def test_generate_skips_compliance_repair_when_env_disabled(monkeypatch):
+    monkeypatch.setenv("GEMINI_COMPLIANCE_RETRY", "false")
+    bad = MagicMock(text="You should buy here.")
+    instance = MagicMock()
+    instance.models.generate_content.return_value = bad
+    with patch("brain.genai.Client", return_value=instance):
+        with pytest.raises(ValueError, match="GEMINI_COMPLIANCE_RETRY=false"):
+            generate_titan_narrative({"x": 1}, api_key="dummy")
+    assert instance.models.generate_content.call_count == 1
 
 
 @patch("brain.genai.Client")

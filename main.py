@@ -168,21 +168,29 @@ def main() -> None:
         help="Process only the first N symbols from the sector CSV (free-tier friendly)",
     )
     p.add_argument(
+        "--sector-per-symbol-narrative",
+        action="store_true",
+        help="One Gemini call per symbol (high quota). Default is one digest call for the whole sector.",
+    )
+    p.add_argument(
         "--sector-digest",
         action="store_true",
-        help="One Gemini call for the whole sector (metrics still per symbol); avoids per-symbol quota",
+        help=argparse.SUPPRESS,
     )
     args = p.parse_args()
 
     if args.sector.strip():
         from sector_audit import run_sector_live
 
+        # --sector-digest kept for backward compatibility (no-op; digest is default).
+        sector_digest = not args.sector_per_symbol_narrative
+
         try:
             run_sector_live(
                 args.sector.strip(),
                 max_workers=args.sector_workers,
                 max_symbols=args.sector_max_symbols,
-                digest=args.sector_digest,
+                digest=sector_digest,
             )
         except Exception as e:
             summary = str(e).strip().split("\n", 1)[0].strip()

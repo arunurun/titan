@@ -118,7 +118,7 @@ def run_sector_live(
     *,
     max_workers: int | None = None,
     max_symbols: int | None = None,
-    digest: bool = False,
+    digest: bool = True,
 ) -> None:
     from email_notify import send_success_post_email
 

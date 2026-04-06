@@ -85,7 +85,7 @@ def test_run_sector_live_calls_workers(mock_load, mock_process, mock_email):
         {"ok": True, "symbol": "B", "exchange": "NSE", "post": "pb", "error": None},
     ]
 
-    run_sector_live("defence", max_workers=2)
+    run_sector_live("defence", max_workers=2, digest=False)
 
     assert mock_process.call_count == 2
     mock_email.assert_called_once()
@@ -103,7 +103,7 @@ def test_run_sector_live_all_fail_raises(mock_load, mock_email):
 
     with patch("sector_audit._process_one", side_effect=boom):
         with pytest.raises(RuntimeError, match="All 1 instruments failed"):
-            run_sector_live("defence", max_workers=1)
+            run_sector_live("defence", max_workers=1, digest=False)
 
     mock_email.assert_not_called()
 

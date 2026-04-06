@@ -90,8 +90,8 @@ jobs:
         run: |
           set -e
           if [ "${{ github.ref_name }}" = "sector" ]; then
-            # One Gemini generate_content for the whole sector (free tier ~20/day vs ~27 names per-symbol).
-            python main.py --sector defence --sector-workers 4 --sector-digest
+            # Default: one digest narrative per sector run (use --sector-per-symbol-narrative for per-stock posts).
+            python main.py --sector defence --sector-workers 4
           else
             python main.py --live
           fi

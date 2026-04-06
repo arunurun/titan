@@ -39,18 +39,18 @@ def test_sector_invokes_run_sector_live(monkeypatch):
     main_mod.main()
 
     mock_run.assert_called_once_with(
-        "defence", max_workers=None, max_symbols=None, digest=False
+        "defence", max_workers=None, max_symbols=None, digest=True
     )
 
 
-def test_sector_passes_digest_and_max_symbols(monkeypatch):
+def test_sector_passes_max_symbols(monkeypatch):
     import main as main_mod
     import sector_audit
 
     monkeypatch.setattr(
         sys,
         "argv",
-        ["prog", "--sector", "defence", "--sector-digest", "--sector-max-symbols", "5"],
+        ["prog", "--sector", "defence", "--sector-max-symbols", "5"],
     )
     mock_run = MagicMock()
     monkeypatch.setattr(sector_audit, "run_sector_live", mock_run)
@@ -59,6 +59,25 @@ def test_sector_passes_digest_and_max_symbols(monkeypatch):
 
     mock_run.assert_called_once_with(
         "defence", max_workers=None, max_symbols=5, digest=True
+    )
+
+
+def test_sector_per_symbol_narrative(monkeypatch):
+    import main as main_mod
+    import sector_audit
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["prog", "--sector", "defence", "--sector-per-symbol-narrative"],
+    )
+    mock_run = MagicMock()
+    monkeypatch.setattr(sector_audit, "run_sector_live", mock_run)
+
+    main_mod.main()
+
+    mock_run.assert_called_once_with(
+        "defence", max_workers=None, max_symbols=None, digest=False
     )
 
 
@@ -73,7 +92,7 @@ def test_sector_passes_sector_workers(monkeypatch):
     main_mod.main()
 
     mock_run.assert_called_once_with(
-        "defence", max_workers=8, max_symbols=None, digest=False
+        "defence", max_workers=8, max_symbols=None, digest=True
     )
 
 
