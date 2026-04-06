@@ -5,6 +5,7 @@ import pytest
 
 from breeze_client import (
     create_breeze_session,
+    fetch_equity_data,
     fetch_nifty_data,
     fetch_nifty_option_metrics,
     fetch_nifty_option_metrics_with_expiry_fallback,
@@ -43,6 +44,20 @@ def test_fetch_nifty_data_success(mock_breeze_cls):
     mock_breeze_cls.return_value = api
     df = fetch_nifty_data(make_cfg(), max_retries=1)
     assert len(df) == 1
+
+
+@patch("breeze_client.BreezeConnect")
+def test_fetch_equity_data_passes_symbol_exchange(mock_breeze_cls):
+    api = MagicMock()
+    api.get_historical_data.return_value = {
+        "Success": [{"close": 50.0, "volume": 1000, "datetime": "2024-01-01"}],
+    }
+    mock_breeze_cls.return_value = api
+    df = fetch_equity_data(make_cfg(), "RELIANCE", "NSE", breeze=api, max_retries=0)
+    assert len(df) == 1
+    call_kw = api.get_historical_data.call_args[1]
+    assert call_kw["stock_code"] == "RELIANCE"
+    assert call_kw["exchange_code"] == "NSE"
 
 
 @patch("breeze_client.BreezeConnect")

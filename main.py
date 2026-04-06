@@ -141,8 +141,36 @@ def run_live() -> None:
 def main() -> None:
     p = argparse.ArgumentParser(description="Titan V12.0")
     p.add_argument("--dry-run", action="store_true", help="Simulate with dummy data")
-    p.add_argument("--live", action="store_true", help="Fetch via Breeze and persist")
+    p.add_argument("--live", action="store_true", help="Fetch NIFTY via Breeze and persist")
+    p.add_argument(
+        "--sector",
+        type=str,
+        default="",
+        metavar="ID",
+        help="Sector audit: load data/sectors/<id>.csv (e.g. defence), parallel equity runs",
+    )
+    p.add_argument(
+        "--sector-workers",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Thread pool size for --sector (default: sector_audit.MAX_WORKERS)",
+    )
     args = p.parse_args()
+
+    if args.sector.strip():
+        from sector_audit import run_sector_live
+
+        try:
+            run_sector_live(args.sector.strip(), max_workers=args.sector_workers)
+        except Exception as e:
+            summary = str(e).strip().split("\n", 1)[0].strip()
+            if len(summary) > 180:
+                summary = summary[:177] + "..."
+            send_failure_email(summary, detail=traceback.format_exc())
+            raise
+        return
+
     if args.live:
         try:
             run_live()

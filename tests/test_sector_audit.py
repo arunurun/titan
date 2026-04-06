@@ -1,0 +1,88 @@
+"""Sector equity audit (cash metrics, mocked Breeze/Gemini)."""
+
+from unittest.mock import MagicMock, patch
+
+import pandas as pd
+import pytest
+
+from config_loader import TitanConfig
+from sector_registry import SectorInstrument
+
+
+def make_cfg() -> TitanConfig:
+    return TitanConfig(
+        breeze_api_key="k",
+        breeze_secret="s",
+        breeze_session_token="t",
+        gemini_api_key="g",
+        supabase_url="https://x.supabase.co",
+        supabase_key="sk",
+    )
+
+
+def test_build_equity_live_audit_success(monkeypatch):
+    from sector_audit import build_equity_live_audit
+
+    closes = [100.0 + i * 0.1 for i in range(30)]
+    df = pd.DataFrame({"close": closes, "volume": [1e6] * 30})
+    monkeypatch.setattr("breeze_client.fetch_equity_data", lambda *a, **k: df)
+    monkeypatch.setattr(
+        "brain.generate_titan_narrative", lambda audit, api_key=None: "Post body"
+    )
+
+    breeze = MagicMock()
+    inst = SectorInstrument("HAL", "NSE")
+    audit, post = build_equity_live_audit(make_cfg(), breeze, inst, sector_id="defence")
+    assert post == "Post body"
+    assert audit["symbol"] == "HAL"
+    assert audit["sector"] == "defence"
+    assert audit["option_chain_unavailable"] is True
+
+
+def test_build_equity_live_audit_empty_raises(monkeypatch):
+    from sector_audit import build_equity_live_audit
+
+    monkeypatch.setattr("breeze_client.fetch_equity_data", lambda *a, **k: pd.DataFrame())
+
+    breeze = MagicMock()
+    inst = SectorInstrument("X", "NSE")
+    with pytest.raises(RuntimeError, match="No rows"):
+        build_equity_live_audit(make_cfg(), breeze, inst, sector_id="defence")
+
+
+@patch("email_notify.send_success_post_email")
+@patch("sector_audit._process_one")
+@patch("sector_audit.load_sector_instruments")
+def test_run_sector_live_calls_workers(mock_load, mock_process, mock_email):
+    from sector_audit import run_sector_live
+
+    mock_load.return_value = [
+        SectorInstrument("A", "NSE"),
+        SectorInstrument("B", "NSE"),
+    ]
+    mock_process.side_effect = [
+        {"ok": True, "symbol": "A", "exchange": "NSE", "post": "pa", "error": None},
+        {"ok": True, "symbol": "B", "exchange": "NSE", "post": "pb", "error": None},
+    ]
+
+    run_sector_live("defence", max_workers=2)
+
+    assert mock_process.call_count == 2
+    mock_email.assert_called_once()
+
+
+@patch("email_notify.send_success_post_email")
+@patch("sector_audit.load_sector_instruments")
+def test_run_sector_live_all_fail_raises(mock_load, mock_email):
+    from sector_audit import run_sector_live
+
+    mock_load.return_value = [SectorInstrument("Z", "NSE")]
+
+    def boom(*a, **k):
+        raise RuntimeError("[Breeze] fail")
+
+    with patch("sector_audit._process_one", side_effect=boom):
+        with pytest.raises(RuntimeError, match="All 1 instruments failed"):
+            run_sector_live("defence", max_workers=1)
+
+    mock_email.assert_not_called()
