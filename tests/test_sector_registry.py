@@ -100,6 +100,8 @@ def test_real_defence_file_exists():
     assert "BSE" in exchanges
     assert any(i.symbol == "SIKA" and i.exchange == "BSE" for i in inst)
     assert any(i.symbol == "HIGHENE" and i.exchange == "BSE" for i in inst)
+    assert any(i.symbol == "CFF" and i.exchange == "BSE" for i in inst)
+    assert any(i.symbol == "TANEJAERO" and i.exchange == "BSE" for i in inst)
 
 
 def test_sectors_dir_under_data():

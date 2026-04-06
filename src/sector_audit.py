@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -13,6 +14,9 @@ logger = logging.getLogger(__name__)
 
 # Parallel sector fetches (each worker opens its own Breeze session; keep modest for API limits).
 MAX_WORKERS = 4
+
+# Serialize Gemini calls so sector threads do not burst past rate limits together.
+_GEMINI_SECTOR_LOCK = threading.Lock()
 
 
 def build_equity_live_audit(
@@ -67,7 +71,8 @@ def build_equity_live_audit(
         "rows": len(df),
         "option_chain_unavailable": True,
     }
-    post = generate_titan_narrative(audit, api_key=cfg.gemini_api_key)
+    with _GEMINI_SECTOR_LOCK:
+        post = generate_titan_narrative(audit, api_key=cfg.gemini_api_key)
     return audit, post
 
 

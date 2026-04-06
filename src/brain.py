@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import time
 from typing import Any
 
 from google import genai
@@ -36,12 +38,30 @@ def _make_client(api_key: str | None) -> genai.Client:
 
 
 def _generate(client: genai.Client, model: str, user_text: str) -> str:
-    resp = client.models.generate_content(
-        model=model,
-        contents=user_text,
-        config=_GEN_CONFIG,
-    )
-    return (resp.text or "").strip()
+    last_err: Exception | None = None
+    for attempt in range(6):
+        try:
+            resp = client.models.generate_content(
+                model=model,
+                contents=user_text,
+                config=_GEN_CONFIG,
+            )
+            return (resp.text or "").strip()
+        except Exception as e:
+            last_err = e
+            err_s = str(e)
+            if "429" not in err_s and "RESOURCE_EXHAUSTED" not in err_s and "quota" not in err_s.lower():
+                raise
+            if attempt >= 5:
+                raise
+            # Free tier and burst limits: back off before retry (sector runs many symbols).
+            delay = 15.0 * (attempt + 1)
+            m = re.search(r"retry in ([0-9.]+)s", err_s, re.I)
+            if m:
+                delay = max(delay, float(m.group(1)) + 2.0)
+            time.sleep(min(delay, 120.0))
+    assert last_err is not None
+    raise last_err
 
 
 def generate_titan_narrative(
