@@ -71,7 +71,8 @@ jobs:
             python scripts/inject_breeze_session_from_supabase.py
           fi
 
-      - name: Live market audit
+      # On branch `sector`: defence sector audit (see data/sectors/defence.csv). Else: NIFTY live.
+      - name: Market audit (NIFTY live or defence sector)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
@@ -85,4 +86,10 @@ jobs:
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           SMTP_USE_TLS: ${{ secrets.SMTP_USE_TLS }}
-        run: python main.py --live
+        run: |
+          set -e
+          if [ "${{ github.ref_name }}" = "sector" ]; then
+            python main.py --sector defence --sector-workers 4
+          else
+            python main.py --live
+          fi
