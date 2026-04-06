@@ -86,4 +86,4 @@ See `config/.env.example`.
 ## Repo / remote
 
 - Remote: `origin` (e.g. `github.com/arunurun/titan.git`).  
-- See `git log -1` on `sector` for latest commit after push.
+- Main feature commit: **`f37fb13`** (quota defaults + env flags + tests/CI + handoff). Doc-only tweaks may follow on `sector`; use `git log -3 --oneline`.
