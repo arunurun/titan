@@ -63,7 +63,13 @@ def generate_titan_narrative(
         + "\n\nRespond with the post body only."
     )
 
-    text = _generate(client, resolved_model, prompt)
+    def _gen(user_text: str) -> str:
+        try:
+            return _generate(client, resolved_model, user_text)
+        except Exception as e:
+            raise RuntimeError(f"[Gemini] {e}") from e
+
+    text = _gen(prompt)
     if _policy_check_passes(text):
         return text
     repair = (
@@ -72,7 +78,7 @@ def generate_titan_narrative(
         "Return the post body only.\n\nPrevious draft:\n"
         + text
     )
-    text2 = _generate(client, resolved_model, repair)
+    text2 = _gen(repair)
     if _policy_check_passes(text2):
         return text2
-    raise ValueError("Policy check failed after retry; narrative blocked.")
+    raise ValueError("[Gemini] Policy check failed after retry; narrative blocked.")

@@ -35,7 +35,7 @@ def create_breeze_session(config: _BreezeCredentials) -> BreezeConnect:
         msg = str(e).lower()
         if "session" in msg and ("expired" in msg or "expire" in msg):
             raise RuntimeError(
-                "Breeze session token expired. Get a new session from ICICI (browser login), then update: "
+                "[Breeze] Session token expired. Get a new session from ICICI (browser login), then update: "
                 "local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. "
                 "Run: python scripts/breeze_session.py"
             ) from e
@@ -73,16 +73,16 @@ def _is_breeze_no_data_response(raw: dict[str, Any]) -> bool:
 
 def _rows_from_option_response(raw: Any, label: str) -> list[dict[str, Any]]:
     if not isinstance(raw, dict):
-        raise RuntimeError(f"{label}: unexpected Breeze response: {raw!r}")
+        raise RuntimeError(f"[Breeze] {label}: unexpected Breeze response: {raw!r}")
     if raw.get("Success") is None:
         # Breeze returns HTTP 200 with Success=None, Error='No Data Found' when chain is empty / unknown expiry.
         if _is_breeze_no_data_response(raw):
             logger.info("%s: no chain data (%s)", label, raw.get("Error"))
             return []
-        raise RuntimeError(f"{label}: unexpected Breeze response: {raw!r}")
+        raise RuntimeError(f"[Breeze] {label}: unexpected Breeze response: {raw!r}")
     rows = raw["Success"]
     if not isinstance(rows, list):
-        raise RuntimeError(f"{label}: Success is not a list: {raw!r}")
+        raise RuntimeError(f"[Breeze] {label}: Success is not a list: {raw!r}")
     return [r for r in rows if isinstance(r, dict)]
 
 
@@ -227,7 +227,7 @@ def fetch_nifty_data(
                 product_type="cash",
             )
             if not isinstance(raw, dict) or raw.get("Success") is None:
-                raise RuntimeError(f"Unexpected Breeze response: {raw!r}")
+                raise RuntimeError(f"[Breeze] Unexpected historical response: {raw!r}")
             rows = raw["Success"]
             if not rows:
                 return pd.DataFrame()
@@ -238,4 +238,4 @@ def fetch_nifty_data(
             logger.warning("Breeze fetch attempt %s failed: %s", attempt + 1, e)
             if attempt < max_retries:
                 time.sleep(backoff_base_seconds * (2**attempt))
-    raise RuntimeError("Breeze fetch failed after retries") from last_err
+    raise RuntimeError("[Breeze] NIFTY historical fetch failed after retries") from last_err

@@ -19,7 +19,7 @@ def test_create_breeze_session_expired_raises_actionable(mock_cls):
     api.generate_session.side_effect = Exception("Session key is expired.")
     mock_cls.return_value = api
     cfg = make_cfg()
-    with pytest.raises(RuntimeError, match="Breeze session token expired"):
+    with pytest.raises(RuntimeError, match=r"\[Breeze\] Session token expired"):
         create_breeze_session(cfg)
 
 

@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import sys
+import traceback
 from pathlib import Path
 
 from dotenv import dotenv_values, load_dotenv
@@ -34,7 +35,7 @@ if str(SRC) not in sys.path:
 from brain import generate_titan_narrative
 from compliance import compliance_scan
 from config_loader import load_config
-from email_notify import send_success_post_email
+from email_notify import send_failure_email, send_success_post_email
 from titan_engine import (
     calculate_absorption_ratio,
     calculate_intent_score,
@@ -109,7 +110,7 @@ def run_live() -> None:
     breeze = create_breeze_session(cfg)
     df = fetch_nifty_data(cfg, breeze=breeze, lookback_calendar_days=60)
     if df.empty:
-        raise RuntimeError("No NIFTY rows returned; task BLOCKED")
+        raise RuntimeError("[Breeze] No NIFTY rows returned; task BLOCKED")
     close_col = "close" if "close" in df.columns else df.columns[-1]
     series = pd.to_numeric(df[close_col], errors="coerce")
     z = calculate_z_score(series, window=20)
@@ -143,7 +144,14 @@ def main() -> None:
     p.add_argument("--live", action="store_true", help="Fetch via Breeze and persist")
     args = p.parse_args()
     if args.live:
-        run_live()
+        try:
+            run_live()
+        except Exception as e:
+            summary = str(e).strip().split("\n", 1)[0].strip()
+            if len(summary) > 180:
+                summary = summary[:177] + "..."
+            send_failure_email(summary, detail=traceback.format_exc())
+            raise
     else:
         run_dry_run()
 

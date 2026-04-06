@@ -98,3 +98,71 @@ def send_success_post_email(post_text: str, *, subject_prefix: str = "Titan V12.
 
     logger.info("Sent audit email to %s", to_list)
     return True
+
+
+def send_failure_email(
+    summary_line: str,
+    *,
+    detail: str = "",
+    subject_prefix: str = "Titan V12.0 audit",
+) -> bool:
+    """
+    Notify on live run failure (same SMTP env as success email). Subject includes summary_line
+    so inbox/GH notifications show Breeze vs Supabase vs Gemini without opening the log.
+    """
+    cfg = _smtp_config()
+    if not cfg:
+        logger.info("Failure email skipped (SMTP not configured).")
+        return False
+
+    host = str(cfg["host"])
+    port = int(cfg["port"])
+    user = str(cfg["user"])
+    password = str(cfg["password"])
+    from_addr = str(cfg["from"])
+    to_list: list[str] = cfg["to"]  # type: ignore[assignment]
+    use_tls = bool(cfg["use_tls"])
+
+    stamp = datetime.now(IST).strftime("%Y-%m-%d %H:%M IST")
+    subj = f"{subject_prefix} FAILED — {summary_line.strip()}"
+    if len(subj) > 200:
+        subj = subj[:197] + "..."
+    body = summary_line.strip()
+    if detail.strip():
+        body = f"{body}\n\n--- Details ---\n{detail.strip()}"
+
+    msg = EmailMessage()
+    msg["Subject"] = subj
+    msg["From"] = from_addr
+    msg["To"] = ", ".join(to_list)
+    msg.set_content(
+        f"Titan live audit failed at {stamp}.\n\n{body}",
+        subtype="plain",
+        charset="utf-8",
+    )
+
+    try:
+        if port == 465:
+            context = ssl.create_default_context()
+            with smtplib.SMTP_SSL(host, port, context=context) as smtp:
+                if user:
+                    smtp.login(user, password)
+                smtp.send_message(msg)
+        else:
+            with smtplib.SMTP(host, port) as smtp:
+                smtp.ehlo()
+                if use_tls:
+                    smtp.starttls(context=ssl.create_default_context())
+                    smtp.ehlo()
+                if user:
+                    smtp.login(user, password)
+                smtp.send_message(msg)
+    except OSError as e:
+        logger.warning("Failure email: SMTP connection failed: %s", e)
+        return False
+    except smtplib.SMTPException as e:
+        logger.warning("Failure email: SMTP send failed: %s", e)
+        return False
+
+    logger.info("Sent failure notification to %s", to_list)
+    return True

@@ -29,9 +29,12 @@ def test_load_breeze_config_only_breeze_keys(tmp_path):
     assert cfg.breeze_session_token == "c"
 
 
-def test_load_config_missing_raises(monkeypatch):
+def test_load_config_missing_raises(monkeypatch, tmp_path):
     for k in list(os.environ.keys()):
         if k.startswith("BREEZE") or k.startswith("GEMINI") or k.startswith("SUPABASE"):
             monkeypatch.delenv(k, raising=False)
-    with pytest.raises(ValueError):
-        load_config()
+    # Explicit path: do not call load_config() with no args, or repo-root .env would load.
+    missing = tmp_path / "no_env_here.env"
+    assert not missing.exists()
+    with pytest.raises(ValueError, match="Missing or empty required environment variable"):
+        load_config(missing)
