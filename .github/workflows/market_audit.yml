@@ -2,7 +2,7 @@
 # refresh BREEZE_SESSION_TOKEN (GitHub secret / Supabase) whenever the API returns "session expired".
 #
 # Repository secrets: SUPABASE_URL, SUPABASE_KEY (service role: read session_config + write audit_logs),
-#   BREEZE_API_KEY, BREEZE_SECRET, GEMINI_API_KEY
+#   BREEZE_API_KEY, BREEZE_SECRET, GEMINI_API_KEY (optional: GEMINI_API_KEY_2 for rotation on quota)
 # Recommended: BREEZE_SESSION_TOKEN — daily Breeze token; if set, bash writes GITHUB_ENV (no Supabase read).
 # Optional email: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, EMAIL_FROM, EMAIL_TO, SMTP_USE_TLS
 #
@@ -79,6 +79,7 @@ jobs:
           BREEZE_API_KEY: ${{ secrets.BREEZE_API_KEY }}
           BREEZE_SECRET: ${{ secrets.BREEZE_SECRET }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
@@ -89,7 +90,8 @@ jobs:
         run: |
           set -e
           if [ "${{ github.ref_name }}" = "sector" ]; then
-            python main.py --sector defence --sector-workers 4
+            # One Gemini generate_content for the whole sector (free tier ~20/day vs ~27 names per-symbol).
+            python main.py --sector defence --sector-workers 4 --sector-digest
           else
             python main.py --live
           fi

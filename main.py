@@ -17,16 +17,20 @@ ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env", override=True)
 
 
-def _gemini_api_key() -> str:
-    """Prefer env after load_dotenv; fall back to parsing .env (handles unsaved-editor edge cases)."""
-    k = os.environ.get("GEMINI_API_KEY", "").strip()
-    if k:
-        return k
+def _gemini_api_keys_for_dry_run() -> tuple[str, ...]:
+    """Keys from env after load_dotenv; fall back to parsing .env file (unsaved-editor edge cases)."""
+    keys = try_parse_gemini_api_keys_from_env()
+    if keys:
+        return keys
     env_path = ROOT / ".env"
     if env_path.is_file():
         vals = dotenv_values(env_path)
-        return (vals.get("GEMINI_API_KEY") or "").strip()
-    return ""
+        merged = dict(os.environ)
+        for k, v in vals.items():
+            if v is not None:
+                merged[k] = str(v)
+        return try_parse_gemini_api_keys_from_env(merged)
+    return ()
 
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
@@ -34,7 +38,7 @@ if str(SRC) not in sys.path:
 
 from brain import generate_titan_narrative
 from compliance import compliance_scan
-from config_loader import load_config
+from config_loader import load_config, try_parse_gemini_api_keys_from_env
 from email_notify import send_failure_email, send_success_post_email
 from titan_engine import (
     calculate_absorption_ratio,
@@ -86,12 +90,12 @@ def run_dry_run() -> None:
     audit = build_dummy_audit()
     ok, hits = compliance_scan(json.dumps(audit))
     logger.info("dummy audit compliance pre-check (json): ok=%s hits=%s", ok, hits)
-    key = _gemini_api_key()
-    if not key:
-        logger.warning("GEMINI_API_KEY not set; skipping narrative (dry metrics only).")
+    keys = _gemini_api_keys_for_dry_run()
+    if not keys:
+        logger.warning("No Gemini API keys configured; skipping narrative (dry metrics only).")
         print(json.dumps(audit, indent=2))
         return
-    post = generate_titan_narrative(audit, api_key=key)
+    post = generate_titan_narrative(audit, api_keys=keys)
     print(format_social_post(post))
 
 
@@ -132,7 +136,7 @@ def run_live() -> None:
     }
     if opt.get("option_chain_unavailable"):
         audit["option_chain_unavailable"] = True
-    post = generate_titan_narrative(audit, api_key=cfg.gemini_api_key)
+    post = generate_titan_narrative(audit, api_keys=cfg.gemini_api_keys)
     save_audit_log({"audit": audit, "post": post}, cfg)
     send_success_post_email(post)
     print(format_social_post(post))
@@ -156,13 +160,30 @@ def main() -> None:
         metavar="N",
         help="Thread pool size for --sector (default: sector_audit.MAX_WORKERS)",
     )
+    p.add_argument(
+        "--sector-max-symbols",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Process only the first N symbols from the sector CSV (free-tier friendly)",
+    )
+    p.add_argument(
+        "--sector-digest",
+        action="store_true",
+        help="One Gemini call for the whole sector (metrics still per symbol); avoids per-symbol quota",
+    )
     args = p.parse_args()
 
     if args.sector.strip():
         from sector_audit import run_sector_live
 
         try:
-            run_sector_live(args.sector.strip(), max_workers=args.sector_workers)
+            run_sector_live(
+                args.sector.strip(),
+                max_workers=args.sector_workers,
+                max_symbols=args.sector_max_symbols,
+                digest=args.sector_digest,
+            )
         except Exception as e:
             summary = str(e).strip().split("\n", 1)[0].strip()
             if len(summary) > 180:

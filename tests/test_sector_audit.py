@@ -14,10 +14,29 @@ def make_cfg() -> TitanConfig:
         breeze_api_key="k",
         breeze_secret="s",
         breeze_session_token="t",
-        gemini_api_key="g",
+        gemini_api_keys=("g",),
         supabase_url="https://x.supabase.co",
         supabase_key="sk",
     )
+
+
+def test_build_equity_live_audit_skips_narrative(monkeypatch):
+    from sector_audit import build_equity_live_audit
+
+    closes = [100.0 + i * 0.1 for i in range(30)]
+    df = pd.DataFrame({"close": closes, "volume": [1e6] * 30})
+    monkeypatch.setattr("breeze_client.fetch_equity_data", lambda *a, **k: df)
+    mock_gen = MagicMock(return_value="should not run")
+    monkeypatch.setattr("brain.generate_titan_narrative", mock_gen)
+
+    breeze = MagicMock()
+    inst = SectorInstrument("HAL", "NSE")
+    audit, post = build_equity_live_audit(
+        make_cfg(), breeze, inst, sector_id="defence", with_narrative=False
+    )
+    assert post == ""
+    assert audit["symbol"] == "HAL"
+    mock_gen.assert_not_called()
 
 
 def test_build_equity_live_audit_success(monkeypatch):
@@ -27,7 +46,8 @@ def test_build_equity_live_audit_success(monkeypatch):
     df = pd.DataFrame({"close": closes, "volume": [1e6] * 30})
     monkeypatch.setattr("breeze_client.fetch_equity_data", lambda *a, **k: df)
     monkeypatch.setattr(
-        "brain.generate_titan_narrative", lambda audit, api_key=None: "Post body"
+        "brain.generate_titan_narrative",
+        lambda audit, api_key=None, api_keys=None: "Post body",
     )
 
     breeze = MagicMock()
@@ -86,3 +106,44 @@ def test_run_sector_live_all_fail_raises(mock_load, mock_email):
             run_sector_live("defence", max_workers=1)
 
     mock_email.assert_not_called()
+
+
+@patch("email_notify.send_success_post_email")
+@patch("sector_audit._process_one_metrics")
+@patch("sector_audit.load_sector_instruments")
+def test_run_sector_live_digest_one_gemini_call(mock_load, mock_metrics, mock_email):
+    from sector_audit import run_sector_live
+
+    mock_load.return_value = [
+        SectorInstrument("A", "NSE"),
+        SectorInstrument("B", "NSE"),
+    ]
+    mock_metrics.side_effect = [
+        {
+            "ok": True,
+            "symbol": "A",
+            "exchange": "NSE",
+            "audit": {"symbol": "A", "z_score": 1.0, "intent_score": 0.5, "absorption_ratio": 0.3, "rows": 30},
+            "error": None,
+        },
+        {
+            "ok": True,
+            "symbol": "B",
+            "exchange": "NSE",
+            "audit": {"symbol": "B", "z_score": -0.5, "intent_score": 0.2, "absorption_ratio": 0.1, "rows": 25},
+            "error": None,
+        },
+    ]
+    with patch(
+        "brain.generate_sector_digest_narrative", return_value="One combined post"
+    ) as mock_digest:
+        with patch("supabase_log.save_audit_log") as mock_save:
+            run_sector_live("defence", max_workers=2, digest=True)
+
+    mock_digest.assert_called_once()
+    assert mock_save.call_count == 2
+    mock_email.assert_called_once()
+    body = mock_email.call_args[0][0]
+    assert "digest mode: 1 Gemini call" in body
+    assert "One combined post" in body
+    assert "Per-symbol metrics" in body

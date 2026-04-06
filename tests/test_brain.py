@@ -9,6 +9,21 @@ def test_system_instruction_has_protocol():
 
 
 @patch("brain.genai.Client")
+def test_generate_rotates_to_next_key_on_quota(mock_client_cls):
+    err429 = Exception("429 RESOURCE_EXHAUSTED quota")
+    ok = MagicMock(text="Index breadth remains mixed; positioning data only.")
+    c1 = MagicMock()
+    c1.models.generate_content.side_effect = err429
+    c2 = MagicMock()
+    c2.models.generate_content.return_value = ok
+    mock_client_cls.side_effect = [c1, c2]
+    out = generate_titan_narrative({"x": 1}, api_keys=["k1", "k2"])
+    assert "positioning" in out.lower() or "index" in out.lower()
+    assert mock_client_cls.call_args_list[0].kwargs.get("api_key") == "k1"
+    assert mock_client_cls.call_args_list[1].kwargs.get("api_key") == "k2"
+
+
+@patch("brain.genai.Client")
 def test_generate_titan_narrative_policy_pass(mock_client_cls):
     instance = MagicMock()
     mock_client_cls.return_value = instance
