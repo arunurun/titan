@@ -67,7 +67,25 @@ def test_build_equity_live_audit_empty_raises(monkeypatch):
     breeze = MagicMock()
     inst = SectorInstrument("X", "NSE")
     with pytest.raises(RuntimeError, match="No rows"):
-        build_equity_live_audit(make_cfg(), breeze, inst, sector_id="defence")
+        build_equity_live_audit(
+            make_cfg(), breeze, inst, sector_id="defence", strict_data=True
+        )
+
+
+def test_build_equity_live_audit_empty_not_strict_returns_skip(monkeypatch):
+    from sector_audit import build_equity_live_audit
+
+    monkeypatch.setattr("breeze_client.fetch_equity_data", lambda *a, **k: pd.DataFrame())
+
+    breeze = MagicMock()
+    inst = SectorInstrument("X", "NSE")
+    audit, post = build_equity_live_audit(
+        make_cfg(), breeze, inst, sector_id="defence", strict_data=False
+    )
+    assert post == ""
+    assert audit.get("skipped_no_data") is True
+    assert audit["rows"] == 0
+    assert audit["symbol"] == "X"
 
 
 @patch("email_notify.send_success_post_email")

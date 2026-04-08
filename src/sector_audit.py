@@ -27,10 +27,14 @@ def build_equity_live_audit(
     sector_id: str,
     lookback_calendar_days: int = 60,
     with_narrative: bool = True,
+    strict_data: bool = False,
 ) -> tuple[dict[str, Any], str]:
     """
     Cash-market metrics only (z-score, volume absorption, intent blend).
     Option chain / PCR are skipped for sector equities (expiry rules differ per name); flagged in audit.
+
+    With default ``strict_data=False``, empty Breeze history returns ``skipped_no_data`` instead of
+    raising (sector runs skip that symbol). Pass ``strict_data=True`` to fail hard on no rows.
     """
     import pandas as pd
 
@@ -45,9 +49,29 @@ def build_equity_live_audit(
         lookback_calendar_days=lookback_calendar_days,
     )
     if df.empty:
-        raise RuntimeError(
-            f"[Breeze] No rows returned for {inst.symbol} ({inst.exchange}); task BLOCKED"
-        )
+        if strict_data:
+            raise RuntimeError(
+                f"[Breeze] No rows returned for {inst.symbol} ({inst.exchange}); task BLOCKED"
+            )
+        skip: dict[str, Any] = {
+            "benchmark": "equity",
+            "sector_mode": True,
+            "sector": sector_id,
+            "symbol": inst.symbol,
+            "exchange": inst.exchange,
+            "skipped_no_data": True,
+            "z_score": float("nan"),
+            "absorption_ratio": float("nan"),
+            "pcr": float("nan"),
+            "put_oi": 0.0,
+            "call_oi": 0.0,
+            "oi_wall": {"strike": float("nan"), "oi": float("nan")},
+            "option_expiry": None,
+            "intent_score": float("nan"),
+            "rows": 0,
+            "option_chain_unavailable": True,
+        }
+        return skip, ""
     close_col = "close" if "close" in df.columns else df.columns[-1]
     series = pd.to_numeric(df[close_col], errors="coerce")
     z = calculate_z_score(series, window=20)
@@ -85,7 +109,22 @@ def _process_one(cfg: TitanConfig, sector_id: str, inst: SectorInstrument) -> di
     from supabase_log import save_audit_log
 
     breeze = create_breeze_session(cfg)
-    audit, post = build_equity_live_audit(cfg, breeze, inst, sector_id=sector_id)
+    audit, post = build_equity_live_audit(
+        cfg, breeze, inst, sector_id=sector_id, strict_data=False
+    )
+    if audit.get("skipped_no_data"):
+        logger.warning(
+            "Sector instrument skipped (no Breeze data): %s %s",
+            inst.symbol,
+            inst.exchange,
+        )
+        return {
+            "ok": False,
+            "symbol": inst.symbol,
+            "exchange": inst.exchange,
+            "post": "",
+            "error": f"[Breeze] No rows returned for {inst.symbol} ({inst.exchange}); skipped",
+        }
     save_audit_log({"audit": audit, "post": post}, cfg)
     return {
         "ok": True,
@@ -102,8 +141,26 @@ def _process_one_metrics(cfg: TitanConfig, sector_id: str, inst: SectorInstrumen
 
     breeze = create_breeze_session(cfg)
     audit, _ = build_equity_live_audit(
-        cfg, breeze, inst, sector_id=sector_id, with_narrative=False
+        cfg,
+        breeze,
+        inst,
+        sector_id=sector_id,
+        with_narrative=False,
+        strict_data=False,
     )
+    if audit.get("skipped_no_data"):
+        logger.warning(
+            "Sector instrument skipped (no Breeze data): %s %s",
+            inst.symbol,
+            inst.exchange,
+        )
+        return {
+            "ok": False,
+            "symbol": inst.symbol,
+            "exchange": inst.exchange,
+            "audit": None,
+            "error": f"[Breeze] No rows returned for {inst.symbol} ({inst.exchange}); skipped",
+        }
     return {
         "ok": True,
         "symbol": inst.symbol,
