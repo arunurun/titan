@@ -127,25 +127,25 @@
           <input id="workers" value="4" />
         </div>
       </div>
-      <button id="runTitanBtn">Dispatch Run Titan Now</button>
+      <button type="button" id="runTitanBtn">Dispatch Run Titan Now</button>
     </div>
 
     <div class="card">
       <h3>Validate Breeze Token</h3>
-      <button class="secondary" id="validateBtn">Dispatch Validate Token</button>
+      <button type="button" class="secondary" id="validateBtn">Dispatch Validate Token</button>
     </div>
 
     <div class="card">
       <h3>Persist Breeze Token</h3>
       <label>API_Session or redirect URL with API_Session</label>
       <textarea id="tokenInput" rows="3" placeholder="Paste token or redirect URL"></textarea>
-      <button class="warning" id="persistBtn">Dispatch Persist Token</button>
+      <button type="button" class="warning" id="persistBtn">Dispatch Persist Token</button>
     </div>
 
     <div class="card">
       <h3>Latest Workflow Runs</h3>
-      <button id="refreshBtn">Refresh Status</button>
-      <div id="status" class="status">Ready.</div>
+      <button type="button" id="refreshBtn">Refresh Status</button>
+      <div id="status" class="status">Loading UI…</div>
     </div>
   </div>
 
@@ -161,6 +161,10 @@
 
     function setStatus(msg) {
       statusEl.textContent = msg;
+    }
+
+    function setWorking(label) {
+      setStatus(`Working: ${label} ...`);
     }
 
     function cfg() {
@@ -213,6 +217,7 @@
 
     el("runTitanBtn").addEventListener("click", async () => {
       try {
+        setWorking("Dispatch Run Titan");
         await dispatchWorkflow(WORKFLOWS.runTitan, {
           mode: el("runMode").value,
           sector_id: el("sectorId").value.trim(),
@@ -226,6 +231,7 @@
 
     el("validateBtn").addEventListener("click", async () => {
       try {
+        setWorking("Dispatch Validate Token");
         await dispatchWorkflow(WORKFLOWS.validate);
       } catch (e) {
         setStatus(`Validate dispatch failed:\n${e.message}`);
@@ -234,6 +240,7 @@
 
     el("persistBtn").addEventListener("click", async () => {
       try {
+        setWorking("Dispatch Persist Token");
         const tokenInput = el("tokenInput").value.trim();
         if (!tokenInput) throw new Error("Token input is required.");
         await dispatchWorkflow(WORKFLOWS.persist, { breeze_token_input: tokenInput });
@@ -244,6 +251,7 @@
 
     el("refreshBtn").addEventListener("click", async () => {
       try {
+        setWorking("Refresh Status");
         await loadLatestRuns();
       } catch (e) {
         setStatus(`Refresh failed:\n${e.message}`);
@@ -251,19 +259,24 @@
     });
 
     (function init() {
-      const saved = localStorage.getItem("titan_control_token");
-      if (saved) {
-        el("token").value = saved;
-        el("rememberToken").checked = true;
-      }
-      el("rememberToken").addEventListener("change", () => {
-        if (!el("rememberToken").checked) localStorage.removeItem("titan_control_token");
-      });
-      el("token").addEventListener("input", () => {
-        if (el("rememberToken").checked) {
-          localStorage.setItem("titan_control_token", el("token").value);
+      try {
+        const saved = localStorage.getItem("titan_control_token");
+        if (saved) {
+          el("token").value = saved;
+          el("rememberToken").checked = true;
         }
-      });
+        el("rememberToken").addEventListener("change", () => {
+          if (!el("rememberToken").checked) localStorage.removeItem("titan_control_token");
+        });
+        el("token").addEventListener("input", () => {
+          if (el("rememberToken").checked) {
+            localStorage.setItem("titan_control_token", el("token").value);
+          }
+        });
+      } catch (_e) {
+        // Private mode/localStorage disabled should not break UI actions.
+      }
+      setStatus("UI ready. Enter token and tap an action button.");
     })();
   </script>
 </body>
