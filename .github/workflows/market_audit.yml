@@ -31,6 +31,7 @@ permissions:
 
 jobs:
   audit:
+    if: ${{ github.ref_name == 'analysis' || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     defaults:
       run:
