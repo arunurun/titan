@@ -20,6 +20,11 @@ function cfg() {
   const owner = el("owner").value.trim();
   const repo = el("repo").value.trim();
   if (!token || !owner || !repo) throw new Error("Token, owner, and repo are required.");
+  try {
+    localStorage.setItem("titan_control_token", token);
+  } catch (_e) {
+    // Ignore storage failures.
+  }
   return { token, owner, repo };
 }
 
@@ -113,16 +118,7 @@ function initStorage() {
     const saved = localStorage.getItem("titan_control_token");
     if (saved) {
       el("token").value = saved;
-      el("rememberToken").checked = true;
     }
-    el("rememberToken").addEventListener("change", () => {
-      if (!el("rememberToken").checked) localStorage.removeItem("titan_control_token");
-    });
-    el("token").addEventListener("input", () => {
-      if (el("rememberToken").checked) {
-        localStorage.setItem("titan_control_token", el("token").value);
-      }
-    });
   } catch (_e) {
     // Storage may be disabled in private mode; ignore.
   }
