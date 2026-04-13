@@ -23,6 +23,8 @@ class _BreezeCredentials(Protocol):
 
 
 logger = logging.getLogger(__name__)
+# Reduce verbose SDK payload dumps in workflow logs.
+logging.getLogger("APILogger").setLevel(logging.INFO)
 
 
 def create_breeze_session(config: _BreezeCredentials) -> BreezeConnect:
@@ -154,12 +156,21 @@ def fetch_nifty_option_metrics_with_expiry_fallback(
 ) -> dict[str, Any]:
     """Try successive weekly expiries until a chain returns at least one strike or non-zero OI."""
     last_err: Exception | None = None
-    for expiry in iter_weekly_expiry_candidates(weeks_ahead=max_expiry_tries):
+    tried: list[str] = []
+    for i, expiry in enumerate(iter_weekly_expiry_candidates(weeks_ahead=max_expiry_tries), start=1):
+        tried.append(expiry)
         try:
             m = fetch_nifty_option_metrics(breeze, expiry)
-            if m["chain_df"].empty and m["call_oi"] == 0.0 and m["put_oi"] == 0.0:
-                logger.warning("Option chain empty for expiry %s; trying next week.", expiry)
+            # Skip unusable chains where there is no real OI depth yet.
+            if m["call_oi"] == 0.0 and m["put_oi"] == 0.0:
+                logger.warning(
+                    "Option chain has zero OI for expiry %s; trying next week.",
+                    expiry,
+                )
                 continue
+            m["expiry_try_index"] = i
+            m["expiry_tries"] = tried
+            m["fallback_used"] = i > 1
             return m
         except Exception as e:
             last_err = e
@@ -174,6 +185,9 @@ def fetch_nifty_option_metrics_with_expiry_fallback(
         "chain_df": pd.DataFrame(columns=["strike", "oi"]),
         "expiry_date": None,
         "option_chain_unavailable": True,
+        "expiry_try_index": None,
+        "expiry_tries": tried,
+        "fallback_used": len(tried) > 1,
     }
 
 

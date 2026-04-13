@@ -31,7 +31,7 @@ permissions:
 
 jobs:
   audit:
-    if: ${{ github.ref_name == 'analysis' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.ref_name == github.event.repository.default_branch || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -95,7 +95,7 @@ jobs:
           echo "Token injection failed (exit=${{ steps.inject_token.outputs.exit_code }})."
           exit 1
 
-      # On branches `main` and `sector`: defence sector audit. Else: NIFTY live.
+      # On branches `main`, `sector`, `analysis`: defence sector audit. Else: NIFTY live.
       - name: Market audit (NIFTY live or defence sector)
         id: market_audit
         continue-on-error: true
