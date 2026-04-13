@@ -158,6 +158,7 @@ def generate_sector_digest_narrative(
     constituents: list[dict[str, Any]],
     *,
     sector_id: str,
+    comparison_context: dict[str, Any] | None = None,
     model_name: str | None = None,
     api_key: str | None = None,
     api_keys: Sequence[str] | None = None,
@@ -197,6 +198,8 @@ def generate_sector_digest_narrative(
         "constituent_count": len(compact),
         "constituents": compact,
     }
+    if comparison_context:
+        audit_data["comparison_context"] = comparison_context
     return generate_titan_narrative(
         audit_data,
         model_name=model_name,

@@ -128,6 +128,36 @@ def _safe_float(x: Any) -> float:
         return float("nan")
 
 
+def _bucket_name(audit: dict[str, Any]) -> str:
+    eff = _safe_float(audit.get("effective_intent_score", audit.get("intent_score")))
+    z = _safe_float(audit.get("z_score"))
+    ab = _safe_float(audit.get("absorption_ratio"))
+    if audit.get("trap_exit_proxy"):
+        return "trap-risk"
+    if (not math.isnan(eff) and eff >= 65.0) and (not math.isnan(z) and z >= 2.0) and (
+        not math.isnan(ab) and ab >= 1.0
+    ):
+        return "high-conviction-momentum"
+    if (not math.isnan(eff) and eff >= 55.0) or (not math.isnan(z) and z >= 1.5):
+        return "constructive-watchlist"
+    return "neutral-weak"
+
+
+def _short_reason(audit: dict[str, Any]) -> str:
+    z = _safe_float(audit.get("z_score"))
+    ab = _safe_float(audit.get("absorption_ratio"))
+    bits: list[str] = []
+    if not math.isnan(z):
+        bits.append(f"z={z:.2f}")
+    if not math.isnan(ab):
+        bits.append(f"abs={ab:.2f}")
+    if audit.get("trap_exit_proxy"):
+        bits.append("trap-flag")
+    if audit.get("macro_guardrail_applied"):
+        bits.append("macro-throttle")
+    return ", ".join(bits[:3]) if bits else "insufficient data"
+
+
 def _apply_cluster_guardrails(ok_results: list[dict[str, Any]]) -> tuple[float, int]:
     if not ok_results:
         return 0.0, 0
@@ -413,6 +443,7 @@ def _process_one(
         "ok": True,
         "symbol": inst.symbol,
         "exchange": inst.exchange,
+        "audit": audit,
         "post": post,
         "error": None,
     }
@@ -519,6 +550,13 @@ def run_sector_live(
         )
 
     if digest:
+        from analysis_store import persist_sector_run_analytics
+        from analysis_store import (
+            build_comparison_payload,
+            persist_llm_digest_memory,
+            quality_checks_for_run,
+            update_sector_period_rollups,
+        )
         from brain import generate_sector_digest_narrative
         from supabase_log import save_audit_log
 
@@ -527,17 +565,95 @@ def run_sector_live(
         red_ratio, cluster_downgrades = _apply_cluster_guardrails(ok_results)
         event_adjustments = _apply_event_guardrails(ok_results)
         macro_applied, macro_reason = _apply_macro_guardrails(ok_results, macro_snapshot)
+        persist_meta = persist_sector_run_analytics(
+            cfg,
+            sector=sector_id,
+            audits=audits,
+            mode="sector_digest",
+            ok_count=ok_count,
+            total_count=len(results),
+        )
+        update_sector_period_rollups(cfg, sector=sector_id)
+        comparison = build_comparison_payload(cfg, sector=sector_id)
+        qc_warnings = quality_checks_for_run(audits, comparison=comparison)
         with _GEMINI_SECTOR_LOCK:
             post = generate_sector_digest_narrative(
-                audits, sector_id=sector_id, api_keys=cfg.gemini_api_keys
+                audits,
+                sector_id=sector_id,
+                comparison_context=comparison if comparison.get("enabled") else None,
+                api_keys=cfg.gemini_api_keys,
             )
         for r in ok_results:
             save_audit_log({"audit": r["audit"], "post": post}, cfg)
+
+        if persist_meta.get("persisted") and persist_meta.get("run_id"):
+            persist_llm_digest_memory(
+                cfg,
+                run_id=str(persist_meta["run_id"]),
+                sector=sector_id,
+                prompt_facts=comparison if comparison.get("enabled") else {"enabled": False},
+                output_text=post,
+                model_name=None,
+            )
+
+        by_bucket: dict[str, list[dict[str, Any]]] = {
+            "high-conviction-momentum": [],
+            "constructive-watchlist": [],
+            "neutral-weak": [],
+            "trap-risk": [],
+        }
+        for r in ok_results:
+            by_bucket[_bucket_name(r["audit"])].append(r)
+
+        today = comparison.get("today") if isinstance(comparison, dict) else {}
+        dlt = comparison.get("delta") if isinstance(comparison, dict) else {}
+        leaders = comparison.get("leaders", []) if isinstance(comparison, dict) else []
+        laggards = comparison.get("laggards", []) if isinstance(comparison, dict) else []
 
         lines = [
             f"Titan sector run: {sector_id!r} — {ok_count}/{len(results)} succeeded "
             f"(digest mode: 1 Gemini call)\n",
             "",
+            "--- Executive snapshot ---",
+            f"Regime: {(comparison.get('regime') if isinstance(comparison, dict) else 'n/a')}",
+            f"Avg effective intent: {_fmt_metric(today.get('avg_effective_intent_score') if isinstance(today, dict) else None)} "
+            f"(vs 7d {_fmt_metric(dlt.get('avg_effective_intent_vs_7d') if isinstance(dlt, dict) else None)}, "
+            f"vs 30d {_fmt_metric(dlt.get('avg_effective_intent_vs_30d') if isinstance(dlt, dict) else None)})",
+            f"Breadth above EMA200: {_fmt_metric(today.get('breadth_above_ema200_pct') if isinstance(today, dict) else None)}%",
+            f"Participation breadth (absorption>1): {_fmt_metric(today.get('pct_absorption_gt_1') if isinstance(today, dict) else None)}%",
+            "",
+            "--- Movement summary ---",
+        ]
+        if leaders:
+            lines.append(
+                "Leaders: "
+                + "; ".join(
+                    f"{x.get('symbol')}({_fmt_metric(x.get('effective_intent_score'))})"
+                    for x in leaders[:5]
+                )
+            )
+        if laggards:
+            lines.append(
+                "Laggards: "
+                + "; ".join(
+                    f"{x.get('symbol')}({_fmt_metric(x.get('effective_intent_score'))})"
+                    for x in laggards[:5]
+                )
+            )
+        lines.extend(
+            [
+                "",
+                "--- Buckets ---",
+                f"High-conviction momentum: {len(by_bucket['high-conviction-momentum'])}",
+                f"Constructive watchlist: {len(by_bucket['constructive-watchlist'])}",
+                f"Neutral/weak: {len(by_bucket['neutral-weak'])}",
+                f"Trap-risk: {len(by_bucket['trap-risk'])}",
+                "",
+                "--- LLM forensic narrative ---",
+            ]
+        )
+        lines.extend(
+            [
             post.strip(),
             "",
             "--- Risk overlays ---",
@@ -545,9 +661,14 @@ def run_sector_live(
             f"Cluster bullish downgrades applied: {cluster_downgrades}",
             f"Event-risk adjustments applied: {event_adjustments}",
             f"Macro guardrail applied: {'yes' if macro_applied else 'no'} ({macro_reason})",
+            (
+                "Quality checks: "
+                + (", ".join(qc_warnings) if qc_warnings else "ok")
+            ),
             "",
             "--- Per-symbol metrics ---",
-        ]
+            ]
+        )
         # Rank by highest intent first so the digest starts with stronger setups.
         ranked = sorted(
             ok_results,
@@ -584,4 +705,19 @@ def run_sector_live(
 
     digest_out = "\n".join(lines).strip()
     send_success_post_email(digest_out, subject_prefix=f"Titan V12.0 sector {sector_id}")
+    try:
+        from analysis_store import persist_sector_run_analytics, update_sector_period_rollups
+
+        ok_audits = [r["audit"] for r in results if r.get("ok") and isinstance(r.get("audit"), dict)]
+        persist_sector_run_analytics(
+            cfg,
+            sector=sector_id,
+            audits=ok_audits,
+            mode="sector_per_symbol_narrative",
+            ok_count=ok_count,
+            total_count=len(results),
+        )
+        update_sector_period_rollups(cfg, sector=sector_id)
+    except Exception:
+        logger.exception("Analysis store persist hook failed")
     print(digest_out)
