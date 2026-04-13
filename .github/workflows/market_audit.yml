@@ -116,7 +116,7 @@ jobs:
           SMTP_USE_TLS: ${{ secrets.SMTP_USE_TLS }}
         run: |
           set +e
-          if [ "${{ github.ref_name }}" = "sector" ] || [ "${{ github.ref_name }}" = "main" ]; then
+          if [ "${{ github.ref_name }}" = "analysis" ] || [ "${{ github.ref_name }}" = "sector" ] || [ "${{ github.ref_name }}" = "main" ]; then
             # Default: one digest narrative per sector run (use --sector-per-symbol-narrative for per-stock posts).
             python main.py --sector defence --sector-workers 4 2>&1 | tee market_audit.log
             rc=${PIPESTATUS[0]}
