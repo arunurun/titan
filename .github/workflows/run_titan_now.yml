@@ -52,6 +52,7 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           BREEZE_API_KEY: ${{ secrets.BREEZE_API_KEY }}
           BREEZE_SECRET: ${{ secrets.BREEZE_SECRET }}
+          TITAN_ENABLE_ANALYSIS_STORE: ${{ secrets.TITAN_ENABLE_ANALYSIS_STORE }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
