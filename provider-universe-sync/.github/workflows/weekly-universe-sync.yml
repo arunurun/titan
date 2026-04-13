@@ -1,0 +1,32 @@
+name: Weekly NSE BSE Universe Sync
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 1 * * 0"
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run weekly universe sync
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SCRIP_MASTER_URL: ${{ secrets.SCRIP_MASTER_URL }}
+        run: python -m src.main

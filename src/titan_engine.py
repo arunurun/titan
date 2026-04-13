@@ -25,6 +25,38 @@ def calculate_z_score(data: pd.Series | pd.DataFrame, window: int = 20) -> float
     return (last - mu) / sigma
 
 
+def calculate_ema(data: pd.Series | pd.DataFrame, span: int = 200) -> float:
+    """Last EMA value from close series (NaN when input is empty)."""
+    series = data["close"] if isinstance(data, pd.DataFrame) else data
+    s = pd.to_numeric(series, errors="coerce").dropna()
+    if s.empty or span < 1:
+        return float("nan")
+    ema = s.ewm(span=span, adjust=False).mean()
+    return float(ema.iloc[-1])
+
+
+def calculate_atr(data: pd.DataFrame, window: int = 14) -> float:
+    """
+    Last ATR value from OHLC frame.
+    Requires columns: high, low, close.
+    """
+    if data.empty or window < 1:
+        return float("nan")
+    req = {"high", "low", "close"}
+    if not req.issubset(set(data.columns)):
+        return float("nan")
+    h = pd.to_numeric(data["high"], errors="coerce")
+    l = pd.to_numeric(data["low"], errors="coerce")
+    c = pd.to_numeric(data["close"], errors="coerce")
+    prev_c = c.shift(1)
+    tr = pd.concat([(h - l).abs(), (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    tr = tr.dropna()
+    if tr.empty:
+        return float("nan")
+    atr = tr.rolling(window=min(window, len(tr)), min_periods=1).mean()
+    return float(atr.iloc[-1])
+
+
 def calculate_absorption_ratio(current_delivery: float, avg_delivery_5d: float) -> float:
     """Current delivery vs 5d average; safe when average is zero or invalid."""
     if avg_delivery_5d is None or (isinstance(avg_delivery_5d, float) and math.isnan(avg_delivery_5d)):

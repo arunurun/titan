@@ -10,6 +10,7 @@ from postgrest.exceptions import APIError
 from supabase import create_client
 
 from config_loader import TitanConfig
+from json_util import sanitize_for_json
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -19,7 +20,7 @@ def save_audit_log(payload: dict[str, Any], config: TitanConfig, table: str = "a
     Insert a row with `payload` plus `recorded_at_ist` ISO8601 in Asia/Kolkata.
     """
     row = {
-        **payload,
+        **sanitize_for_json(payload),
         "recorded_at_ist": datetime.now(IST).isoformat(timespec="seconds"),
     }
     client = create_client(config.supabase_url, config.supabase_key)

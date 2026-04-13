@@ -11,6 +11,8 @@ import pandas as pd
 from breeze_connect import BreezeConnect
 from zoneinfo import ZoneInfo
 
+from breeze_scrip_master import resolve_breeze_stock_code
+
 IST = ZoneInfo("Asia/Kolkata")
 
 
@@ -194,6 +196,63 @@ def volume_absorption_ratio(ohlc_df: pd.DataFrame) -> float:
     return current / avg
 
 
+def fetch_equity_data(
+    config: _BreezeCredentials,
+    stock_code: str,
+    exchange_code: str,
+    *,
+    breeze: BreezeConnect | None = None,
+    lookback_calendar_days: int = 60,
+    max_retries: int = 3,
+    backoff_base_seconds: float = 2.0,
+) -> pd.DataFrame:
+    """
+    Fetch cash OHLC (and volume) for an equity symbol on NSE or BSE.
+    Retries up to `max_retries` times with exponential backoff on failure.
+    """
+    breeze = breeze or create_breeze_session(config)
+    sc_raw = stock_code.strip().upper()
+    ex = exchange_code.strip().upper()
+    if ex not in ("NSE", "BSE"):
+        raise ValueError(f"exchange_code must be NSE or BSE, got {exchange_code!r}")
+
+    # Breeze expects ICICI scrip codes (e.g. BHAELE), not always NSE tickers (e.g. BEL).
+    sc = resolve_breeze_stock_code(sc_raw, ex)
+    if sc != sc_raw:
+        logger.info("Breeze stock_code resolved %s (%s) -> %s", sc_raw, ex, sc)
+
+    end = datetime.now(timezone.utc)
+    start = end - timedelta(days=lookback_calendar_days)
+    from_date = start.strftime("%Y-%m-%dT00:00:00.000Z")
+    to_date = end.strftime("%Y-%m-%dT23:59:59.999Z")
+
+    label = f"{sc_raw}->{sc} ({ex})" if sc != sc_raw else f"{sc} ({ex})"
+    last_err: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            raw = breeze.get_historical_data(
+                interval="1day",
+                from_date=from_date,
+                to_date=to_date,
+                stock_code=sc,
+                exchange_code=ex,
+                product_type="cash",
+            )
+            if not isinstance(raw, dict) or raw.get("Success") is None:
+                raise RuntimeError(f"[Breeze] Unexpected historical response: {raw!r}")
+            rows = raw["Success"]
+            if not rows:
+                return pd.DataFrame()
+            df = pd.DataFrame(rows)
+            return df
+        except Exception as e:
+            last_err = e
+            logger.warning("Breeze fetch attempt %s for %s failed: %s", attempt + 1, label, e)
+            if attempt < max_retries:
+                time.sleep(backoff_base_seconds * (2**attempt))
+    raise RuntimeError(f"[Breeze] {label} historical fetch failed after retries") from last_err
+
+
 def fetch_nifty_data(
     config: _BreezeCredentials,
     *,
@@ -209,33 +268,12 @@ def fetch_nifty_data(
     Raises RuntimeError if all attempts fail (caller may mark task BLOCKED).
     """
     breeze = breeze or create_breeze_session(config)
-
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(days=lookback_calendar_days)
-    from_date = start.strftime("%Y-%m-%dT00:00:00.000Z")
-    to_date = end.strftime("%Y-%m-%dT23:59:59.999Z")
-
-    last_err: Exception | None = None
-    for attempt in range(max_retries + 1):
-        try:
-            raw = breeze.get_historical_data(
-                interval="1day",
-                from_date=from_date,
-                to_date=to_date,
-                stock_code="NIFTY",
-                exchange_code="NSE",
-                product_type="cash",
-            )
-            if not isinstance(raw, dict) or raw.get("Success") is None:
-                raise RuntimeError(f"[Breeze] Unexpected historical response: {raw!r}")
-            rows = raw["Success"]
-            if not rows:
-                return pd.DataFrame()
-            df = pd.DataFrame(rows)
-            return df
-        except Exception as e:
-            last_err = e
-            logger.warning("Breeze fetch attempt %s failed: %s", attempt + 1, e)
-            if attempt < max_retries:
-                time.sleep(backoff_base_seconds * (2**attempt))
-    raise RuntimeError("[Breeze] NIFTY historical fetch failed after retries") from last_err
+    return fetch_equity_data(
+        config,
+        "NIFTY",
+        "NSE",
+        breeze=breeze,
+        lookback_calendar_days=lookback_calendar_days,
+        max_retries=max_retries,
+        backoff_base_seconds=backoff_base_seconds,
+    )

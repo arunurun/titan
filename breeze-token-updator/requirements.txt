@@ -1,0 +1,4 @@
+breeze-connect
+supabase
+python-dotenv
+requests

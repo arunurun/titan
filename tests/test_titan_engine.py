@@ -4,7 +4,9 @@ import pandas as pd
 import pytest
 
 from titan_engine import (
+    calculate_atr,
     calculate_absorption_ratio,
+    calculate_ema,
     calculate_intent_score,
     calculate_z_score,
     find_oi_walls,
@@ -58,3 +60,22 @@ def test_find_oi_walls_skewed_itm():
 def test_intent_score_range():
     score = calculate_intent_score(1.0, 0.0, 1.0)
     assert 0.0 <= score <= 100.0
+
+
+def test_calculate_ema_last_value():
+    s = pd.Series([100.0, 101.0, 102.0, 103.0])
+    ema = calculate_ema(s, span=3)
+    assert ema > 0.0
+    assert ema < 103.0
+
+
+def test_calculate_atr_positive():
+    df = pd.DataFrame(
+        {
+            "high": [101.0, 103.0, 104.0, 106.0],
+            "low": [99.0, 100.0, 101.0, 103.0],
+            "close": [100.0, 102.0, 103.0, 105.0],
+        }
+    )
+    atr = calculate_atr(df, window=3)
+    assert atr > 0.0

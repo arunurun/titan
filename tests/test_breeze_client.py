@@ -5,6 +5,7 @@ import pytest
 
 from breeze_client import (
     create_breeze_session,
+    fetch_equity_data,
     fetch_nifty_data,
     fetch_nifty_option_metrics,
     fetch_nifty_option_metrics_with_expiry_fallback,
@@ -28,7 +29,7 @@ def make_cfg():
         breeze_api_key="k",
         breeze_secret="s",
         breeze_session_token="t",
-        gemini_api_key="g",
+        gemini_api_keys=("g",),
         supabase_url="https://x.supabase.co",
         supabase_key="sk",
     )
@@ -43,6 +44,25 @@ def test_fetch_nifty_data_success(mock_breeze_cls):
     mock_breeze_cls.return_value = api
     df = fetch_nifty_data(make_cfg(), max_retries=1)
     assert len(df) == 1
+
+
+@patch("breeze_client.BreezeConnect")
+def test_fetch_equity_data_passes_symbol_exchange(mock_breeze_cls, monkeypatch):
+    # Avoid live ICICI scrip download in unit test; RELIANCE maps to RELIND on real master.
+    monkeypatch.setattr(
+        "breeze_client.resolve_breeze_stock_code",
+        lambda sym, ex: sym.strip().upper(),
+    )
+    api = MagicMock()
+    api.get_historical_data.return_value = {
+        "Success": [{"close": 50.0, "volume": 1000, "datetime": "2024-01-01"}],
+    }
+    mock_breeze_cls.return_value = api
+    df = fetch_equity_data(make_cfg(), "RELIANCE", "NSE", breeze=api, max_retries=0)
+    assert len(df) == 1
+    call_kw = api.get_historical_data.call_args[1]
+    assert call_kw["stock_code"] == "RELIANCE"
+    assert call_kw["exchange_code"] == "NSE"
 
 
 @patch("breeze_client.BreezeConnect")

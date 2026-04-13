@@ -12,7 +12,7 @@ def make_cfg():
         breeze_api_key="k",
         breeze_secret="s",
         breeze_session_token="t",
-        gemini_api_key="g",
+        gemini_api_keys=("g",),
         supabase_url="https://x.supabase.co",
         supabase_key="sk",
     )

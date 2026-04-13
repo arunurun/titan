@@ -22,6 +22,9 @@ venv/
 logs/
 *.log
 
+# Downloaded ICICI scrip master (regenerated; see breeze_scrip_master)
+data/cache/StockScriptNew.csv
+
 # OS / editor
 .DS_Store
 Thumbs.db

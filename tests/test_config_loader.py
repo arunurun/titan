@@ -15,6 +15,7 @@ def test_load_config_reads_env(monkeypatch, tmp_path):
     monkeypatch.delenv("BREEZE_API_KEY", raising=False)
     cfg = load_config(env_file)
     assert cfg.breeze_api_key == "a"
+    assert cfg.gemini_api_keys == ("g",)
     assert cfg.supabase_url.startswith("https://")
 
 
@@ -27,6 +28,23 @@ def test_load_breeze_config_only_breeze_keys(tmp_path):
     cfg = load_breeze_config(env_file)
     assert cfg.breeze_api_key == "a"
     assert cfg.breeze_session_token == "c"
+
+
+def test_load_config_multiple_gemini_keys(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "BREEZE_API_KEY=a\nBREEZE_SECRET=b\nBREEZE_SESSION_TOKEN=c\n"
+        "GEMINI_API_KEY=key1\nGEMINI_API_KEY_2=key2\n"
+        "SUPABASE_URL=https://x.supabase.co\nSUPABASE_KEY=k\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("BREEZE_API_KEY", raising=False)
+    for k in list(os.environ.keys()):
+        if k.startswith("GEMINI"):
+            monkeypatch.delenv(k, raising=False)
+    cfg = load_config(env_file)
+    assert cfg.gemini_api_keys == ("key1", "key2")
+    assert cfg.gemini_api_key == "key1"
 
 
 def test_load_config_missing_raises(monkeypatch, tmp_path):

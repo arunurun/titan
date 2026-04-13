@@ -54,6 +54,19 @@ def _write_token_to_github_env(token: str, source: str) -> int:
     return 0
 
 
+def _read_session_token(client) -> tuple[str, bool]:
+    res = client.table("session_config").select("breeze_session_token").eq("id", 1).limit(1).execute()
+    data = getattr(res, "data", None) or []
+    if not data:
+        return "", False
+    token = (data[0].get("breeze_session_token") or "").strip()
+    return token, True
+
+
+def _ensure_session_row(client) -> None:
+    client.table("session_config").upsert({"id": 1, "breeze_session_token": ""}).execute()
+
+
 def main() -> int:
     gh_env = os.environ.get("GITHUB_ENV")
     if not gh_env:
@@ -82,23 +95,30 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-
-    client = create_client(url, key)
-    res = client.table("session_config").select("breeze_session_token").limit(1).execute()
-    data = getattr(res, "data", None) or []
-    if not data:
+    if role is None and key.startswith("sb_"):
         print(
-            "session_config returned no rows. Fix one of:\n"
-            "  1) Repository secret BREEZE_SESSION_TOKEN (Settings → Secrets → Actions).\n"
-            "  2) Supabase SQL: sql/create_session_config.sql + non-empty breeze_session_token.\n"
-            "  3) SUPABASE_KEY must be service_role (not anon).",
+            "SUPABASE_KEY appears to be a publishable key (sb_*), not service_role.\n"
+            "Use the service_role key from Supabase -> Project Settings -> API.",
             file=sys.stderr,
         )
         return 1
-    token = (data[0].get("breeze_session_token") or "").strip()
+
+    client = create_client(url, key)
+    token, has_row = _read_session_token(client)
+    if not has_row:
+        # Auto-bootstrap missing row id=1, then re-read.
+        _ensure_session_row(client)
+        token, has_row = _read_session_token(client)
+    if not has_row:
+        print(
+            "session_config row id=1 not readable even after bootstrap.\n"
+            "Verify SUPABASE_KEY is service_role and table public.session_config exists.",
+            file=sys.stderr,
+        )
+        return 1
     if not token:
         print(
-            "breeze_session_token is empty in Supabase; set secret BREEZE_SESSION_TOKEN or edit Table Editor.",
+            "breeze_session_token is empty in Supabase session_config (id=1); update it with a fresh token.",
             file=sys.stderr,
         )
         return 1
