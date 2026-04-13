@@ -73,6 +73,16 @@ create table if not exists public.sector_period_rollup (
     primary key (period_type, period_end, sector)
 );
 
+create table if not exists public.llm_digest_memory (
+    run_id text primary key,
+    sector text not null,
+    prompt_facts jsonb not null default '{}'::jsonb,
+    output_text text not null,
+    model_name text not null default '',
+    output_chars integer not null default 0,
+    recorded_at timestamptz not null default now()
+);
+
 create index if not exists idx_run_metadata_sector_date
     on public.run_metadata (sector, trade_date desc);
 
@@ -84,3 +94,6 @@ create index if not exists idx_sector_daily_rollup_sector_date
 
 create index if not exists idx_sector_period_rollup_sector_period
     on public.sector_period_rollup (sector, period_type, period_end desc);
+
+create index if not exists idx_llm_digest_memory_sector_recorded
+    on public.llm_digest_memory (sector, recorded_at desc);
