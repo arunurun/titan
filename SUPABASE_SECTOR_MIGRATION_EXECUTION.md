@@ -32,6 +32,6 @@
 |---|---|---|
 | R1: Validate runtime credentials from `.env` | COMPLETED | Supabase/Breeze/Gemini vars are present in `.env`. |
 | R2: Backfill sector registry to Supabase | COMPLETED | Backfill succeeded: `defence` rows=27, total_links=27. |
-| R3: Run provider weekly sync manually | IN PROGRESS | Patched sync to batched upserts + retry and rerunning manual sync. |
-| R4: Titan sector smoke run against Supabase | NOT STARTED | Pending successful R3 completion. |
+| R3: Run provider weekly sync manually | COMPLETED | Manual run succeeded in ~40s after batching/retry fix (`total_seen=18218`, `updated_count=18218`, `status=completed`). |
+| R4: Titan sector smoke run against Supabase | BLOCKED | Breeze rejected live session token as expired during smoke run (`Session key is expired`). |
 
