@@ -31,7 +31,8 @@ def test_send_calls_smtp(monkeypatch):
     mock_smtp.login.assert_called_once_with("u", "p")
     mock_smtp.send_message.assert_called_once()
     sent = mock_smtp.send_message.call_args[0][0]
-    assert sent.get_content().strip() == "Post body"
+    assert sent.get_body(preferencelist=("plain",)).get_content().strip() == "Post body"
+    assert sent.get_body(preferencelist=("html",)) is not None
 
 
 def test_send_ssl_465(monkeypatch):

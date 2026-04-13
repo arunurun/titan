@@ -26,6 +26,12 @@ function json(body, status = 200) {
 }
 
 async function gh(env, path, method = "GET", body = null) {
+  if (!env.GITHUB_PAT) {
+    throw new Error("Missing worker secret: GITHUB_PAT");
+  }
+  if (!env.REPO_OWNER || !env.REPO_NAME) {
+    throw new Error("Missing worker vars: REPO_OWNER and/or REPO_NAME");
+  }
   const url = `https://api.github.com/repos/${env.REPO_OWNER}/${env.REPO_NAME}${path}`;
   const res = await fetch(url, {
     method,
@@ -40,6 +46,15 @@ async function gh(env, path, method = "GET", body = null) {
   });
   const txt = await res.text();
   if (!res.ok) {
+    if (res.status === 404) {
+      throw new Error(
+        `404 from GitHub API for ${env.REPO_OWNER}/${env.REPO_NAME}. ` +
+          `Check REPO_OWNER/REPO_NAME and PAT repo access. Raw: ${txt}`,
+      );
+    }
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`Auth/permission error from GitHub (${res.status}). Raw: ${txt}`);
+    }
     throw new Error(`${res.status} ${res.statusText}: ${txt}`);
   }
   if (!txt) return null;
@@ -75,6 +90,15 @@ export default {
         const limit = Number(url.searchParams.get("limit") || "20");
         const data = await gh(env, `/actions/runs?per_page=${Math.max(1, Math.min(limit, 100))}`);
         return json(data);
+      }
+
+      if (request.method === "GET" && url.pathname === "/health") {
+        return json({
+          ok: true,
+          repo: `${env.REPO_OWNER || "<missing>"}/${env.REPO_NAME || "<missing>"}`,
+          has_pat: Boolean(env.GITHUB_PAT),
+          allowed_workflows: Array.from(ALLOWED_WORKFLOWS),
+        });
       }
 
       return json({ error: "not found" }, 404);
