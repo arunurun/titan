@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Titan Mobile Control</title>
+  <style>
+    :root {
+      --g-blue: #4285f4;
+      --g-red: #ea4335;
+      --g-yellow: #fbbc05;
+      --g-green: #34a853;
+      --text: #202124;
+      --muted: #5f6368;
+      --border: #e0e3e7;
+      --surface: #ffffff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 12px;
+      background: #fff;
+      color: var(--text);
+      font-family: Arial, sans-serif;
+    }
+    .container { max-width: 760px; margin: 0 auto; }
+    .header-line {
+      height: 4px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--g-blue) 0 25%, var(--g-red) 25% 50%, var(--g-yellow) 50% 75%, var(--g-green) 75% 100%);
+      margin-bottom: 12px;
+    }
+    h1 { font-size: 1.4rem; margin: 0 0 10px; }
+    .muted { color: var(--muted); font-size: 0.92rem; margin: 0 0 12px; }
+    .card {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      margin-bottom: 12px;
+      background: var(--surface);
+    }
+    h3 { margin: 0 0 10px; font-size: 1.05rem; }
+    label { display: block; margin-top: 8px; font-size: 0.9rem; }
+    input, select, textarea {
+      width: 100%;
+      margin-top: 6px;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 0.95rem;
+    }
+    button {
+      width: 100%;
+      margin-top: 12px;
+      border: none;
+      border-radius: 999px;
+      padding: 11px 14px;
+      background: var(--g-blue);
+      color: #fff;
+      font-weight: bold;
+      font-size: 0.95rem;
+      cursor: pointer;
+    }
+    button.secondary { background: var(--g-green); }
+    button.warning { background: var(--g-yellow); color: #202124; }
+    .status {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #f8f9fa;
+      padding: 10px;
+      white-space: pre-wrap;
+      max-height: 260px;
+      overflow: auto;
+      font-size: 0.9rem;
+    }
+    .small { font-size: 0.82rem; color: var(--muted); }
+    .row { display: grid; grid-template-columns: 1fr; gap: 8px; }
+    @media (min-width: 760px) { .row.two { grid-template-columns: 1fr 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Titan Mobile Control</h1>
+    <div class="header-line"></div>
+    <p class="muted">GitHub-hosted control page for mobile use. Buttons dispatch workflows and show latest run status.</p>
+
+    <div class="card">
+      <h3>Auth + Repo</h3>
+      <label>GitHub Fine-grained PAT (repo + workflow)</label>
+      <input id="token" type="password" placeholder="Paste token (kept in this browser only)" />
+      <label><input type="checkbox" id="rememberToken" /> Remember token in this browser</label>
+      <div class="row two">
+        <div>
+          <label>Owner</label>
+          <input id="owner" value="arunurun" />
+        </div>
+        <div>
+          <label>Repo</label>
+          <input id="repo" value="titan" />
+        </div>
+      </div>
+      <p class="small">Required token scopes/permissions: repository Actions + Contents (read/write for dispatch).</p>
+    </div>
+
+    <div class="card">
+      <h3>Run Titan Now</h3>
+      <div class="row two">
+        <div>
+          <label>Mode</label>
+          <select id="runMode">
+            <option value="sector" selected>sector</option>
+            <option value="live">live</option>
+          </select>
+        </div>
+        <div>
+          <label>Sector ID</label>
+          <input id="sectorId" value="defence" />
+        </div>
+      </div>
+      <div class="row two">
+        <div>
+          <label>Max Symbols</label>
+          <input id="maxSymbols" value="20" />
+        </div>
+        <div>
+          <label>Workers</label>
+          <input id="workers" value="4" />
+        </div>
+      </div>
+      <button id="runTitanBtn">Dispatch Run Titan Now</button>
+    </div>
+
+    <div class="card">
+      <h3>Validate Breeze Token</h3>
+      <button class="secondary" id="validateBtn">Dispatch Validate Token</button>
+    </div>
+
+    <div class="card">
+      <h3>Persist Breeze Token</h3>
+      <label>API_Session or redirect URL with API_Session</label>
+      <textarea id="tokenInput" rows="3" placeholder="Paste token or redirect URL"></textarea>
+      <button class="warning" id="persistBtn">Dispatch Persist Token</button>
+    </div>
+
+    <div class="card">
+      <h3>Latest Workflow Runs</h3>
+      <button id="refreshBtn">Refresh Status</button>
+      <div id="status" class="status">Ready.</div>
+    </div>
+  </div>
+
+  <script>
+    const WORKFLOWS = {
+      runTitan: "run_titan_now.yml",
+      validate: "validate_breeze_token_manual.yml",
+      persist: "persist_breeze_token_manual.yml",
+    };
+
+    const el = (id) => document.getElementById(id);
+    const statusEl = el("status");
+
+    function setStatus(msg) {
+      statusEl.textContent = msg;
+    }
+
+    function cfg() {
+      const token = el("token").value.trim();
+      const owner = el("owner").value.trim();
+      const repo = el("repo").value.trim();
+      if (!token || !owner || !repo) throw new Error("Token, owner, and repo are required.");
+      return { token, owner, repo };
+    }
+
+    async function ghApi(path, method = "GET", body = null) {
+      const { token, owner, repo } = cfg();
+      const res = await fetch(`https://api.github.com/repos/${owner}/${repo}${path}`, {
+        method,
+        headers: {
+          "Accept": "application/vnd.github+json",
+          "Authorization": `Bearer ${token}`,
+          "X-GitHub-Api-Version": "2022-11-28",
+          "Content-Type": "application/json",
+        },
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(`${res.status} ${res.statusText}\n${txt}`);
+      }
+      if (res.status === 204) return null;
+      return await res.json();
+    }
+
+    async function dispatchWorkflow(filename, inputs = {}) {
+      await ghApi(`/actions/workflows/${filename}/dispatches`, "POST", { ref: "main", inputs });
+      setStatus(`Dispatched ${filename} successfully.`);
+    }
+
+    async function loadLatestRuns() {
+      const runs = await ghApi(`/actions/runs?per_page=20`);
+      const relevant = (runs.workflow_runs || []).filter(r =>
+        Object.values(WORKFLOWS).includes(r.path.split("/").pop())
+      );
+      if (!relevant.length) {
+        setStatus("No recent runs for control workflows.");
+        return;
+      }
+      const lines = relevant.slice(0, 10).map(r =>
+        `${r.status}/${r.conclusion || "-"} | ${r.name} | #${r.run_number} | ${r.html_url}`
+      );
+      setStatus(lines.join("\n"));
+    }
+
+    el("runTitanBtn").addEventListener("click", async () => {
+      try {
+        await dispatchWorkflow(WORKFLOWS.runTitan, {
+          mode: el("runMode").value,
+          sector_id: el("sectorId").value.trim(),
+          max_symbols: el("maxSymbols").value.trim(),
+          workers: el("workers").value.trim(),
+        });
+      } catch (e) {
+        setStatus(`Run Titan dispatch failed:\n${e.message}`);
+      }
+    });
+
+    el("validateBtn").addEventListener("click", async () => {
+      try {
+        await dispatchWorkflow(WORKFLOWS.validate);
+      } catch (e) {
+        setStatus(`Validate dispatch failed:\n${e.message}`);
+      }
+    });
+
+    el("persistBtn").addEventListener("click", async () => {
+      try {
+        const tokenInput = el("tokenInput").value.trim();
+        if (!tokenInput) throw new Error("Token input is required.");
+        await dispatchWorkflow(WORKFLOWS.persist, { breeze_token_input: tokenInput });
+      } catch (e) {
+        setStatus(`Persist dispatch failed:\n${e.message}`);
+      }
+    });
+
+    el("refreshBtn").addEventListener("click", async () => {
+      try {
+        await loadLatestRuns();
+      } catch (e) {
+        setStatus(`Refresh failed:\n${e.message}`);
+      }
+    });
+
+    (function init() {
+      const saved = localStorage.getItem("titan_control_token");
+      if (saved) {
+        el("token").value = saved;
+        el("rememberToken").checked = true;
+      }
+      el("rememberToken").addEventListener("change", () => {
+        if (!el("rememberToken").checked) localStorage.removeItem("titan_control_token");
+      });
+      el("token").addEventListener("input", () => {
+        if (el("rememberToken").checked) {
+          localStorage.setItem("titan_control_token", el("token").value);
+        }
+      });
+    })();
+  </script>
+</body>
+</html>

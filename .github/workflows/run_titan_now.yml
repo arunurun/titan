@@ -1,0 +1,76 @@
+name: Run Titan Now
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode"
+        required: true
+        default: "sector"
+        type: choice
+        options:
+          - sector
+          - live
+      sector_id:
+        description: "Sector id (used when mode=sector)"
+        required: false
+        default: "defence"
+      max_symbols:
+        description: "Optional max symbols cap (sector mode)"
+        required: false
+        default: "20"
+      workers:
+        description: "Optional sector workers"
+        required: false
+        default: "4"
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Load Breeze token from Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python scripts/inject_breeze_session_from_supabase.py
+
+      - name: Run Titan
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          BREEZE_API_KEY: ${{ secrets.BREEZE_API_KEY }}
+          BREEZE_SECRET: ${{ secrets.BREEZE_SECRET }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          SMTP_USE_TLS: ${{ secrets.SMTP_USE_TLS }}
+        run: |
+          if [ "${{ inputs.mode }}" = "live" ]; then
+            python main.py --live
+          else
+            ARGS="--sector ${{ inputs.sector_id }} --sector-digest"
+            if [ -n "${{ inputs.max_symbols }}" ]; then
+              ARGS="$ARGS --sector-max-symbols ${{ inputs.max_symbols }}"
+            fi
+            if [ -n "${{ inputs.workers }}" ]; then
+              ARGS="$ARGS --sector-workers ${{ inputs.workers }}"
+            fi
+            python main.py $ARGS
+          fi

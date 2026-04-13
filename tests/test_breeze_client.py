@@ -123,3 +123,35 @@ def test_fetch_nifty_option_metrics_with_fallback_degrades_gracefully():
     m = fetch_nifty_option_metrics_with_expiry_fallback(breeze, max_expiry_tries=2)
     assert m.get("option_chain_unavailable") is True
     assert m["put_oi"] == 0.0 and m["call_oi"] == 0.0
+
+
+def test_fetch_nifty_option_metrics_with_fallback_skips_zero_oi_chain(monkeypatch):
+    breeze = MagicMock()
+    monkeypatch.setattr(
+        "breeze_client.iter_weekly_expiry_candidates",
+        lambda weeks_ahead=8, reference=None: [
+            "2026-04-14T06:00:00.000Z",
+            "2026-04-21T06:00:00.000Z",
+        ],
+    )
+    monkeypatch.setattr(
+        "breeze_client.fetch_nifty_option_metrics",
+        side_effect=[
+            {
+                "call_oi": 0.0,
+                "put_oi": 0.0,
+                "chain_df": pd.DataFrame([{"strike": 25000.0, "oi": 0.0}]),
+                "expiry_date": "2026-04-14T06:00:00.000Z",
+            },
+            {
+                "call_oi": 10.0,
+                "put_oi": 20.0,
+                "chain_df": pd.DataFrame([{"strike": 25100.0, "oi": 30.0}]),
+                "expiry_date": "2026-04-21T06:00:00.000Z",
+            },
+        ],
+    )
+    m = fetch_nifty_option_metrics_with_expiry_fallback(breeze, max_expiry_tries=2)
+    assert m["expiry_date"] == "2026-04-21T06:00:00.000Z"
+    assert m["fallback_used"] is True
+    assert m["expiry_try_index"] == 2

@@ -189,6 +189,13 @@ def run_live() -> None:
     cfg = load_config()
     import pandas as pd
 
+    from analysis_store import (
+        build_comparison_payload,
+        persist_llm_digest_memory,
+        persist_sector_run_analytics,
+        quality_checks_for_run,
+        update_sector_period_rollups,
+    )
     from breeze_client import (
         create_breeze_session,
         fetch_nifty_data,
@@ -210,6 +217,11 @@ def run_live() -> None:
     oi_wall = find_oi_walls(opt["chain_df"]) if not opt["chain_df"].empty else {"strike": float("nan"), "oi": float("nan")}
     intent = calculate_intent_score(pcr, z, absorption)
     audit = {
+        "benchmark": "index",
+        "sector_mode": False,
+        "sector": "nifty_index",
+        "symbol": "NIFTY",
+        "exchange": "NSE",
         "z_score": z,
         "absorption_ratio": absorption,
         "pcr": pcr,
@@ -217,12 +229,41 @@ def run_live() -> None:
         "call_oi": opt["call_oi"],
         "oi_wall": oi_wall,
         "option_expiry": opt["expiry_date"],
+        "option_chain_fallback_used": bool(opt.get("fallback_used", False)),
+        "option_chain_expiry_try_index": opt.get("expiry_try_index"),
+        "option_chain_expiry_tries": opt.get("expiry_tries"),
         "intent_score": intent,
+        "effective_intent_score": intent,
         "rows": len(df),
     }
     if opt.get("option_chain_unavailable"):
         audit["option_chain_unavailable"] = True
+    persist_meta = persist_sector_run_analytics(
+        cfg,
+        sector="nifty_index",
+        audits=[audit],
+        mode="index_live",
+        ok_count=1,
+        total_count=1,
+    )
+    update_sector_period_rollups(cfg, sector="nifty_index")
+    comparison = build_comparison_payload(cfg, sector="nifty_index")
+    qc_warnings = quality_checks_for_run([audit], comparison=comparison)
+    if comparison.get("enabled"):
+        audit["comparison_context"] = comparison
+    if qc_warnings:
+        audit["quality_warnings"] = qc_warnings
+
     post = generate_titan_narrative(audit, api_keys=cfg.gemini_api_keys)
+    if persist_meta.get("persisted") and persist_meta.get("run_id"):
+        persist_llm_digest_memory(
+            cfg,
+            run_id=str(persist_meta["run_id"]),
+            sector="nifty_index",
+            prompt_facts=comparison if comparison.get("enabled") else {"enabled": False},
+            output_text=post,
+            model_name=None,
+        )
     save_audit_log({"audit": audit, "post": post}, cfg)
     send_success_post_email(post)
     print(format_social_post(post))

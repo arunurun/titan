@@ -1,0 +1,34 @@
+name: Persist Breeze Token (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      breeze_token_input:
+        description: "API_Session token OR full redirect URL containing API_Session"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  persist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Validate and persist token to Supabase
+        env:
+          BREEZE_TOKEN_INPUT: ${{ inputs.breeze_token_input }}
+          BREEZE_API_KEY: ${{ secrets.BREEZE_API_KEY }}
+          BREEZE_SECRET: ${{ secrets.BREEZE_SECRET }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python scripts/persist_breeze_token_to_supabase.py
