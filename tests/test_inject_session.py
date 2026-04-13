@@ -33,7 +33,9 @@ def test_inject_writes_github_env(inject_mod, tmp_path, monkeypatch):
     os.environ.setdefault("SUPABASE_KEY", "sk")
 
     mock_client = MagicMock()
-    mock_client.table.return_value.select.return_value.limit.return_value.execute.return_value = MagicMock(
+    mock_table = MagicMock()
+    mock_client.table.return_value = mock_table
+    mock_table.select.return_value.eq.return_value.limit.return_value.execute.return_value = MagicMock(
         data=[{"breeze_session_token": "tok=123"}]
     )
 
@@ -74,3 +76,22 @@ def test_inject_rejects_anon_supabase_key(inject_mod, tmp_path, monkeypatch):
     with patch.object(inject_mod, "create_client") as mock_create:
         assert inject_mod.main() == 1
     mock_create.assert_not_called()
+
+
+def test_inject_bootstraps_missing_row(inject_mod, tmp_path, monkeypatch):
+    monkeypatch.delenv("BREEZE_SESSION_TOKEN", raising=False)
+    monkeypatch.setenv("GITHUB_ENV", str(tmp_path / "ghenv"))
+    monkeypatch.setenv("SUPABASE_URL", "https://x.supabase.co")
+    monkeypatch.setenv("SUPABASE_KEY", _fake_supabase_jwt("service_role"))
+
+    mock_client = MagicMock()
+    mock_table = MagicMock()
+    mock_client.table.return_value = mock_table
+    # First read returns no row, then after bootstrap returns row with token.
+    mock_table.select.return_value.eq.return_value.limit.return_value.execute.side_effect = [
+        MagicMock(data=[]),
+        MagicMock(data=[{"breeze_session_token": "tok=abc"}]),
+    ]
+    with patch.object(inject_mod, "create_client", return_value=mock_client):
+        assert inject_mod.main() == 0
+    assert mock_table.upsert.call_count == 1
