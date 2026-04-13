@@ -85,21 +85,13 @@
     <p class="muted">GitHub-hosted control page for mobile use. Buttons dispatch workflows and show latest run status.</p>
 
     <div class="card">
-      <h3>Auth + Repo</h3>
-      <label>GitHub Fine-grained PAT (repo + workflow)</label>
-      <input id="token" type="password" placeholder="Paste token (kept in this browser only)" />
-      <p class="small">Enter once; token is auto-saved in this browser for future taps.</p>
-      <div class="row two">
-        <div>
-          <label>Owner</label>
-          <input id="owner" value="arunurun" />
-        </div>
-        <div>
-          <label>Repo</label>
-          <input id="repo" value="titan" />
-        </div>
-      </div>
-      <p class="small">Required token scopes/permissions: repository Actions + Contents (read/write for dispatch).</p>
+      <h3>Connection</h3>
+      <p class="small">
+        This page is tokenless by design. It talks to a secure backend proxy that stores GitHub credentials server-side.
+      </p>
+      <label>Dispatch Proxy URL</label>
+      <input id="proxyBase" placeholder="https://your-proxy.example.com" />
+      <p class="small">Set once and this browser will remember it.</p>
     </div>
 
     <div class="card">

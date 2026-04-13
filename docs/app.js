@@ -16,26 +16,22 @@ function setWorking(label) {
 }
 
 function cfg() {
-  const token = el("token").value.trim();
-  const owner = el("owner").value.trim();
-  const repo = el("repo").value.trim();
-  if (!token || !owner || !repo) throw new Error("Token, owner, and repo are required.");
+  const proxyBase = el("proxyBase").value.trim().replace(/\/+$/, "");
+  if (!proxyBase) throw new Error("Proxy URL is required.");
   try {
-    localStorage.setItem("titan_control_token", token);
+    localStorage.setItem("titan_control_proxy_base", proxyBase);
   } catch (_e) {
     // Ignore storage failures.
   }
-  return { token, owner, repo };
+  return { proxyBase };
 }
 
 async function ghApi(path, method = "GET", body = null) {
-  const { token, owner, repo } = cfg();
-  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}${path}`, {
+  const { proxyBase } = cfg();
+  const url = `${proxyBase}${path}`;
+  const res = await fetch(url, {
     method,
     headers: {
-      Accept: "application/vnd.github+json",
-      Authorization: `Bearer ${token}`,
-      "X-GitHub-Api-Version": "2022-11-28",
       "Content-Type": "application/json",
     },
     body: body ? JSON.stringify(body) : undefined,
@@ -49,12 +45,12 @@ async function ghApi(path, method = "GET", body = null) {
 }
 
 async function dispatchWorkflow(filename, inputs = {}) {
-  await ghApi(`/actions/workflows/${filename}/dispatches`, "POST", { ref: "main", inputs });
+  await ghApi("/dispatch", "POST", { workflow: filename, ref: "main", inputs });
   setStatus(`Dispatched ${filename} successfully.`);
 }
 
 async function loadLatestRuns() {
-  const runs = await ghApi("/actions/runs?per_page=20");
+  const runs = await ghApi("/runs?limit=20");
   const relevant = (runs.workflow_runs || []).filter((r) =>
     Object.values(WORKFLOWS).includes(r.path.split("/").pop()),
   );
@@ -115,9 +111,9 @@ function wireEvents() {
 
 function initStorage() {
   try {
-    const saved = localStorage.getItem("titan_control_token");
+    const saved = localStorage.getItem("titan_control_proxy_base");
     if (saved) {
-      el("token").value = saved;
+      el("proxyBase").value = saved;
     }
   } catch (_e) {
     // Storage may be disabled in private mode; ignore.
