@@ -18,7 +18,7 @@ One entry point accepts a **sector id** (e.g. `defence`), resolves the **symbol 
 
 | # | Task | Status | Notes |
 |---|------|--------|--------|
-| 1 | **Sector registry** | **Done** | `data/sectors/<id>.csv` with `symbol`, `exchange` (NSE/BSE). `src/sector_registry.py`: `load_sector_instruments`, `MAX_SYMBOLS` cap. |
+| 1 | **Sector registry** | **Done** | Supabase-backed registry via `sector_catalog` + `market_instruments` + `instrument_sector_map`. `src/sector_registry.py`: `load_sector_instruments`, `MAX_SYMBOLS` cap. |
 | 2 | **Resolver API** | **Done** | `load_sector_instruments(sector_id)` returns validated `SectorInstrument` list; unknown/empty errors. |
 | 3 | **Abstract audit from NIFTY** | **Partial** | `src/sector_audit.py` — `build_equity_live_audit` for equities (z-score, absorption, intent); **no** per-stock option chain (flagged `option_chain_unavailable`). NIFTY remains `main.py --live`. |
 | 4 | **Breeze layer** | **Done** | `fetch_equity_data`, scrip resolution via `breeze_scrip_master` / `StockScriptNew.csv` cache where needed. |
@@ -40,7 +40,7 @@ One entry point accepts a **sector id** (e.g. `defence`), resolves the **symbol 
 
 ## Design choices (v1)
 
-- **Stock list:** static CSV per sector (manual maintenance).
+- **Stock list:** Supabase sector registry (weekly sync from separate provider codebase; optional CSV bootstrap script).
 - **Concurrency:** default modest **max_workers** (e.g. 4); each worker uses its own Breeze session where applicable.
 - **GitHub Actions:** **`--sector-digest`** + **`--sector-max-symbols`** available if limits need tightening further.
 
@@ -48,7 +48,9 @@ One entry point accepts a **sector id** (e.g. `defence`), resolves the **symbol 
 
 ## References (repo)
 
-- `data/sectors/defence.csv` — universe list.
+- `sql/create_sector_registry_tables.sql` — sector-aware Supabase schema.
+- `scripts/backfill_sector_registry_from_csv.py` — one-time CSV to Supabase bootstrap.
+- `provider-universe-sync/` — standalone weekly NSE/BSE sync codebase for separate GitHub repository.
 - `src/sector_registry.py`, `src/sector_audit.py`, `src/breeze_scrip_master.py`, `src/breeze_client.py`.
 - `src/brain.py` — narratives, rotation, `_sector` digest payload.
 - `main.py` — `--sector` flags.

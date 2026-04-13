@@ -57,6 +57,33 @@ def test_build_equity_live_audit_success(monkeypatch):
     assert audit["symbol"] == "HAL"
     assert audit["sector"] == "defence"
     assert audit["option_chain_unavailable"] is True
+    assert "return_1d_pct" in audit
+    assert "ema_200_distance_pct" in audit
+    assert "atr_14_pct" in audit
+    assert "effective_intent_score" in audit
+
+
+def test_build_equity_live_audit_event_flags(monkeypatch):
+    from sector_audit import build_equity_live_audit
+
+    closes = [100.0 + i * 0.1 for i in range(30)]
+    df = pd.DataFrame({"close": closes, "high": closes, "low": closes, "volume": [1e6] * 30})
+    monkeypatch.setattr("breeze_client.fetch_equity_data", lambda *a, **k: df)
+    monkeypatch.setattr(
+        "brain.generate_titan_narrative",
+        lambda audit, api_key=None, api_keys=None: "Post body",
+    )
+    breeze = MagicMock()
+    inst = SectorInstrument("HAL", "NSE")
+    audit, _ = build_equity_live_audit(
+        make_cfg(),
+        breeze,
+        inst,
+        sector_id="defence",
+        event_snapshot={"events": [{"symbol": "HAL", "date": "2026-04-12", "type": "earnings"}]},
+    )
+    assert "event_risk_present" in audit
+    assert "event_risk_soon" in audit
 
 
 def test_build_equity_live_audit_empty_raises(monkeypatch):
@@ -165,3 +192,59 @@ def test_run_sector_live_digest_one_gemini_call(mock_load, mock_metrics, mock_em
     assert "digest mode: 1 Gemini call" in body
     assert "One combined post" in body
     assert "Per-symbol metrics" in body
+    assert "Risk overlays" in body
+
+
+@patch("email_notify.send_success_post_email")
+@patch("sector_audit._process_one_metrics")
+@patch("sector_audit.load_sector_instruments")
+def test_run_sector_live_macro_guardrail_applied(mock_load, mock_metrics, mock_email):
+    from sector_audit import run_sector_live
+
+    mock_load.return_value = [
+        SectorInstrument("A", "NSE"),
+        SectorInstrument("B", "NSE"),
+    ]
+    mock_metrics.side_effect = [
+        {
+            "ok": True,
+            "symbol": "A",
+            "exchange": "NSE",
+            "audit": {
+                "symbol": "A",
+                "z_score": 1.2,
+                "intent_score": 62.0,
+                "effective_intent_score": 62.0,
+                "absorption_ratio": 1.1,
+                "return_1d_pct": -0.3,
+                "rows": 30,
+            },
+            "error": None,
+        },
+        {
+            "ok": True,
+            "symbol": "B",
+            "exchange": "NSE",
+            "audit": {
+                "symbol": "B",
+                "z_score": 0.8,
+                "intent_score": 58.0,
+                "effective_intent_score": 58.0,
+                "absorption_ratio": 1.0,
+                "return_1d_pct": -0.2,
+                "rows": 30,
+            },
+            "error": None,
+        },
+    ]
+    with patch("brain.generate_sector_digest_narrative", return_value="One combined post"):
+        with patch("supabase_log.save_audit_log"):
+            run_sector_live(
+                "defence",
+                max_workers=2,
+                digest=True,
+                macro_snapshot={"gift_nifty_change_pct": -0.8, "india_vix": 17.5},
+            )
+
+    body = mock_email.call_args[0][0]
+    assert "Macro guardrail applied: yes" in body

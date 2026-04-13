@@ -40,6 +40,7 @@ from brain import generate_titan_narrative
 from compliance import compliance_scan
 from config_loader import load_config, try_parse_gemini_api_keys_from_env
 from email_notify import send_failure_email, send_success_post_email
+from protocol_runtime import available_clusters, resolve_protocol_runs
 from titan_engine import (
     calculate_absorption_ratio,
     calculate_intent_score,
@@ -84,6 +85,91 @@ def format_social_post(body: str) -> str:
     """X/LinkedIn friendly block (no extra compliance issues)."""
     lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
     return "\n\n".join(lines)
+
+
+def _load_macro_snapshot(path_raw: str) -> dict:
+    path = Path(path_raw).expanduser()
+    if not path.is_file():
+        raise ValueError(f"Macro snapshot file not found: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Macro snapshot is not valid JSON: {path}") from e
+    if not isinstance(payload, dict):
+        raise ValueError("Macro snapshot JSON must be an object")
+    return payload
+
+
+def _load_event_snapshot(path_raw: str) -> dict:
+    path = Path(path_raw).expanduser()
+    if not path.is_file():
+        raise ValueError(f"Event snapshot file not found: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Event snapshot is not valid JSON: {path}") from e
+    if not isinstance(payload, dict):
+        raise ValueError("Event snapshot JSON must be an object with an 'events' array")
+    events = payload.get("events")
+    if events is not None and not isinstance(events, list):
+        raise ValueError("Event snapshot field 'events' must be a list when provided")
+    return payload
+
+
+def _parse_cluster_list(raw: str) -> tuple[str, ...]:
+    if not raw.strip():
+        return ()
+    items = tuple(x.strip() for x in raw.split(",") if x.strip())
+    allowed = set(available_clusters())
+    bad = [x for x in items if x.lower() not in allowed]
+    if bad:
+        raise ValueError(
+            "Unknown protocol clusters: "
+            + ", ".join(sorted(set(bad)))
+            + f" (allowed: {', '.join(sorted(allowed))})"
+        )
+    return tuple(x.lower() for x in items)
+
+
+def run_protocol_window(
+    *,
+    window: str | None,
+    clusters: tuple[str, ...],
+    strict_window: bool,
+    macro_snapshot: dict | None,
+    event_snapshot: dict | None,
+    max_workers: int | None,
+    max_symbols: int | None,
+) -> None:
+    from sector_audit import run_sector_live
+
+    runs = resolve_protocol_runs(
+        window=window,
+        clusters=clusters if clusters else None,
+        strict_window=strict_window,
+    )
+    if not runs:
+        logger.info("No protocol windows due now (strict-window gating).")
+        return
+    for run in runs:
+        logger.info(
+            "Protocol run window=%s cluster=%s symbols=%s",
+            run.window,
+            run.cluster_id,
+            len(run.instruments),
+        )
+        instruments = list(run.instruments)
+        if max_symbols is not None:
+            instruments = instruments[: max(0, int(max_symbols))]
+        run_sector_live(
+            run.sector_id,
+            max_workers=max_workers,
+            max_symbols=None,
+            digest=True,
+            macro_snapshot=macro_snapshot,
+            event_snapshot=event_snapshot,
+            instruments_override=instruments,
+        )
 
 
 def run_dry_run() -> None:
@@ -151,7 +237,7 @@ def main() -> None:
         type=str,
         default="",
         metavar="ID",
-        help="Sector audit: load data/sectors/<id>.csv (e.g. defence), parallel equity runs",
+        help="Sector audit: load active symbols from Supabase sector registry (e.g. defence), parallel equity runs",
     )
     p.add_argument(
         "--sector-workers",
@@ -165,7 +251,7 @@ def main() -> None:
         type=int,
         default=None,
         metavar="N",
-        help="Process only the first N symbols from the sector CSV (free-tier friendly)",
+        help="Process only the first N symbols from the Supabase sector list (free-tier friendly)",
     )
     p.add_argument(
         "--sector-per-symbol-narrative",
@@ -177,20 +263,89 @@ def main() -> None:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    p.add_argument(
+        "--macro-json",
+        type=str,
+        default="",
+        metavar="PATH",
+        help=(
+            "Optional JSON snapshot for macro guardrails "
+            "(gift_nifty_change_pct, india_vix, dxy, lme_copper_change_pct)"
+        ),
+    )
+    p.add_argument(
+        "--events-json",
+        type=str,
+        default="",
+        metavar="PATH",
+        help="Optional JSON event snapshot (events: [{symbol,date,type,...}]).",
+    )
+    p.add_argument(
+        "--protocol-run",
+        action="store_true",
+        help="Execute Titan V12 protocol windows/clusters using preset universes.",
+    )
+    p.add_argument(
+        "--protocol-window",
+        type=str,
+        choices=("open", "mid", "cluster0"),
+        default="",
+        help="Restrict --protocol-run to one window.",
+    )
+    p.add_argument(
+        "--protocol-clusters",
+        type=str,
+        default="",
+        metavar="CSV",
+        help=f"Comma list of protocol clusters (allowed: {', '.join(available_clusters())}).",
+    )
+    p.add_argument(
+        "--strict-window",
+        action="store_true",
+        help="When set with --protocol-run, only execute windows that are due right now (IST).",
+    )
     args = p.parse_args()
+
+    macro_snapshot = _load_macro_snapshot(args.macro_json.strip()) if args.macro_json.strip() else None
+    event_snapshot = _load_event_snapshot(args.events_json.strip()) if args.events_json.strip() else None
+    protocol_clusters = _parse_cluster_list(args.protocol_clusters)
+
+    if args.protocol_run:
+        try:
+            run_protocol_window(
+                window=(args.protocol_window.strip() or None),
+                clusters=protocol_clusters,
+                strict_window=args.strict_window,
+                macro_snapshot=macro_snapshot,
+                event_snapshot=event_snapshot,
+                max_workers=args.sector_workers,
+                max_symbols=args.sector_max_symbols,
+            )
+        except Exception:
+            summary = traceback.format_exc().strip().splitlines()[-1][:180]
+            send_failure_email(summary, detail=traceback.format_exc())
+            raise
+        return
 
     if args.sector.strip():
         from sector_audit import run_sector_live
 
         # --sector-digest kept for backward compatibility (no-op; digest is default).
         sector_digest = not args.sector_per_symbol_narrative
+        run_kwargs = dict(
+            max_workers=args.sector_workers,
+            max_symbols=args.sector_max_symbols,
+            digest=sector_digest,
+        )
+        if macro_snapshot is not None:
+            run_kwargs["macro_snapshot"] = macro_snapshot
+        if event_snapshot is not None:
+            run_kwargs["event_snapshot"] = event_snapshot
 
         try:
             run_sector_live(
                 args.sector.strip(),
-                max_workers=args.sector_workers,
-                max_symbols=args.sector_max_symbols,
-                digest=sector_digest,
+                **run_kwargs,
             )
         except Exception as e:
             summary = str(e).strip().split("\n", 1)[0].strip()

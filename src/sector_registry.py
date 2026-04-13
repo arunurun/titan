@@ -1,20 +1,18 @@
-"""Load sector stock lists from CSV under data/sectors/ (NSE and/or BSE).
-
-Sector CSVs may mix large-, mid-, and small-cap names and both exchanges for broader screening;
-liquidity and data quality still vary—callers should handle failures per instrument.
-"""
+"""Load sector stock lists from Supabase sector registry tables (NSE and/or BSE)."""
 
 from __future__ import annotations
 
-import csv
+import os
 from dataclasses import dataclass
 from pathlib import Path
+
+from postgrest.exceptions import APIError
+from supabase import create_client
 
 ROOT = Path(__file__).resolve().parent.parent
 SECTORS_DIR = ROOT / "data" / "sectors"
 
-# Cap how many instruments we process per run (raise locally when scaling sector work).
-# defence.csv may grow; keep this >= current row count so names are not silently dropped.
+# Cap how many instruments we process per run (raise when scaling sector work).
 MAX_SYMBOLS = 60
 
 _EXCHANGES = frozenset({"NSE", "BSE"})
@@ -38,10 +36,9 @@ def load_sector_instruments(
     max_symbols: int | None = None,
 ) -> list[SectorInstrument]:
     """
-    Read ``data/sectors/<sector_id>.csv`` (lowercase filename).
+    Read active instruments for ``sector_id`` from Supabase tables:
+    ``sector_catalog`` + ``instrument_sector_map`` + ``market_instruments``.
 
-    Required column: ``symbol``. Optional column: ``exchange`` (``NSE`` or ``BSE``); defaults to ``NSE``.
-    Rows with empty symbols are skipped.
     When ``max_symbols`` is None, uses :data:`MAX_SYMBOLS`.
     """
     cap = max_symbols if max_symbols is not None else MAX_SYMBOLS
@@ -52,38 +49,60 @@ def load_sector_instruments(
     if not sid:
         raise ValueError("sector_id must be non-empty")
 
-    path = SECTORS_DIR / f"{sid}.csv"
-    if not path.is_file():
-        raise FileNotFoundError(f"No sector file for '{sector_id}': {path}")
+    supabase_url = os.environ.get("SUPABASE_URL", "").strip()
+    supabase_key = os.environ.get("SUPABASE_KEY", "").strip()
+    if not supabase_url or not supabase_key:
+        raise ValueError(
+            "Missing SUPABASE_URL or SUPABASE_KEY; cannot load sector instruments from Supabase."
+        )
+
+    client = create_client(supabase_url, supabase_key)
+    try:
+        res = (
+            client.table("instrument_sector_map")
+            .select(
+                "is_active,"
+                "market_instruments!inner(symbol,exchange,is_active),"
+                "sector_catalog!inner(sector_key,is_active)"
+            )
+            .eq("is_active", True)
+            .eq("market_instruments.is_active", True)
+            .eq("sector_catalog.is_active", True)
+            .eq("sector_catalog.sector_key", sid)
+            .execute()
+        )
+    except APIError as e:
+        payload = e.args[0] if e.args else {}
+        code = payload.get("code", "") if isinstance(payload, dict) else ""
+        msg = payload.get("message", str(e)) if isinstance(payload, dict) else str(e)
+        if code == "PGRST205" or "could not find the table" in msg.lower():
+            raise RuntimeError(
+                "[Supabase] Sector registry tables missing or not exposed (REST). "
+                "Run sql/create_sector_registry_tables.sql first. "
+                f"PostgREST: {code or 'n/a'} - {msg}"
+            ) from e
+        raise RuntimeError(f"[Supabase] Sector registry query failed ({code or 'error'}): {msg}") from e
+
+    raw_rows = list((getattr(res, "data", None) or []))
+    if not raw_rows:
+        raise RuntimeError(
+            f"[SectorRegistry] No active instruments mapped for sector '{sid}' in Supabase."
+        )
 
     rows: list[SectorInstrument] = []
-    with path.open(encoding="utf-8", newline="") as f:
-        reader = csv.DictReader(f)
-        if not reader.fieldnames:
-            raise ValueError(f"CSV has no header row: {path}")
-        fields = {((n or "").strip().lower()): n for n in reader.fieldnames}
-        if "symbol" not in fields:
-            raise ValueError(f"CSV must have a 'symbol' column: {path}")
-        sym_col = fields["symbol"]
-        exch_col = fields.get("exchange")
-
-        for row in reader:
-            raw_sym = (row.get(sym_col) or "").strip()
-            if not raw_sym or raw_sym.startswith("#"):
-                continue
-            sym = raw_sym.upper()
-
-            if exch_col is not None:
-                raw_ex = (row.get(exch_col) or "").strip().upper()
-                exch = raw_ex if raw_ex else "NSE"
-            else:
-                exch = "NSE"
-
-            if exch not in _EXCHANGES:
-                raise ValueError(
-                    f"Invalid exchange {exch!r} for {sym} in {path} (use NSE or BSE)"
-                )
-            rows.append(SectorInstrument(symbol=sym, exchange=exch))
+    for row in raw_rows:
+        inst = row.get("market_instruments") if isinstance(row, dict) else None
+        if not isinstance(inst, dict):
+            continue
+        sym = str(inst.get("symbol", "")).strip().upper()
+        exch = str(inst.get("exchange", "")).strip().upper()
+        if not sym:
+            continue
+        if exch not in _EXCHANGES:
+            raise ValueError(
+                f"Invalid exchange {exch!r} for {sym} in Supabase (use NSE or BSE)"
+            )
+        rows.append(SectorInstrument(symbol=sym, exchange=exch))
 
     seen: set[tuple[str, str]] = set()
     ordered: list[SectorInstrument] = []

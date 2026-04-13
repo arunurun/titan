@@ -71,7 +71,7 @@ jobs:
             python scripts/inject_breeze_session_from_supabase.py
           fi
 
-      # On branch `sector`: defence sector audit (see data/sectors/defence.csv). Else: NIFTY live.
+      # On branches `main` and `sector`: defence sector audit. Else: NIFTY live.
       - name: Market audit (NIFTY live or defence sector)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -89,7 +89,7 @@ jobs:
           SMTP_USE_TLS: ${{ secrets.SMTP_USE_TLS }}
         run: |
           set -e
-          if [ "${{ github.ref_name }}" = "sector" ]; then
+          if [ "${{ github.ref_name }}" = "sector" ] || [ "${{ github.ref_name }}" = "main" ]; then
             # Default: one digest narrative per sector run (use --sector-per-symbol-narrative for per-stock posts).
             python main.py --sector defence --sector-workers 4
           else

@@ -1,0 +1,14 @@
+{
+  "events": [
+    {
+      "symbol": "HAL",
+      "date": "2026-04-15",
+      "type": "earnings"
+    },
+    {
+      "symbol": "MAZDOCK",
+      "date": "2026-04-14",
+      "type": "news"
+    }
+  ]
+}

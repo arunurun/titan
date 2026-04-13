@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from config_loader import TitanConfig, load_config
 from sector_registry import SectorInstrument, load_sector_instruments
@@ -17,6 +20,174 @@ MAX_WORKERS = 4
 
 # Serialize Gemini calls so sector threads do not burst past rate limits together.
 _GEMINI_SECTOR_LOCK = threading.Lock()
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def _fmt_metric(x: Any, digits: int = 2) -> str:
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return "n/a"
+    if math.isnan(v):
+        return "n/a"
+    if math.isinf(v):
+        return "inf" if v > 0 else "-inf"
+    return f"{v:.{digits}f}"
+
+
+def _z_label(z: Any) -> str:
+    try:
+        v = float(z)
+    except (TypeError, ValueError):
+        return "unknown"
+    if math.isnan(v):
+        return "unknown"
+    if v >= 2.0:
+        return "strong bullish deviation"
+    if v >= 1.0:
+        return "bullish deviation"
+    if v <= -2.0:
+        return "strong bearish deviation"
+    if v <= -1.0:
+        return "bearish deviation"
+    return "near mean"
+
+
+def _absorption_label(absorption: Any) -> str:
+    try:
+        v = float(absorption)
+    except (TypeError, ValueError):
+        return "unknown"
+    if math.isnan(v):
+        return "unknown"
+    if math.isinf(v) and v > 0:
+        return "extreme relative volume"
+    if v >= 1.5:
+        return "high participation"
+    if v >= 1.0:
+        return "above average participation"
+    if v >= 0.7:
+        return "below average participation"
+    return "thin participation"
+
+
+def _intent_label(intent: Any) -> str:
+    try:
+        v = float(intent)
+    except (TypeError, ValueError):
+        return "unknown"
+    if math.isnan(v):
+        return "unknown"
+    if v >= 70:
+        return "high conviction long bias"
+    if v >= 55:
+        return "moderate long bias"
+    if v >= 45:
+        return "balanced / neutral"
+    if v >= 30:
+        return "moderate defensive bias"
+    return "high defensive bias"
+
+
+def _format_symbol_metrics_line(result: dict[str, Any]) -> str:
+    symbol = result["symbol"]
+    exchange = result["exchange"]
+    audit = result["audit"]
+    z = audit.get("z_score")
+    intent = audit.get("effective_intent_score", audit.get("intent_score"))
+    absorption = audit.get("absorption_ratio")
+    ret1d = audit.get("return_1d_pct")
+    ema_dist = audit.get("ema_200_distance_pct")
+    atr_pct = audit.get("atr_14_pct")
+    rows = audit.get("rows")
+    flags: list[str] = []
+    if audit.get("panic_absorption_proxy"):
+        flags.append("panic-absorption")
+    if audit.get("trap_exit_proxy"):
+        flags.append("up-move-trap")
+    if audit.get("cluster_guardrail_applied"):
+        flags.append("cluster-downgraded")
+    if audit.get("macro_guardrail_applied"):
+        flags.append("macro-risk-throttle")
+    if audit.get("event_risk_soon"):
+        flags.append("event-risk<=3d")
+    flag_text = ", ".join(flags) if flags else "none"
+    return (
+        f"{symbol} ({exchange}) | intent {_fmt_metric(intent)} [{_intent_label(intent)}] "
+        f"| z {_fmt_metric(z)} [{_z_label(z)}] | absorption {_fmt_metric(absorption, 3)} "
+        f"[{_absorption_label(absorption)}] | ret1d {_fmt_metric(ret1d)}% "
+        f"| ema200_delta {_fmt_metric(ema_dist)}% | atr14 {_fmt_metric(atr_pct)}% "
+        f"| flags={flag_text} | rows {rows}"
+    )
+
+
+def _safe_float(x: Any) -> float:
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _apply_cluster_guardrails(ok_results: list[dict[str, Any]]) -> tuple[float, int]:
+    if not ok_results:
+        return 0.0, 0
+    red_count = 0
+    for r in ok_results:
+        ret = _safe_float(r["audit"].get("return_1d_pct"))
+        if not math.isnan(ret) and ret <= -1.0:
+            red_count += 1
+    red_ratio = red_count / len(ok_results)
+    applied = 0
+    if red_ratio > 0.70:
+        for r in ok_results:
+            a = r["audit"]
+            intent = _safe_float(a.get("effective_intent_score", a.get("intent_score")))
+            if not math.isnan(intent) and intent >= 55.0:
+                a["effective_intent_score"] = min(intent, 50.0)
+                a["cluster_guardrail_applied"] = True
+                a["cluster_guardrail_reason"] = (
+                    f"cluster breadth risk: {red_count}/{len(ok_results)} names <= -1% day return"
+                )
+                applied += 1
+    return red_ratio, applied
+
+
+def _apply_macro_guardrails(
+    ok_results: list[dict[str, Any]], macro_snapshot: dict[str, Any] | None
+) -> tuple[bool, str]:
+    if not macro_snapshot:
+        return False, "macro snapshot not provided"
+    gift = _safe_float(macro_snapshot.get("gift_nifty_change_pct"))
+    vix = _safe_float(macro_snapshot.get("india_vix"))
+    risk_on = (not math.isnan(gift) and gift < -0.5) or (not math.isnan(vix) and vix > 18.0)
+    if not risk_on:
+        return False, "macro trigger not active"
+    for r in ok_results:
+        a = r["audit"]
+        base = _safe_float(a.get("effective_intent_score", a.get("intent_score")))
+        if math.isnan(base):
+            continue
+        a["effective_intent_score"] = round(base * 0.5, 2)
+        a["macro_guardrail_applied"] = True
+        a["macro_guardrail_reason"] = (
+            f"GIFT={_fmt_metric(gift)}%, IndiaVIX={_fmt_metric(vix)} (trigger: GIFT<-0.5 or VIX>18)"
+        )
+    return True, f"GIFT={_fmt_metric(gift)}%, IndiaVIX={_fmt_metric(vix)}"
+
+
+def _apply_event_guardrails(ok_results: list[dict[str, Any]]) -> int:
+    adjusted = 0
+    for r in ok_results:
+        a = r["audit"]
+        if not a.get("event_risk_soon"):
+            continue
+        base = _safe_float(a.get("effective_intent_score", a.get("intent_score")))
+        if math.isnan(base):
+            continue
+        a["effective_intent_score"] = round(base * 0.85, 2)
+        a["event_guardrail_applied"] = True
+        adjusted += 1
+    return adjusted
 
 
 def build_equity_live_audit(
@@ -28,6 +199,7 @@ def build_equity_live_audit(
     lookback_calendar_days: int = 60,
     with_narrative: bool = True,
     strict_data: bool = False,
+    event_snapshot: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], str]:
     """
     Cash-market metrics only (z-score, volume absorption, intent blend).
@@ -39,7 +211,7 @@ def build_equity_live_audit(
     import pandas as pd
 
     from breeze_client import fetch_equity_data, volume_absorption_ratio
-    from titan_engine import calculate_intent_score, calculate_z_score
+    from titan_engine import calculate_atr, calculate_ema, calculate_intent_score, calculate_z_score
 
     df = fetch_equity_data(
         cfg,
@@ -74,10 +246,47 @@ def build_equity_live_audit(
         return skip, ""
     close_col = "close" if "close" in df.columns else df.columns[-1]
     series = pd.to_numeric(df[close_col], errors="coerce")
+    series_non_na = series.dropna()
+    close_last = float(series_non_na.iloc[-1]) if not series_non_na.empty else float("nan")
+    close_prev = float(series_non_na.iloc[-2]) if len(series_non_na) >= 2 else float("nan")
+    ret1d = (
+        ((close_last / close_prev) - 1.0) * 100.0
+        if (not math.isnan(close_last) and not math.isnan(close_prev) and close_prev != 0.0)
+        else float("nan")
+    )
     z = calculate_z_score(series, window=20)
     absorption = volume_absorption_ratio(df)
+    ema_200 = calculate_ema(series, span=200)
+    ema_distance_pct = (
+        ((close_last / ema_200) - 1.0) * 100.0
+        if (not math.isnan(close_last) and not math.isnan(ema_200) and ema_200 != 0.0)
+        else float("nan")
+    )
+    atr_14 = calculate_atr(df, window=14)
+    atr_14_pct = (
+        (atr_14 / close_last) * 100.0
+        if (not math.isnan(atr_14) and not math.isnan(close_last) and close_last != 0.0)
+        else float("nan")
+    )
+    atr_break_multiple = (
+        abs(close_last - ema_200) / atr_14
+        if (
+            not math.isnan(close_last)
+            and not math.isnan(ema_200)
+            and not math.isnan(atr_14)
+            and atr_14 > 0.0
+        )
+        else float("nan")
+    )
     pcr = float("nan")
     intent = calculate_intent_score(pcr, z, absorption)
+    panic_absorption_proxy = (
+        not math.isnan(ret1d) and ret1d < 0.0 and not math.isnan(absorption) and absorption >= 1.5
+    )
+    trap_exit_proxy = (
+        not math.isnan(ret1d) and ret1d > 0.0 and not math.isnan(absorption) and absorption <= 0.5
+    )
+    event_info = _event_flags_for_symbol(inst.symbol, event_snapshot)
     audit: dict[str, Any] = {
         "benchmark": "equity",
         "sector_mode": True,
@@ -86,12 +295,27 @@ def build_equity_live_audit(
         "exchange": inst.exchange,
         "z_score": z,
         "absorption_ratio": absorption,
+        "close_last": close_last,
+        "return_1d_pct": ret1d,
+        "ema_200": ema_200,
+        "ema_200_distance_pct": ema_distance_pct,
+        "atr_14": atr_14,
+        "atr_14_pct": atr_14_pct,
+        "atr_break_multiple": atr_break_multiple,
+        "structural_break_proxy": (
+            not math.isnan(atr_break_multiple) and atr_break_multiple >= 1.5
+        ),
+        "panic_absorption_proxy": panic_absorption_proxy,
+        "trap_exit_proxy": trap_exit_proxy,
+        **event_info,
+        "history_lt_200_sessions": len(series_non_na) < 200,
         "pcr": pcr,
         "put_oi": 0.0,
         "call_oi": 0.0,
         "oi_wall": {"strike": float("nan"), "oi": float("nan")},
         "option_expiry": None,
         "intent_score": intent,
+        "effective_intent_score": intent,
         "rows": len(df),
         "option_chain_unavailable": True,
     }
@@ -104,13 +328,72 @@ def build_equity_live_audit(
     return audit, post
 
 
-def _process_one(cfg: TitanConfig, sector_id: str, inst: SectorInstrument) -> dict[str, Any]:
+def _event_flags_for_symbol(
+    symbol: str, event_snapshot: dict[str, Any] | None
+) -> dict[str, Any]:
+    if not isinstance(event_snapshot, dict):
+        return {
+            "event_risk_present": False,
+            "event_risk_soon": False,
+            "event_days_to_next": None,
+            "event_types": [],
+        }
+    events = event_snapshot.get("events")
+    if not isinstance(events, list):
+        events = []
+    sym = "".join(ch for ch in symbol.upper() if ch.isalnum())
+    today = datetime.now(IST).date()
+    days: list[int] = []
+    types: list[str] = []
+    for raw in events:
+        if not isinstance(raw, dict):
+            continue
+        es = "".join(ch for ch in str(raw.get("symbol", "")).upper() if ch.isalnum())
+        if es != sym:
+            continue
+        t = str(raw.get("type", "")).strip().lower()
+        if t:
+            types.append(t)
+        ds = str(raw.get("date", "")).strip()
+        try:
+            d = datetime.fromisoformat(ds).date()
+        except ValueError:
+            continue
+        days.append((d - today).days)
+    if not days:
+        return {
+            "event_risk_present": False,
+            "event_risk_soon": False,
+            "event_days_to_next": None,
+            "event_types": sorted(set(types)),
+        }
+    nxt = min(days)
+    return {
+        "event_risk_present": True,
+        "event_risk_soon": nxt <= 3,
+        "event_days_to_next": nxt,
+        "event_types": sorted(set(types)),
+    }
+
+
+def _process_one(
+    cfg: TitanConfig,
+    sector_id: str,
+    inst: SectorInstrument,
+    *,
+    event_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     from breeze_client import create_breeze_session
     from supabase_log import save_audit_log
 
     breeze = create_breeze_session(cfg)
     audit, post = build_equity_live_audit(
-        cfg, breeze, inst, sector_id=sector_id, strict_data=False
+        cfg,
+        breeze,
+        inst,
+        sector_id=sector_id,
+        strict_data=False,
+        event_snapshot=event_snapshot,
     )
     if audit.get("skipped_no_data"):
         logger.warning(
@@ -135,7 +418,13 @@ def _process_one(cfg: TitanConfig, sector_id: str, inst: SectorInstrument) -> di
     }
 
 
-def _process_one_metrics(cfg: TitanConfig, sector_id: str, inst: SectorInstrument) -> dict[str, Any]:
+def _process_one_metrics(
+    cfg: TitanConfig,
+    sector_id: str,
+    inst: SectorInstrument,
+    *,
+    event_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Breeze + metrics only; no Gemini (used with --sector-digest)."""
     from breeze_client import create_breeze_session
 
@@ -147,6 +436,7 @@ def _process_one_metrics(cfg: TitanConfig, sector_id: str, inst: SectorInstrumen
         sector_id=sector_id,
         with_narrative=False,
         strict_data=False,
+        event_snapshot=event_snapshot,
     )
     if audit.get("skipped_no_data"):
         logger.warning(
@@ -176,11 +466,14 @@ def run_sector_live(
     max_workers: int | None = None,
     max_symbols: int | None = None,
     digest: bool = True,
+    macro_snapshot: dict[str, Any] | None = None,
+    event_snapshot: dict[str, Any] | None = None,
+    instruments_override: list[SectorInstrument] | None = None,
 ) -> None:
     from email_notify import send_success_post_email
 
     cfg = load_config()
-    instruments = load_sector_instruments(sector_id)
+    instruments = instruments_override if instruments_override is not None else load_sector_instruments(sector_id)
     if not instruments:
         raise RuntimeError(f"[Sector] No instruments loaded for sector {sector_id!r}")
 
@@ -193,7 +486,10 @@ def run_sector_live(
     results: list[dict[str, Any]] = []
     worker = _process_one_metrics if digest else _process_one
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        future_map = {pool.submit(worker, cfg, sector_id, inst): inst for inst in instruments}
+        future_map = {
+            pool.submit(worker, cfg, sector_id, inst, event_snapshot=event_snapshot): inst
+            for inst in instruments
+        }
         for fut in as_completed(future_map):
             inst = future_map[fut]
             try:
@@ -224,6 +520,9 @@ def run_sector_live(
 
         ok_results = [r for r in results if r.get("ok")]
         audits = [r["audit"] for r in ok_results]
+        red_ratio, cluster_downgrades = _apply_cluster_guardrails(ok_results)
+        event_adjustments = _apply_event_guardrails(ok_results)
+        macro_applied, macro_reason = _apply_macro_guardrails(ok_results, macro_snapshot)
         with _GEMINI_SECTOR_LOCK:
             post = generate_sector_digest_narrative(
                 audits, sector_id=sector_id, api_keys=cfg.gemini_api_keys
@@ -237,15 +536,28 @@ def run_sector_live(
             "",
             post.strip(),
             "",
+            "--- Risk overlays ---",
+            f"Cluster breadth red ratio (<= -1% day): {_fmt_metric(red_ratio * 100.0)}%",
+            f"Cluster bullish downgrades applied: {cluster_downgrades}",
+            f"Event-risk adjustments applied: {event_adjustments}",
+            f"Macro guardrail applied: {'yes' if macro_applied else 'no'} ({macro_reason})",
+            "",
             "--- Per-symbol metrics ---",
         ]
-        for r in sorted(ok_results, key=lambda x: (x["symbol"], x["exchange"])):
-            a = r["audit"]
-            lines.append(
-                f"{r['symbol']} ({r['exchange']}): z={a.get('z_score')} "
-                f"intent={a.get('intent_score')} absorption={a.get('absorption_ratio')} "
-                f"rows={a.get('rows')}"
-            )
+        # Rank by highest intent first so the digest starts with stronger setups.
+        ranked = sorted(
+            ok_results,
+            key=lambda x: (
+                float("-inf")
+                if math.isnan(
+                    _safe_float(x["audit"].get("effective_intent_score", float("nan")))
+                )
+                else _safe_float(x["audit"].get("effective_intent_score", float("nan")))
+            ),
+            reverse=True,
+        )
+        for r in ranked:
+            lines.append(_format_symbol_metrics_line(r))
         for r in sorted(
             (x for x in results if not x.get("ok")),
             key=lambda x: (x["symbol"], x["exchange"]),
