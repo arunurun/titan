@@ -32,6 +32,6 @@
 |---|---|---|
 | R1: Validate runtime credentials from `.env` | COMPLETED | Supabase/Breeze/Gemini vars are present in `.env`. |
 | R2: Backfill sector registry to Supabase | COMPLETED | Backfill succeeded: `defence` rows=27, total_links=27. |
-| R3: Run provider weekly sync manually | BLOCKED | Sync failed mid-run with connection termination after 3332 rows (`scanner_runs.status=failed`, message `ConnectionTerminated`). |
-| R4: Titan sector smoke run against Supabase | NOT STARTED | Paused due R3 blocker as per requested execution protocol. |
+| R3: Run provider weekly sync manually | IN PROGRESS | Patched sync to batched upserts + retry and rerunning manual sync. |
+| R4: Titan sector smoke run against Supabase | NOT STARTED | Pending successful R3 completion. |
 

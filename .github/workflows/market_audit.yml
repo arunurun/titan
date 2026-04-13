@@ -51,25 +51,14 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # Prefer env-based secret so bash sees the token reliably; then Python only if empty.
-      - name: Load Breeze session token (secret or Supabase)
+      # Single source of truth: always load Breeze token from Supabase session_config.
+      - name: Load Breeze session token (Supabase session_config)
         env:
-          BREEZE_SESSION_TOKEN: ${{ secrets.BREEZE_SESSION_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           set -e
-          if [ -n "${BREEZE_SESSION_TOKEN:-}" ]; then
-            d=$(openssl rand -hex 16)
-            {
-              echo "BREEZE_SESSION_TOKEN<<$d"
-              echo "$BREEZE_SESSION_TOKEN"
-              echo "$d"
-            } >> "$GITHUB_ENV"
-            echo "Loaded BREEZE_SESSION_TOKEN from repository secret."
-          else
-            python scripts/inject_breeze_session_from_supabase.py
-          fi
+          python scripts/inject_breeze_session_from_supabase.py
 
       # On branches `main` and `sector`: defence sector audit. Else: NIFTY live.
       - name: Market audit (NIFTY live or defence sector)
