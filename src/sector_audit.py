@@ -471,8 +471,12 @@ def run_sector_live(
     instruments_override: list[SectorInstrument] | None = None,
 ) -> None:
     from email_notify import send_success_post_email
+    from breeze_client import create_breeze_session
 
     cfg = load_config()
+    # Preflight Breeze auth once to fail fast on expired tokens.
+    # Without this, each worker thread would emit the same auth stacktrace.
+    create_breeze_session(cfg)
     instruments = instruments_override if instruments_override is not None else load_sector_instruments(sector_id)
     if not instruments:
         raise RuntimeError(f"[Sector] No instruments loaded for sector {sector_id!r}")

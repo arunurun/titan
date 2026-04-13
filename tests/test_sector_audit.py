@@ -130,7 +130,8 @@ def test_run_sector_live_calls_workers(mock_load, mock_process, mock_email):
         {"ok": True, "symbol": "B", "exchange": "NSE", "post": "pb", "error": None},
     ]
 
-    run_sector_live("defence", max_workers=2, digest=False)
+    with patch("breeze_client.create_breeze_session", return_value=MagicMock()):
+        run_sector_live("defence", max_workers=2, digest=False)
 
     assert mock_process.call_count == 2
     mock_email.assert_called_once()
@@ -146,9 +147,10 @@ def test_run_sector_live_all_fail_raises(mock_load, mock_email):
     def boom(*a, **k):
         raise RuntimeError("[Breeze] fail")
 
-    with patch("sector_audit._process_one", side_effect=boom):
-        with pytest.raises(RuntimeError, match="All 1 instruments failed"):
-            run_sector_live("defence", max_workers=1, digest=False)
+    with patch("breeze_client.create_breeze_session", return_value=MagicMock()):
+        with patch("sector_audit._process_one", side_effect=boom):
+            with pytest.raises(RuntimeError, match="All 1 instruments failed"):
+                run_sector_live("defence", max_workers=1, digest=False)
 
     mock_email.assert_not_called()
 
@@ -179,11 +181,12 @@ def test_run_sector_live_digest_one_gemini_call(mock_load, mock_metrics, mock_em
             "error": None,
         },
     ]
-    with patch(
-        "brain.generate_sector_digest_narrative", return_value="One combined post"
-    ) as mock_digest:
-        with patch("supabase_log.save_audit_log") as mock_save:
-            run_sector_live("defence", max_workers=2, digest=True)
+    with patch("breeze_client.create_breeze_session", return_value=MagicMock()):
+        with patch(
+            "brain.generate_sector_digest_narrative", return_value="One combined post"
+        ) as mock_digest:
+            with patch("supabase_log.save_audit_log") as mock_save:
+                run_sector_live("defence", max_workers=2, digest=True)
 
     mock_digest.assert_called_once()
     assert mock_save.call_count == 2
@@ -237,14 +240,30 @@ def test_run_sector_live_macro_guardrail_applied(mock_load, mock_metrics, mock_e
             "error": None,
         },
     ]
-    with patch("brain.generate_sector_digest_narrative", return_value="One combined post"):
-        with patch("supabase_log.save_audit_log"):
-            run_sector_live(
-                "defence",
-                max_workers=2,
-                digest=True,
-                macro_snapshot={"gift_nifty_change_pct": -0.8, "india_vix": 17.5},
-            )
+    with patch("breeze_client.create_breeze_session", return_value=MagicMock()):
+        with patch("brain.generate_sector_digest_narrative", return_value="One combined post"):
+            with patch("supabase_log.save_audit_log"):
+                run_sector_live(
+                    "defence",
+                    max_workers=2,
+                    digest=True,
+                    macro_snapshot={"gift_nifty_change_pct": -0.8, "india_vix": 17.5},
+                )
 
     body = mock_email.call_args[0][0]
     assert "Macro guardrail applied: yes" in body
+
+
+@patch("sector_audit._process_one_metrics")
+@patch("sector_audit.load_sector_instruments")
+def test_run_sector_live_fails_fast_on_expired_session(mock_load, mock_metrics):
+    from sector_audit import run_sector_live
+
+    mock_load.return_value = [SectorInstrument("A", "NSE")]
+    with patch(
+        "breeze_client.create_breeze_session",
+        side_effect=RuntimeError("[Breeze] Session token expired."),
+    ):
+        with pytest.raises(RuntimeError, match="Session token expired"):
+            run_sector_live("defence", max_workers=1, digest=True)
+    mock_metrics.assert_not_called()
