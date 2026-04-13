@@ -413,6 +413,7 @@ def _process_one(
         "ok": True,
         "symbol": inst.symbol,
         "exchange": inst.exchange,
+        "audit": audit,
         "post": post,
         "error": None,
     }
@@ -519,6 +520,7 @@ def run_sector_live(
         )
 
     if digest:
+        from analysis_store import persist_sector_run_analytics
         from brain import generate_sector_digest_narrative
         from supabase_log import save_audit_log
 
@@ -533,6 +535,14 @@ def run_sector_live(
             )
         for r in ok_results:
             save_audit_log({"audit": r["audit"], "post": post}, cfg)
+        persist_sector_run_analytics(
+            cfg,
+            sector=sector_id,
+            audits=audits,
+            mode="sector_digest",
+            ok_count=ok_count,
+            total_count=len(results),
+        )
 
         lines = [
             f"Titan sector run: {sector_id!r} — {ok_count}/{len(results)} succeeded "
@@ -584,4 +594,18 @@ def run_sector_live(
 
     digest_out = "\n".join(lines).strip()
     send_success_post_email(digest_out, subject_prefix=f"Titan V12.0 sector {sector_id}")
+    try:
+        from analysis_store import persist_sector_run_analytics
+
+        ok_audits = [r["audit"] for r in results if r.get("ok") and isinstance(r.get("audit"), dict)]
+        persist_sector_run_analytics(
+            cfg,
+            sector=sector_id,
+            audits=ok_audits,
+            mode="sector_per_symbol_narrative",
+            ok_count=ok_count,
+            total_count=len(results),
+        )
+    except Exception:
+        logger.exception("Analysis store persist hook failed")
     print(digest_out)
