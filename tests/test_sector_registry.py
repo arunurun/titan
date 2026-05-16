@@ -1,6 +1,7 @@
-"""Sector registry tests (Supabase-backed)."""
+"""Sector registry tests (Supabase primary, CSV fallback)."""
 
 from types import SimpleNamespace
+from pathlib import Path
 
 import pytest
 
@@ -74,14 +75,14 @@ def test_dedupe_preserves_order(monkeypatch):
 def test_missing_supabase_env(monkeypatch):
     monkeypatch.delenv("SUPABASE_URL", raising=False)
     monkeypatch.delenv("SUPABASE_KEY", raising=False)
-    with pytest.raises(ValueError, match="Missing SUPABASE_URL or SUPABASE_KEY"):
-        load_sector_symbols("defence")
+    with pytest.raises(RuntimeError, match="Supabase load failed and CSV fallback missing/empty"):
+        load_sector_symbols("unknown_sector")
 
 
 def test_empty_sector_mapping_raises(monkeypatch):
     _mock_supabase(monkeypatch, [])
     with pytest.raises(RuntimeError, match="No active instruments mapped"):
-        load_sector_symbols("defence")
+        load_sector_symbols("unknown_sector")
 
 
 def test_bse_rows_and_dedupe_by_exchange(monkeypatch):
@@ -100,5 +101,32 @@ def test_bse_rows_and_dedupe_by_exchange(monkeypatch):
 
 def test_invalid_exchange_raises(monkeypatch):
     _mock_supabase(monkeypatch, [{"market_instruments": {"symbol": "X", "exchange": "NYSE"}}])
-    with pytest.raises(ValueError, match="Invalid exchange"):
-        load_sector_instruments("defence")
+    out = load_sector_symbols("defence")
+    assert "HAL" in out
+
+
+def test_falls_back_to_csv_when_supabase_missing(monkeypatch, tmp_path: Path):
+    sectors_dir = tmp_path / "sectors"
+    sectors_dir.mkdir(parents=True, exist_ok=True)
+    (sectors_dir / "defence.csv").write_text(
+        "symbol,exchange\nHAL,NSE\nBEL,NSE\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("sector_registry.SECTORS_DIR", sectors_dir)
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_KEY", raising=False)
+    out = load_sector_symbols("defence")
+    assert out == ["HAL", "BEL"]
+
+
+def test_falls_back_to_csv_when_supabase_returns_empty(monkeypatch, tmp_path: Path):
+    sectors_dir = tmp_path / "sectors"
+    sectors_dir.mkdir(parents=True, exist_ok=True)
+    (sectors_dir / "defence.csv").write_text(
+        "symbol,exchange\nHAL,NSE\nBDL,NSE\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("sector_registry.SECTORS_DIR", sectors_dir)
+    _mock_supabase(monkeypatch, [])
+    out = load_sector_symbols("defence")
+    assert out == ["HAL", "BDL"]

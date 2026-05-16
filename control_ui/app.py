@@ -148,8 +148,8 @@ TEMPLATE = """
         </select>
         <label>Sector ID (for sector mode)</label>
         <input name="sector_id" value="defence" />
-        <label>Max symbols (optional)</label>
-        <input name="max_symbols" value="3" />
+        <label>Max symbols (optional; leave blank for full sector list)</label>
+        <input name="max_symbols" value="" placeholder="all" />
         <label>Workers (optional)</label>
         <input name="workers" value="2" />
         <button type="submit">Run Analysis</button>

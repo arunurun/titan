@@ -18,7 +18,7 @@ on:
       max_symbols:
         description: "Optional max symbols cap (sector mode)"
         required: false
-        default: "20"
+        default: ""
       workers:
         description: "Optional sector workers"
         required: false

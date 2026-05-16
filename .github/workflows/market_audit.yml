@@ -13,18 +13,8 @@ name: Market audit (Titan V12.0)
 on:
   workflow_dispatch:
   schedule:
-    # NSE cash session window in IST, converted to UTC (GitHub schedule is always UTC).
-    # Weekday field is UTC: Mon–Fri = 1–5 in UTC (early IST Monday before ~05:30 IST is still Sunday UTC).
-    # :15 past each hour IST → :45 UTC; 11:00 IST = 05:30 UTC; 11:15 IST = 05:45 UTC; 15:30 IST = 10:00 UTC.
-    - cron: "45 3 * * 1-5"
-    - cron: "45 4 * * 1-5"
-    - cron: "30 5 * * 1-5"
-    - cron: "45 5 * * 1-5"
-    - cron: "45 6 * * 1-5"
-    - cron: "45 7 * * 1-5"
-    - cron: "45 8 * * 1-5"
-    - cron: "45 9 * * 1-5"
-    - cron: "0 10 * * 1-5"
+    # 06:30 IST Monday-Friday (GitHub cron is UTC).
+    - cron: "0 1 * * 1-5"
 
 permissions:
   contents: read
@@ -41,7 +31,7 @@ jobs:
         run: |
           echo "github.event_name=${{ github.event_name }}"
           echo "UTC now:" && date -u
-          echo "11:15 IST = 05:45 UTC | 11:00 IST = 05:30 UTC (GitHub cron is always UTC)"
+          echo "06:30 IST = 01:00 UTC (GitHub cron is always UTC)"
 
       - uses: actions/checkout@v4
 
@@ -52,8 +42,44 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Market-open guard (IST)
+        id: market_open_guard
+        env:
+          MARKET_HOLIDAYS_IST: ${{ secrets.MARKET_HOLIDAYS_IST }}
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+
+          root = Path(".").resolve()
+          src = root / "src"
+          if str(src) not in sys.path:
+            sys.path.insert(0, str(src))
+
+          from market_calendar import market_closed_reason_ist
+
+          now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
+          reason = market_closed_reason_ist(now_ist)
+          out = os.environ.get("GITHUB_OUTPUT", "")
+          if reason:
+            print(f"{reason} Skipping market audit for {now_ist.date().isoformat()} (IST).")
+            if out:
+              with open(out, "a", encoding="utf-8") as fp:
+                fp.write("market_closed=true\n")
+                fp.write(f"reason={reason}\n")
+          else:
+            print(f"Market open day confirmed for {now_ist.date().isoformat()} (IST).")
+            if out:
+              with open(out, "a", encoding="utf-8") as fp:
+                fp.write("market_closed=false\n")
+          PY
+
       # Single source of truth: always load Breeze token from Supabase session_config.
       - name: Load Breeze session token (Supabase session_config)
+        if: ${{ steps.market_open_guard.outputs.market_closed != 'true' }}
         id: inject_token
         continue-on-error: true
         env:
@@ -72,7 +98,7 @@ jobs:
           exit "$rc"
 
       - name: Trigger breeze-token-updator workflow when token injection fails
-        if: ${{ steps.inject_token.outcome == 'failure' && steps.inject_token.outputs.breeze_session_invalid == 'true' }}
+        if: ${{ steps.market_open_guard.outputs.market_closed != 'true' && steps.inject_token.outcome == 'failure' && steps.inject_token.outputs.breeze_session_invalid == 'true' }}
         env:
           GH_PAT: ${{ secrets.BREEZE_TOKEN_UPDATOR_PAT }}
         run: |
@@ -90,13 +116,14 @@ jobs:
           echo "Dispatched arunurun/breeze-token-updator validate_token workflow."
 
       - name: Stop run if token injection failed
-        if: ${{ steps.inject_token.outcome == 'failure' }}
+        if: ${{ steps.market_open_guard.outputs.market_closed != 'true' && steps.inject_token.outcome == 'failure' }}
         run: |
           echo "Token injection failed (exit=${{ steps.inject_token.outputs.exit_code }})."
           exit 1
 
       # On branches `main`, `sector`, `analysis`: defence sector audit. Else: NIFTY live.
       - name: Market audit (NIFTY live or defence sector)
+        if: ${{ steps.market_open_guard.outputs.market_closed != 'true' }}
         id: market_audit
         continue-on-error: true
         env:
@@ -133,7 +160,7 @@ jobs:
           exit "$rc"
 
       - name: Trigger breeze-token-updator workflow on invalid token
-        if: ${{ steps.market_audit.outputs.breeze_session_invalid == 'true' }}
+        if: ${{ steps.market_open_guard.outputs.market_closed != 'true' && steps.market_audit.outputs.breeze_session_invalid == 'true' }}
         env:
           GH_PAT: ${{ secrets.BREEZE_TOKEN_UPDATOR_PAT }}
         run: |
@@ -151,7 +178,7 @@ jobs:
           echo "Dispatched arunurun/breeze-token-updator validate_token workflow."
 
       - name: Mark run failed if market audit failed
-        if: ${{ steps.market_audit.outcome == 'failure' }}
+        if: ${{ steps.market_open_guard.outputs.market_closed != 'true' && steps.market_audit.outcome == 'failure' }}
         run: |
           echo "Market audit step failed (exit=${{ steps.market_audit.outputs.exit_code }})."
           exit 1

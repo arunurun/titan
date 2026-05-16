@@ -1,4 +1,4 @@
-"""Sector-wide equity audits: CSV universe, parallel Breeze fetches, Supabase + digest email."""
+"""Sector-wide equity audits: Supabase universe (CSV fallback), parallel Breeze fetches, digest email."""
 
 from __future__ import annotations
 
