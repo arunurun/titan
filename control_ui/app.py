@@ -16,6 +16,7 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
 from breeze_session_auth import parse_api_session_from_input, upsert_env_var  # noqa: E402
+from sector_registry import list_active_sector_ids  # noqa: E402
 
 app = Flask(__name__)
 
@@ -143,12 +144,16 @@ TEMPLATE = """
       <form method="post" action="/run-analysis">
         <label>Mode</label>
         <select name="mode">
-          <option value="live">Live (NIFTY)</option>
-          <option value="sector" selected>Sector (Digest)</option>
-          <option value="all_sectors">All Sectors (Digest)</option>
+          <option value="live" {% if run_mode == "live" %}selected{% endif %}>Live (NIFTY)</option>
+          <option value="sector" {% if run_mode == "sector" %}selected{% endif %}>Sector (Digest)</option>
+          <option value="all_sectors" {% if run_mode == "all_sectors" %}selected{% endif %}>All Sectors (Digest)</option>
         </select>
         <label>Sector ID (for sector mode)</label>
-        <input name="sector_id" value="defence" />
+        <select name="sector_id">
+          {% for sid in sectors %}
+            <option value="{{ sid }}" {% if selected_sector == sid %}selected{% endif %}>{{ sid }}</option>
+          {% endfor %}
+        </select>
         <label>Max symbols (optional; leave blank for full sector list)</label>
         <input name="max_symbols" value="" placeholder="all" />
         <label>Workers (optional)</label>
@@ -269,9 +274,63 @@ def _run_titan_now(mode: str, sector_id: str, max_symbols: str, workers: str) ->
     return proc.returncode, output.strip()
 
 
+def _sector_choices() -> list[str]:
+    try:
+        sectors = [
+            s
+            for s in list_active_sector_ids(include_unknown=False)
+            if s not in {"unknown", "non_equity"}
+        ]
+        if sectors:
+            return sectors
+    except Exception:
+        pass
+    return [
+        "ai",
+        "auto",
+        "auto_ancillary",
+        "banks_private",
+        "capital_goods_industrials",
+        "cement_building_materials",
+        "chemicals",
+        "consumer_discretionary",
+        "defence",
+        "fmcg_staples",
+        "infrastructure_construction",
+        "insurance",
+        "it",
+        "logistics",
+        "media",
+        "metals_mining",
+        "nbfc_financial_services",
+        "oil_gas_energy",
+        "pharma_healthcare",
+        "power_utilities",
+        "realty_reits",
+        "telecom",
+        "textiles",
+    ]
+
+
+def _render_page(**kwargs):
+    kwargs = dict(kwargs)
+    sectors = _sector_choices()
+    selected_sector = str(kwargs.pop("selected_sector", None) or "defence")
+    if selected_sector not in sectors:
+        selected_sector = sectors[0] if sectors else "defence"
+    run_mode = str(kwargs.pop("run_mode", None) or "sector")
+    return render_template_string(
+        TEMPLATE,
+        sectors=sectors,
+        selected_sector=selected_sector,
+        run_mode=run_mode,
+        **kwargs,
+    )
+
+
 @app.get("/")
 def index():
-    return render_template_string(TEMPLATE)
+    return _render_page()
 
 
 @app.post("/run-analysis")
@@ -285,9 +344,20 @@ def run_analysis():
         code, output = _run_titan_now(mode, sector_id, max_symbols, workers)
         level = "ok" if code == 0 else "err"
         msg = f"Analysis finished with exit code {code}."
-        return render_template_string(TEMPLATE, message=msg, level=level, run_output=output)
+        return _render_page(
+            message=msg,
+            level=level,
+            run_output=output,
+            run_mode=mode,
+            selected_sector=sector_id,
+        )
     except Exception as exc:  # noqa: BLE001
-        return render_template_string(TEMPLATE, message=f"Run failed: {exc}", level="err")
+        return _render_page(
+            message=f"Run failed: {exc}",
+            level="err",
+            run_mode=mode,
+            selected_sector=sector_id,
+        )
 
 
 @app.post("/validate-token")
@@ -300,8 +370,7 @@ def validate_token():
         ok, detail = _validate_breeze_token(api_key, api_secret, token)
         status = "VALID" if ok else "INVALID"
         token_level = "ok" if ok else "err"
-        return render_template_string(
-            TEMPLATE,
+        return _render_page(
             token_status=status,
             token_level=token_level,
             token_detail=detail,
@@ -310,7 +379,7 @@ def validate_token():
             level="ok" if ok else "warn",
         )
     except Exception as exc:  # noqa: BLE001
-        return render_template_string(TEMPLATE, message=f"Token validation failed: {exc}", level="err")
+        return _render_page(message=f"Token validation failed: {exc}", level="err")
 
 
 @app.post("/persist-token")
@@ -324,8 +393,7 @@ def persist_token():
         token = parse_api_session_from_input(raw)
         ok, detail = _validate_breeze_token(api_key, api_secret, token)
         if not ok:
-            return render_template_string(
-                TEMPLATE,
+            return _render_page(
                 message=f"Provided token is invalid: {detail}",
                 level="err",
                 login_url=_breeze_login_url(api_key),
@@ -333,8 +401,7 @@ def persist_token():
         _persist_token_to_supabase(token)
         if also_write_env:
             upsert_env_var(ROOT / ".env", "BREEZE_SESSION_TOKEN", token)
-        return render_template_string(
-            TEMPLATE,
+        return _render_page(
             message="Token validated and persisted to Supabase session_config.",
             level="ok",
             token_status="VALID",
@@ -343,7 +410,7 @@ def persist_token():
             login_url=_breeze_login_url(api_key),
         )
     except Exception as exc:  # noqa: BLE001
-        return render_template_string(TEMPLATE, message=f"Persist token failed: {exc}", level="err")
+        return _render_page(message=f"Persist token failed: {exc}", level="err")
 
 
 if __name__ == "__main__":

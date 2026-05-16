@@ -266,6 +266,53 @@ def _apply_event_guardrails(ok_results: list[dict[str, Any]]) -> int:
     return adjusted
 
 
+def _prediction_quality_gate(
+    ok_results: list[dict[str, Any]],
+    *,
+    total_count: int,
+) -> dict[str, Any]:
+    """
+    Conservative deployment gate for predictive scoring quality.
+
+    This is a safety gate (confidence/coverage), not a promise of market prediction certainty.
+    """
+    audits = [r.get("audit") for r in ok_results if isinstance(r.get("audit"), dict)]
+    next_week_vals = [
+        _safe_float(a.get("next_week_score"))
+        for a in audits
+        if not math.isnan(_safe_float(a.get("next_week_score")))
+    ]
+    coverage_ratio = (len(ok_results) / total_count) if total_count else 0.0
+    scored_ratio = (len(next_week_vals) / len(audits)) if audits else 0.0
+    sorted_vals = sorted(next_week_vals, reverse=True)
+    top5 = sorted_vals[:5]
+    top5_mean = (sum(top5) / len(top5)) if top5 else float("nan")
+    spread_top_bottom = (sorted_vals[0] - sorted_vals[-1]) if len(sorted_vals) >= 2 else float("nan")
+
+    reasons: list[str] = []
+    if len(ok_results) < 10:
+        reasons.append("insufficient successful symbols (<10)")
+    if coverage_ratio < 0.60:
+        reasons.append("coverage below 60%")
+    if scored_ratio < 0.90:
+        reasons.append("predictive score coverage below 90%")
+    if math.isnan(top5_mean) or top5_mean < 55.0:
+        reasons.append("top-5 next-week score mean below 55")
+    if math.isnan(spread_top_bottom) or spread_top_bottom < 8.0:
+        reasons.append("signal spread too narrow (<8 points)")
+
+    return {
+        "passed": len(reasons) == 0,
+        "reasons": reasons,
+        "ok_count": len(ok_results),
+        "total_count": total_count,
+        "coverage_ratio": coverage_ratio,
+        "scored_ratio": scored_ratio,
+        "top5_next_week_mean": top5_mean,
+        "spread_top_bottom": spread_top_bottom,
+    }
+
+
 def build_equity_live_audit(
     cfg: TitanConfig,
     breeze: Any,
@@ -611,6 +658,7 @@ def run_sector_live(
 
         ok_results = [r for r in results if r.get("ok")]
         audits = [r["audit"] for r in ok_results]
+        quality_gate = _prediction_quality_gate(ok_results, total_count=len(results))
         red_ratio, cluster_downgrades = _apply_cluster_guardrails(ok_results)
         event_adjustments = _apply_event_guardrails(ok_results)
         macro_applied, macro_reason = _apply_macro_guardrails(ok_results, macro_snapshot)
@@ -664,6 +712,11 @@ def run_sector_live(
             f"(digest mode: 1 Gemini call)\n",
             "",
             "--- Executive snapshot ---",
+            (
+                "Deployment mode: ACTIONABLE"
+                if quality_gate["passed"]
+                else "Deployment mode: WATCHLIST ONLY (quality gate failed)"
+            ),
             f"Regime: {(comparison.get('regime') if isinstance(comparison, dict) else 'n/a')}",
             f"Avg effective intent: {_fmt_metric(today.get('avg_effective_intent_score') if isinstance(today, dict) else None)} "
             f"(vs 7d {_fmt_metric(dlt.get('avg_effective_intent_vs_7d') if isinstance(dlt, dict) else None)}, "
@@ -714,6 +767,18 @@ def run_sector_live(
                 "Quality checks: "
                 + (", ".join(qc_warnings) if qc_warnings else "ok")
             ),
+                "",
+                "--- Prediction quality gate ---",
+                f"Gate status: {'PASS' if quality_gate['passed'] else 'FAIL'}",
+                f"Successful symbols: {quality_gate['ok_count']}/{quality_gate['total_count']} ({_fmt_metric(quality_gate['coverage_ratio'] * 100.0)}%)",
+                f"Scored symbols coverage: {_fmt_metric(quality_gate['scored_ratio'] * 100.0)}%",
+                f"Top-5 nextWeek mean: {_fmt_metric(quality_gate['top5_next_week_mean'])}",
+                f"Signal spread (top-bottom nextWeek): {_fmt_metric(quality_gate['spread_top_bottom'])}",
+                (
+                    "Gate reasons: none"
+                    if quality_gate["passed"]
+                    else "Gate reasons: " + "; ".join(quality_gate["reasons"])
+                ),
             "",
             "--- Per-symbol metrics ---",
             ]

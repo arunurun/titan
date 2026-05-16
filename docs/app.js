@@ -3,6 +3,32 @@ const WORKFLOWS = {
   validate: "validate_breeze_token_manual.yml",
   persist: "persist_breeze_token_manual.yml",
 };
+const PROXY_BASE = "https://titan-proxy.arunjain-real.workers.dev";
+const SECTOR_OPTIONS = [
+  "ai",
+  "auto",
+  "auto_ancillary",
+  "banks_private",
+  "capital_goods_industrials",
+  "cement_building_materials",
+  "chemicals",
+  "consumer_discretionary",
+  "defence",
+  "fmcg_staples",
+  "infrastructure_construction",
+  "insurance",
+  "it",
+  "logistics",
+  "media",
+  "metals_mining",
+  "nbfc_financial_services",
+  "oil_gas_energy",
+  "pharma_healthcare",
+  "power_utilities",
+  "realty_reits",
+  "telecom",
+  "textiles",
+];
 
 const el = (id) => document.getElementById(id);
 const statusEl = el("status");
@@ -15,8 +41,8 @@ function setWorking(label) {
   setStatus(`Working: ${label} ...`);
 }
 
-function normalizeProxyBase(raw) {
-  const trimmed = String(raw || "").trim();
+function normalizeProxyBase(raw = PROXY_BASE) {
+  const trimmed = String(raw || PROXY_BASE).trim();
   if (!trimmed) throw new Error("Proxy URL is required.");
   let parsed;
   try {
@@ -39,14 +65,33 @@ function normalizeProxyBase(raw) {
 }
 
 function cfg() {
-  const proxyBase = normalizeProxyBase(el("proxyBase").value);
-  el("proxyBase").value = proxyBase;
-  try {
-    localStorage.setItem("titan_control_proxy_base", proxyBase);
-  } catch (_e) {
-    // Ignore storage failures.
-  }
+  const proxyBase = normalizeProxyBase(PROXY_BASE);
   return { proxyBase };
+}
+
+function setSectorModeUi(mode) {
+  const sectorEl = el("sectorId");
+  const hintEl = el("sectorHint");
+  const isSectorMode = mode === "sector";
+  sectorEl.disabled = !isSectorMode;
+  if (hintEl) {
+    hintEl.textContent = isSectorMode
+      ? "Used only when mode=sector."
+      : "Ignored for selected mode.";
+  }
+}
+
+function initSectorOptions() {
+  const sectorEl = el("sectorId");
+  if (!sectorEl) return;
+  sectorEl.innerHTML = "";
+  for (const sid of SECTOR_OPTIONS) {
+    const opt = document.createElement("option");
+    opt.value = sid;
+    opt.textContent = sid;
+    if (sid === "defence") opt.selected = true;
+    sectorEl.appendChild(opt);
+  }
 }
 
 function classifyProxyError(status, responseText) {
@@ -128,6 +173,10 @@ async function loadLatestRuns() {
 }
 
 function wireEvents() {
+  el("runMode").addEventListener("change", () => {
+    setSectorModeUi(el("runMode").value);
+  });
+
   el("testConnBtn").addEventListener("click", async () => {
     try {
       setWorking("Test Connection");
@@ -185,14 +234,12 @@ function wireEvents() {
 }
 
 function initStorage() {
-  try {
-    const saved = localStorage.getItem("titan_control_proxy_base");
-    if (saved) {
-      el("proxyBase").value = normalizeProxyBase(saved);
-    }
-  } catch (_e) {
-    // Storage may be disabled in private mode; ignore.
+  initSectorOptions();
+  const proxyEl = el("proxyBase");
+  if (proxyEl) {
+    proxyEl.textContent = normalizeProxyBase(PROXY_BASE);
   }
+  setSectorModeUi(el("runMode").value);
 }
 
 try {

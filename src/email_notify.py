@@ -73,6 +73,29 @@ def _render_success_html(post_text: str, *, subject: str) -> str:
         if not items:
             continue
         color = palette[idx % len(palette)]
+        if name.lower() == "prediction quality gate":
+            gate_line = next((x for x in items if x.lower().startswith("gate status:")), "")
+            gate_ok = "pass" in gate_line.lower()
+            badge_color = "#34a853" if gate_ok else "#ea4335"
+            badge_text = "PASS" if gate_ok else "FAIL"
+            kv_rows = []
+            for item in items:
+                if ":" in item:
+                    k, v = item.split(":", 1)
+                    kv_rows.append(
+                        "<tr>"
+                        f'<td style="padding:8px;border-bottom:1px solid #eee;font-weight:600;width:38%;">{escape(k.strip())}</td>'
+                        f'<td style="padding:8px;border-bottom:1px solid #eee;">{escape(v.strip())}</td>'
+                        "</tr>"
+                    )
+            body = (
+                f'<div style="margin:0 0 10px;"><span style="display:inline-block;padding:4px 10px;border-radius:999px;'
+                f'background:{badge_color};color:#fff;font-weight:700;font-size:12px;">{badge_text}</span></div>'
+                '<table style="width:100%;border-collapse:collapse;">'
+                f"<tbody>{''.join(kv_rows)}</tbody></table>"
+            )
+            blocks.append(card(name, body, color=badge_color))
+            continue
         if name.lower() == "per-symbol metrics":
             rows: list[str] = []
             for item in items:
@@ -104,14 +127,33 @@ def _render_success_html(post_text: str, *, subject: str) -> str:
             )
             blocks.append(card(name, table, color=color))
             continue
-
-        list_html = "".join(
-            f'<li style="margin:0 0 6px;">{escape(item)}</li>'
-            for item in items
-        )
-        blocks.append(
-            card(name, f'<ul style="margin:0;padding-left:18px;">{list_html}</ul>', color=color)
-        )
+        if all(":" in item for item in items):
+            rows = []
+            for item in items:
+                k, v = item.split(":", 1)
+                rows.append(
+                    "<tr>"
+                    f'<td style="padding:8px;border-bottom:1px solid #eee;font-weight:600;width:38%;">{escape(k.strip())}</td>'
+                    f'<td style="padding:8px;border-bottom:1px solid #eee;">{escape(v.strip())}</td>'
+                    "</tr>"
+                )
+            blocks.append(
+                card(
+                    name,
+                    '<table style="width:100%;border-collapse:collapse;"><tbody>'
+                    + "".join(rows)
+                    + "</tbody></table>",
+                    color=color,
+                )
+            )
+        else:
+            list_html = "".join(
+                f'<li style="margin:0 0 6px;">{escape(item)}</li>'
+                for item in items
+            )
+            blocks.append(
+                card(name, f'<ul style="margin:0;padding-left:18px;">{list_html}</ul>', color=color)
+            )
 
     return (
         "<html><body style=\"margin:0;padding:16px;background:#f8f9fa;color:#202124;font-family:Arial,sans-serif;\">"

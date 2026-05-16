@@ -75,6 +75,7 @@
     }
     .small { font-size: 0.82rem; color: var(--muted); }
     .row { display: grid; grid-template-columns: 1fr; gap: 8px; }
+    .hidden { display: none; }
     @media (min-width: 760px) { .row.two { grid-template-columns: 1fr 1fr; } }
   </style>
 </head>
@@ -89,9 +90,8 @@
       <p class="small">
         This page is tokenless by design. It talks to a secure backend proxy that stores GitHub credentials server-side.
       </p>
-      <label>Dispatch Proxy URL</label>
-      <input id="proxyBase" placeholder="https://your-proxy.example.com" />
-      <p class="small">Set once and this browser will remember it.</p>
+      <p class="small">Dispatch proxy is configured in code:</p>
+      <code id="proxyBase">loading...</code>
       <button type="button" id="testConnBtn">Test Connection</button>
     </div>
 
@@ -108,7 +108,8 @@
         </div>
         <div>
           <label>Sector ID</label>
-          <input id="sectorId" value="defence" />
+          <select id="sectorId"></select>
+          <p class="small" id="sectorHint">Used only when mode=sector.</p>
         </div>
       </div>
       <div class="row two">
