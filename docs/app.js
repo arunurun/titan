@@ -72,9 +72,14 @@ function cfg() {
 function setSectorModeUi(mode) {
   const sectorEl = el("sectorId");
   const hintEl = el("sectorHint");
+  const allSectorWorkersEl = el("allSectorWorkers");
   if (!sectorEl) return;
   const isSectorMode = mode === "sector";
+  const isAllSectorsMode = mode === "all_sectors";
   sectorEl.disabled = !isSectorMode;
+  if (allSectorWorkersEl) {
+    allSectorWorkersEl.disabled = !isAllSectorsMode;
+  }
   if (hintEl) {
     hintEl.textContent = isSectorMode
       ? "Used only when mode=sector."
@@ -204,6 +209,7 @@ function wireEvents() {
           sector_id: (el("sectorId")?.value || "").trim(),
           max_symbols: (el("maxSymbols")?.value || "").trim(),
           workers: (el("workers")?.value || "").trim(),
+          all_sector_workers: (el("allSectorWorkers")?.value || "").trim(),
         });
       } catch (e) {
         setStatus(`Run Titan dispatch failed:\n${e.message}`);

@@ -24,6 +24,10 @@ on:
         description: "Optional sector workers"
         required: false
         default: "4"
+      all_sector_workers:
+        description: "Optional sector-parallel workers (used when mode=all_sectors)"
+        required: false
+        default: "3"
 
 permissions:
   contents: read
@@ -73,6 +77,9 @@ jobs:
             fi
             if [ -n "${{ inputs.workers }}" ]; then
               ARGS="$ARGS --sector-workers ${{ inputs.workers }}"
+            fi
+            if [ -n "${{ inputs.all_sector_workers }}" ]; then
+              ARGS="$ARGS --all-sector-workers ${{ inputs.all_sector_workers }}"
             fi
             python main.py $ARGS
           else

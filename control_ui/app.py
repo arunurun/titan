@@ -158,6 +158,8 @@ TEMPLATE = """
         <input name="max_symbols" value="" placeholder="all" />
         <label>Workers (optional)</label>
         <input name="workers" value="2" />
+        <label>All-sector workers (optional; used when mode=all_sectors)</label>
+        <input name="all_sector_workers" value="3" />
         <button type="submit">Run Analysis</button>
       </form>
     </div>
@@ -244,7 +246,13 @@ def _persist_token_to_supabase(token: str) -> None:
     ).execute()
 
 
-def _run_titan_now(mode: str, sector_id: str, max_symbols: str, workers: str) -> tuple[int, str]:
+def _run_titan_now(
+    mode: str,
+    sector_id: str,
+    max_symbols: str,
+    workers: str,
+    all_sector_workers: str,
+) -> tuple[int, str]:
     cmd = [sys.executable, "main.py"]
     if mode == "live":
         cmd.append("--live")
@@ -254,6 +262,8 @@ def _run_titan_now(mode: str, sector_id: str, max_symbols: str, workers: str) ->
             cmd.extend(["--sector-max-symbols", max_symbols.strip()])
         if (workers or "").strip():
             cmd.extend(["--sector-workers", workers.strip()])
+        if (all_sector_workers or "").strip():
+            cmd.extend(["--all-sector-workers", all_sector_workers.strip()])
     else:
         sid = (sector_id or "").strip() or "defence"
         cmd.extend(["--sector", sid, "--sector-digest"])
@@ -340,8 +350,9 @@ def run_analysis():
     sector_id = request.form.get("sector_id", "defence")
     max_symbols = request.form.get("max_symbols", "")
     workers = request.form.get("workers", "")
+    all_sector_workers = request.form.get("all_sector_workers", "")
     try:
-        code, output = _run_titan_now(mode, sector_id, max_symbols, workers)
+        code, output = _run_titan_now(mode, sector_id, max_symbols, workers, all_sector_workers)
         level = "ok" if code == 0 else "err"
         msg = f"Analysis finished with exit code {code}."
         return _render_page(

@@ -8,6 +8,7 @@ import logging
 import os
 import sys
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from dotenv import dotenv_values, load_dotenv
@@ -140,6 +141,7 @@ def _parse_csv_list(raw: str) -> tuple[str, ...]:
 def run_all_sectors(
     *,
     max_workers: int | None,
+    all_sector_workers: int | None,
     max_symbols: int | None,
     digest: bool,
     exclude_sectors: tuple[str, ...],
@@ -152,24 +154,38 @@ def run_all_sectors(
     sectors = [s for s in list_active_sector_ids(include_unknown=False) if s not in set(exclude_sectors)]
     if not sectors:
         raise RuntimeError("No active sectors found after exclusions.")
-    logger.info("Running all sectors (%s): %s", len(sectors), ", ".join(sectors))
+    sector_parallelism = all_sector_workers if all_sector_workers is not None else min(3, len(sectors))
+    sector_parallelism = max(1, min(int(sector_parallelism), len(sectors), 8))
+    logger.info(
+        "Running all sectors (%s) with sector_parallelism=%s: %s",
+        len(sectors),
+        sector_parallelism,
+        ", ".join(sectors),
+    )
     failed: list[str] = []
-    for sid in sectors:
+
+    def _run_sector(sid: str) -> None:
         logger.info("Running sector: %s", sid)
-        try:
-            run_kwargs = dict(
-                max_workers=max_workers,
-                max_symbols=max_symbols,
-                digest=digest,
-            )
-            if macro_snapshot is not None:
-                run_kwargs["macro_snapshot"] = macro_snapshot
-            if event_snapshot is not None:
-                run_kwargs["event_snapshot"] = event_snapshot
-            run_sector_live(sid, **run_kwargs)
-        except Exception:
-            failed.append(sid)
-            logger.exception("Sector run failed: %s", sid)
+        run_kwargs = dict(
+            max_workers=max_workers,
+            max_symbols=max_symbols,
+            digest=digest,
+        )
+        if macro_snapshot is not None:
+            run_kwargs["macro_snapshot"] = macro_snapshot
+        if event_snapshot is not None:
+            run_kwargs["event_snapshot"] = event_snapshot
+        run_sector_live(sid, **run_kwargs)
+
+    with ThreadPoolExecutor(max_workers=sector_parallelism) as pool:
+        future_map = {pool.submit(_run_sector, sid): sid for sid in sectors}
+        for fut in as_completed(future_map):
+            sid = future_map[fut]
+            try:
+                fut.result()
+            except Exception:
+                failed.append(sid)
+                logger.exception("Sector run failed: %s", sid)
     if failed:
         raise RuntimeError(f"All-sector run completed with failures in: {', '.join(failed)}")
 
@@ -343,6 +359,13 @@ def main() -> None:
         help="Run sector digest for all active sectors in registry.",
     )
     p.add_argument(
+        "--all-sector-workers",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Parallel sector runs when using --all-sectors (default: min(3, sector_count)).",
+    )
+    p.add_argument(
         "--exclude-sectors",
         type=str,
         default="unknown,non_equity",
@@ -456,6 +479,7 @@ def main() -> None:
         try:
             run_all_sectors(
                 max_workers=args.sector_workers,
+                all_sector_workers=args.all_sector_workers,
                 max_symbols=args.sector_max_symbols,
                 digest=not args.sector_per_symbol_narrative,
                 exclude_sectors=exclude_sectors,

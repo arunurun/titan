@@ -188,3 +188,36 @@ def test_protocol_run_invokes_window_runner(monkeypatch):
         max_workers=None,
         max_symbols=None,
     )
+
+
+def test_all_sectors_invokes_parallel_runner(monkeypatch):
+    import main as main_mod
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prog",
+            "--all-sectors",
+            "--all-sector-workers",
+            "3",
+            "--sector-workers",
+            "4",
+            "--sector-max-symbols",
+            "25",
+        ],
+    )
+    mock_runner = MagicMock()
+    monkeypatch.setattr(main_mod, "run_all_sectors", mock_runner)
+
+    main_mod.main()
+
+    mock_runner.assert_called_once_with(
+        max_workers=4,
+        all_sector_workers=3,
+        max_symbols=25,
+        digest=True,
+        exclude_sectors=("unknown", "non_equity"),
+        macro_snapshot=None,
+        event_snapshot=None,
+    )
