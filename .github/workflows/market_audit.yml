@@ -121,8 +121,8 @@ jobs:
           echo "Token injection failed (exit=${{ steps.inject_token.outputs.exit_code }})."
           exit 1
 
-      # On branches `main`, `sector`, `analysis`: defence sector audit. Else: NIFTY live.
-      - name: Market audit (NIFTY live or defence sector)
+      # On branches `main`, `sector`, `analysis`: run all active sectors (excluding unknown). Else: NIFTY live.
+      - name: Market audit (NIFTY live or all sectors)
         if: ${{ steps.market_open_guard.outputs.market_closed != 'true' }}
         id: market_audit
         continue-on-error: true
@@ -145,7 +145,7 @@ jobs:
           set +e
           if [ "${{ github.ref_name }}" = "analysis" ] || [ "${{ github.ref_name }}" = "sector" ] || [ "${{ github.ref_name }}" = "main" ]; then
             # Default: one digest narrative per sector run (use --sector-per-symbol-narrative for per-stock posts).
-            python main.py --sector defence --sector-workers 4 2>&1 | tee market_audit.log
+            python main.py --all-sectors --sector-workers 4 --exclude-sectors unknown,non_equity 2>&1 | tee market_audit.log
             rc=${PIPESTATUS[0]}
           else
             python main.py --live 2>&1 | tee market_audit.log

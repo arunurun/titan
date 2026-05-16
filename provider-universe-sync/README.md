@@ -20,6 +20,8 @@ Standalone sync service (kept separate from Titan runtime code) that refreshes N
    - `SUPABASE_URL`
    - `SUPABASE_SERVICE_ROLE_KEY`
    - Optional: `SCRIP_MASTER_URL`
+   - Optional: `NSE_INDUSTRY_ENRICH=1` (default on; fetches industry per NSE symbol via quote API)
+   - Optional: `NSE_INDUSTRY_ENRICH_LIMIT=500` (cap symbols per run while warming cache)
 2. Install deps: `pip install -r requirements.txt`
 3. Run: `python -m src.main`
 

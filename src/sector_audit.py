@@ -99,6 +99,8 @@ def _format_symbol_metrics_line(result: dict[str, Any]) -> str:
     ret1d = audit.get("return_1d_pct")
     ema_dist = audit.get("ema_200_distance_pct")
     atr_pct = audit.get("atr_14_pct")
+    next_day = audit.get("next_day_score")
+    next_week = audit.get("next_week_score")
     rows = audit.get("rows")
     flags: list[str] = []
     if audit.get("panic_absorption_proxy"):
@@ -117,6 +119,7 @@ def _format_symbol_metrics_line(result: dict[str, Any]) -> str:
         f"| z {_fmt_metric(z)} [{_z_label(z)}] | absorption {_fmt_metric(absorption, 3)} "
         f"[{_absorption_label(absorption)}] | ret1d {_fmt_metric(ret1d)}% "
         f"| ema200_delta {_fmt_metric(ema_dist)}% | atr14 {_fmt_metric(atr_pct)}% "
+        f"| nextDay {_fmt_metric(next_day)} | nextWeek {_fmt_metric(next_week)} "
         f"| flags={flag_text} | rows {rows}"
     )
 
@@ -126,6 +129,49 @@ def _safe_float(x: Any) -> float:
         return float(x)
     except (TypeError, ValueError):
         return float("nan")
+
+
+def _clamp_score(x: float) -> float:
+    return max(0.0, min(100.0, round(x, 2)))
+
+
+def _predictive_scores(audit: dict[str, Any]) -> tuple[float, float]:
+    """
+    Heuristic lead scores for short-term momentum capture.
+
+    - next_day_score favors immediate thrust (z, absorption, 1d return).
+    - next_week_score favors persistence (trend distance and lower noise).
+    """
+    z = _safe_float(audit.get("z_score"))
+    absorption = _safe_float(audit.get("absorption_ratio"))
+    ret1d = _safe_float(audit.get("return_1d_pct"))
+    ema_dist = _safe_float(audit.get("ema_200_distance_pct"))
+    atr_pct = _safe_float(audit.get("atr_14_pct"))
+    intent = _safe_float(audit.get("effective_intent_score", audit.get("intent_score")))
+
+    z_term = 0.0 if math.isnan(z) else (z * 8.0)
+    absorption_term = 0.0 if math.isnan(absorption) else ((absorption - 1.0) * 12.0)
+    ret_term = 0.0 if math.isnan(ret1d) else (ret1d * 0.7)
+    ema_term = 0.0 if math.isnan(ema_dist) else (ema_dist * 0.35)
+    atr_penalty = 0.0 if math.isnan(atr_pct) else (atr_pct * 0.5)
+    intent_term = 0.0 if math.isnan(intent) else ((intent - 50.0) * 0.35)
+
+    day_score = 50.0 + z_term + absorption_term + ret_term + (ema_term * 0.6) + intent_term - atr_penalty
+    week_score = 50.0 + (z_term * 0.7) + (absorption_term * 0.5) + (ret_term * 0.5) + ema_term + intent_term - (
+        atr_penalty * 0.4
+    )
+
+    if audit.get("trap_exit_proxy"):
+        day_score -= 8.0
+        week_score -= 5.0
+    if audit.get("panic_absorption_proxy"):
+        day_score -= 6.0
+        week_score -= 4.0
+    if audit.get("event_risk_soon"):
+        day_score -= 4.0
+        week_score -= 6.0
+
+    return _clamp_score(day_score), _clamp_score(week_score)
 
 
 def _bucket_name(audit: dict[str, Any]) -> str:
@@ -349,6 +395,9 @@ def build_equity_live_audit(
         "rows": len(df),
         "option_chain_unavailable": True,
     }
+    next_day_score, next_week_score = _predictive_scores(audit)
+    audit["next_day_score"] = next_day_score
+    audit["next_week_score"] = next_week_score
     if not with_narrative:
         return audit, ""
     from brain import generate_titan_narrative
@@ -669,15 +718,15 @@ def run_sector_live(
             "--- Per-symbol metrics ---",
             ]
         )
-        # Rank by highest intent first so the digest starts with stronger setups.
+        # Rank by next-week score first for early winner discovery.
         ranked = sorted(
             ok_results,
             key=lambda x: (
                 float("-inf")
                 if math.isnan(
-                    _safe_float(x["audit"].get("effective_intent_score", float("nan")))
+                    _safe_float(x["audit"].get("next_week_score", float("nan")))
                 )
-                else _safe_float(x["audit"].get("effective_intent_score", float("nan")))
+                else _safe_float(x["audit"].get("next_week_score", float("nan")))
             ),
             reverse=True,
         )

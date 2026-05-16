@@ -10,6 +10,7 @@ class UniverseInstrument:
     instrument_name: str
     isin: str
     official_sector_key: str
+    official_industry: str = ""
 
 
 def normalize_sector_key(value: str) -> str:

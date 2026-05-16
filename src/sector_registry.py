@@ -13,9 +13,6 @@ from supabase import create_client
 ROOT = Path(__file__).resolve().parent.parent
 SECTORS_DIR = ROOT / "data" / "sectors"
 
-# Cap how many instruments we process per run (raise when scaling sector work).
-MAX_SYMBOLS = 60
-
 _EXCHANGES = frozenset({"NSE", "BSE"})
 
 
@@ -37,8 +34,8 @@ def load_sector_instruments(
     max_symbols: int | None = None,
 ) -> list[SectorInstrument]:
     """Load active instruments from Supabase, fallback to ``data/sectors/<sector>.csv``."""
-    cap = max_symbols if max_symbols is not None else MAX_SYMBOLS
-    if cap < 0:
+    cap = max_symbols
+    if cap is not None and cap < 0:
         raise ValueError("max_symbols must be >= 0")
 
     sid = sector_id.strip().lower()
@@ -78,6 +75,8 @@ def load_sector_instruments(
             seen.add(key)
             ordered.append(inst)
 
+    if cap is None:
+        return ordered
     return ordered[:cap]
 
 
@@ -159,3 +158,30 @@ def load_sector_symbols(sector_id: str, *, max_symbols: int | None = None) -> li
     Prefer :func:`load_sector_instruments` when you need ``exchange`` (e.g. BSE rows).
     """
     return [i.symbol for i in load_sector_instruments(sector_id, max_symbols=max_symbols)]
+
+
+def list_active_sector_ids(*, include_unknown: bool = True) -> list[str]:
+    """
+    Return active sector ids known to the registry.
+
+    Uses Supabase when configured; falls back to CSV sector files when Supabase is unavailable.
+    """
+    sectors: list[str] = []
+    supabase_url = os.environ.get("SUPABASE_URL", "").strip()
+    supabase_key = os.environ.get("SUPABASE_KEY", "").strip()
+    if supabase_url and supabase_key:
+        client = create_client(supabase_url, supabase_key)
+        res = client.table("sector_catalog").select("sector_key").eq("is_active", True).execute()
+        rows = list((getattr(res, "data", None) or []))
+        sectors = sorted(
+            {
+                str(r.get("sector_key", "")).strip().lower()
+                for r in rows
+                if str(r.get("sector_key", "")).strip()
+            }
+        )
+    else:
+        sectors = sorted(p.stem.strip().lower() for p in SECTORS_DIR.glob("*.csv") if p.stem.strip())
+    if not include_unknown:
+        sectors = [s for s in sectors if s != "unknown"]
+    return sectors

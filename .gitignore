@@ -24,6 +24,7 @@ logs/
 
 # Downloaded ICICI scrip master (regenerated; see breeze_scrip_master)
 data/cache/StockScriptNew.csv
+provider-universe-sync/data/nse_industry_cache.json
 
 # OS / editor
 .DS_Store

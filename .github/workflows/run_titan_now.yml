@@ -10,6 +10,7 @@ on:
         type: choice
         options:
           - sector
+          - all_sectors
           - live
       sector_id:
         description: "Sector id (used when mode=sector)"
@@ -65,6 +66,15 @@ jobs:
         run: |
           if [ "${{ inputs.mode }}" = "live" ]; then
             python main.py --live
+          elif [ "${{ inputs.mode }}" = "all_sectors" ]; then
+            ARGS="--all-sectors --exclude-sectors unknown,non_equity"
+            if [ -n "${{ inputs.max_symbols }}" ]; then
+              ARGS="$ARGS --sector-max-symbols ${{ inputs.max_symbols }}"
+            fi
+            if [ -n "${{ inputs.workers }}" ]; then
+              ARGS="$ARGS --sector-workers ${{ inputs.workers }}"
+            fi
+            python main.py $ARGS
           else
             ARGS="--sector ${{ inputs.sector_id }} --sector-digest"
             if [ -n "${{ inputs.max_symbols }}" ]; then

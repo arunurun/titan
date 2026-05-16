@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from sector_registry import MAX_SYMBOLS, SectorInstrument, load_sector_instruments, load_sector_symbols
+from sector_registry import SectorInstrument, list_active_sector_ids, load_sector_instruments, load_sector_symbols
 
 
 class _FakeQuery:
@@ -16,6 +16,9 @@ class _FakeQuery:
         return self
 
     def eq(self, _key, _val):
+        return self
+
+    def in_(self, _key, _vals):
         return self
 
     def execute(self):
@@ -50,14 +53,14 @@ def test_load_sector_respects_max_symbols(monkeypatch):
     assert inst == [SectorInstrument("A", "NSE"), SectorInstrument("B", "NSE")]
 
 
-def test_load_sector_uses_module_cap_when_none(monkeypatch):
+def test_load_sector_returns_all_when_max_symbols_none(monkeypatch):
     payload = [
         {"market_instruments": {"symbol": f"S{x}", "exchange": "NSE"}}
-        for x in range(MAX_SYMBOLS + 20)
+        for x in range(85)
     ]
     _mock_supabase(monkeypatch, payload)
     out = load_sector_symbols("defence", max_symbols=None)
-    assert len(out) == MAX_SYMBOLS
+    assert len(out) == 85
 
 
 def test_dedupe_preserves_order(monkeypatch):
@@ -130,3 +133,21 @@ def test_falls_back_to_csv_when_supabase_returns_empty(monkeypatch, tmp_path: Pa
     _mock_supabase(monkeypatch, [])
     out = load_sector_symbols("defence")
     assert out == ["HAL", "BDL"]
+
+
+def test_list_active_sector_ids_from_supabase(monkeypatch):
+    _mock_supabase(monkeypatch, [{"sector_key": "defence"}, {"sector_key": "unknown"}])
+    out = list_active_sector_ids(include_unknown=False)
+    assert out == ["defence"]
+
+
+def test_list_active_sector_ids_from_csv_fallback(monkeypatch, tmp_path: Path):
+    sectors_dir = tmp_path / "sectors"
+    sectors_dir.mkdir(parents=True, exist_ok=True)
+    (sectors_dir / "defence.csv").write_text("symbol,exchange\nHAL,NSE\n", encoding="utf-8")
+    (sectors_dir / "auto.csv").write_text("symbol,exchange\nTATAMOTORS,NSE\n", encoding="utf-8")
+    monkeypatch.setattr("sector_registry.SECTORS_DIR", sectors_dir)
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_KEY", raising=False)
+    out = list_active_sector_ids(include_unknown=True)
+    assert out == ["auto", "defence"]

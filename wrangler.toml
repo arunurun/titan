@@ -1,0 +1,8 @@
+name = "titanv1"
+main = "proxy/cloudflare-worker.js"
+compatibility_date = "2026-05-16"
+workers_dev = true
+
+[vars]
+REPO_OWNER = "arunurun"
+REPO_NAME = "titan"

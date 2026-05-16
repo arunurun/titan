@@ -131,6 +131,49 @@ def _parse_cluster_list(raw: str) -> tuple[str, ...]:
     return tuple(x.lower() for x in items)
 
 
+def _parse_csv_list(raw: str) -> tuple[str, ...]:
+    if not raw.strip():
+        return ()
+    return tuple(x.strip().lower() for x in raw.split(",") if x.strip())
+
+
+def run_all_sectors(
+    *,
+    max_workers: int | None,
+    max_symbols: int | None,
+    digest: bool,
+    exclude_sectors: tuple[str, ...],
+    macro_snapshot: dict | None,
+    event_snapshot: dict | None,
+) -> None:
+    from sector_audit import run_sector_live
+    from sector_registry import list_active_sector_ids
+
+    sectors = [s for s in list_active_sector_ids(include_unknown=False) if s not in set(exclude_sectors)]
+    if not sectors:
+        raise RuntimeError("No active sectors found after exclusions.")
+    logger.info("Running all sectors (%s): %s", len(sectors), ", ".join(sectors))
+    failed: list[str] = []
+    for sid in sectors:
+        logger.info("Running sector: %s", sid)
+        try:
+            run_kwargs = dict(
+                max_workers=max_workers,
+                max_symbols=max_symbols,
+                digest=digest,
+            )
+            if macro_snapshot is not None:
+                run_kwargs["macro_snapshot"] = macro_snapshot
+            if event_snapshot is not None:
+                run_kwargs["event_snapshot"] = event_snapshot
+            run_sector_live(sid, **run_kwargs)
+        except Exception:
+            failed.append(sid)
+            logger.exception("Sector run failed: %s", sid)
+    if failed:
+        raise RuntimeError(f"All-sector run completed with failures in: {', '.join(failed)}")
+
+
 def run_protocol_window(
     *,
     window: str | None,
@@ -295,6 +338,18 @@ def main() -> None:
         help="Process only the first N symbols from the Supabase sector list (free-tier friendly)",
     )
     p.add_argument(
+        "--all-sectors",
+        action="store_true",
+        help="Run sector digest for all active sectors in registry.",
+    )
+    p.add_argument(
+        "--exclude-sectors",
+        type=str,
+        default="unknown,non_equity",
+        metavar="CSV",
+        help="Comma-separated sector ids to skip when using --all-sectors (default: unknown,non_equity).",
+    )
+    p.add_argument(
         "--sector-per-symbol-narrative",
         action="store_true",
         help="One Gemini call per symbol (high quota). Default is one digest call for the whole sector.",
@@ -350,6 +405,7 @@ def main() -> None:
     macro_snapshot = _load_macro_snapshot(args.macro_json.strip()) if args.macro_json.strip() else None
     event_snapshot = _load_event_snapshot(args.events_json.strip()) if args.events_json.strip() else None
     protocol_clusters = _parse_cluster_list(args.protocol_clusters)
+    exclude_sectors = _parse_csv_list(args.exclude_sectors)
 
     if args.protocol_run:
         try:
@@ -387,6 +443,24 @@ def main() -> None:
             run_sector_live(
                 args.sector.strip(),
                 **run_kwargs,
+            )
+        except Exception as e:
+            summary = str(e).strip().split("\n", 1)[0].strip()
+            if len(summary) > 180:
+                summary = summary[:177] + "..."
+            send_failure_email(summary, detail=traceback.format_exc())
+            raise
+        return
+
+    if args.all_sectors:
+        try:
+            run_all_sectors(
+                max_workers=args.sector_workers,
+                max_symbols=args.sector_max_symbols,
+                digest=not args.sector_per_symbol_narrative,
+                exclude_sectors=exclude_sectors,
+                macro_snapshot=macro_snapshot,
+                event_snapshot=event_snapshot,
             )
         except Exception as e:
             summary = str(e).strip().split("\n", 1)[0].strip()

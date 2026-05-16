@@ -145,6 +145,7 @@ TEMPLATE = """
         <select name="mode">
           <option value="live">Live (NIFTY)</option>
           <option value="sector" selected>Sector (Digest)</option>
+          <option value="all_sectors">All Sectors (Digest)</option>
         </select>
         <label>Sector ID (for sector mode)</label>
         <input name="sector_id" value="defence" />
@@ -242,6 +243,12 @@ def _run_titan_now(mode: str, sector_id: str, max_symbols: str, workers: str) ->
     cmd = [sys.executable, "main.py"]
     if mode == "live":
         cmd.append("--live")
+    elif mode == "all_sectors":
+        cmd.extend(["--all-sectors", "--exclude-sectors", "unknown,non_equity"])
+        if (max_symbols or "").strip():
+            cmd.extend(["--sector-max-symbols", max_symbols.strip()])
+        if (workers or "").strip():
+            cmd.extend(["--sector-workers", workers.strip()])
     else:
         sid = (sector_id or "").strip() or "defence"
         cmd.extend(["--sector", sid, "--sector-digest"])

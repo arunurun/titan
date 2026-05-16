@@ -279,6 +279,7 @@ def sync_universe(client: Client, instruments: Iterable[UniverseInstrument]) -> 
                     instrument_name=inst.instrument_name,
                     isin=inst.isin,
                     official_sector_key=inst.official_sector_key,
+                    official_industry=inst.official_industry,
                 ),
             )
 

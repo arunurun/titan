@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from src.classification.industry_taxonomy import map_industry_to_sector_key
 from src.models import UniverseInstrument, normalize_sector_key
 
 
@@ -20,5 +21,9 @@ def resolve_sector_key(
     official = normalize_sector_key(instrument.official_sector_key)
     if official and official != "unknown":
         return official, "official"
+
+    industry_sector = map_industry_to_sector_key(instrument.official_industry)
+    if industry_sector != "unknown":
+        return industry_sector, "official"
 
     return "unknown", "official"
