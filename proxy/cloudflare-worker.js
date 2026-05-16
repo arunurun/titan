@@ -14,7 +14,8 @@ const ALLOWED_WORKFLOWS = new Set([
 ]);
 
 function json(body, status = 200) {
-  return new Response(JSON.stringify(body), {
+  const noBody = status === 204 || status === 205 || status === 304;
+  return new Response(noBody ? null : JSON.stringify(body), {
     status,
     headers: {
       "content-type": "application/json; charset=utf-8",

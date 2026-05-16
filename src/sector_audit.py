@@ -10,6 +10,9 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from postgrest.exceptions import APIError
+from supabase import create_client
+
 from config_loader import TitanConfig, load_config
 from sector_registry import SectorInstrument, load_sector_instruments
 
@@ -20,6 +23,8 @@ MAX_WORKERS = 4
 
 # Serialize Gemini calls so sector threads do not burst past rate limits together.
 _GEMINI_SECTOR_LOCK = threading.Lock()
+_FUNDAMENTAL_CACHE_LOCK = threading.Lock()
+_FUNDAMENTAL_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 IST = ZoneInfo("Asia/Kolkata")
 
 
@@ -101,6 +106,10 @@ def _format_symbol_metrics_line(result: dict[str, Any]) -> str:
     atr_pct = audit.get("atr_14_pct")
     next_day = audit.get("next_day_score")
     next_week = audit.get("next_week_score")
+    fundamental_status = audit.get("fundamental_status", "unavailable")
+    fundamental_score = audit.get("fundamental_score")
+    fundamental_reasons = audit.get("fundamental_reasons") if isinstance(audit.get("fundamental_reasons"), list) else []
+    support_tag = audit.get("hypothesis_support", "technical_only")
     rows = audit.get("rows")
     flags: list[str] = []
     if audit.get("panic_absorption_proxy"):
@@ -114,7 +123,16 @@ def _format_symbol_metrics_line(result: dict[str, Any]) -> str:
     if audit.get("event_risk_soon"):
         flags.append("event-risk<=3d")
     flag_text = ", ".join(flags) if flags else "none"
-    return (
+    next_day_v = _safe_float(next_day)
+    next_week_v = _safe_float(next_week)
+    show_explain = (not math.isnan(next_day_v) and next_day_v > 75.0) and (
+        not math.isnan(next_week_v) and next_week_v > 75.0
+    )
+    fundamental_text = (
+        f"{fundamental_status}:{_fmt_metric(fundamental_score)}"
+        + (f" ({'; '.join(str(x) for x in fundamental_reasons[:2])})" if fundamental_reasons else "")
+    )
+    base = (
         f"{symbol} ({exchange}) | intent {_fmt_metric(intent)} [{_intent_label(intent)}] "
         f"| z {_fmt_metric(z)} [{_z_label(z)}] | absorption {_fmt_metric(absorption, 3)} "
         f"[{_absorption_label(absorption)}] | ret1d {_fmt_metric(ret1d)}% "
@@ -122,6 +140,12 @@ def _format_symbol_metrics_line(result: dict[str, Any]) -> str:
         f"| nextDay {_fmt_metric(next_day)} | nextWeek {_fmt_metric(next_week)} "
         f"| flags={flag_text} | rows {rows}"
     )
+    if show_explain:
+        return (
+            f"{base} | support={support_tag} | fundamentals={fundamental_text} "
+            f"| {_prediction_reason_text(audit)}"
+        )
+    return base
 
 
 def _safe_float(x: Any) -> float:
@@ -131,11 +155,16 @@ def _safe_float(x: Any) -> float:
         return float("nan")
 
 
+def _is_skipped_no_data_error(error: Any) -> bool:
+    msg = str(error or "").lower()
+    return ("no rows returned" in msg and "skipped" in msg) or "skipped_no_data" in msg
+
+
 def _clamp_score(x: float) -> float:
     return max(0.0, min(100.0, round(x, 2)))
 
 
-def _predictive_scores(audit: dict[str, Any]) -> tuple[float, float]:
+def _predictive_scores(audit: dict[str, Any]) -> tuple[float, float, dict[str, Any]]:
     """
     Heuristic lead scores for short-term momentum capture.
 
@@ -161,17 +190,41 @@ def _predictive_scores(audit: dict[str, Any]) -> tuple[float, float]:
         atr_penalty * 0.4
     )
 
+    penalties: list[str] = []
     if audit.get("trap_exit_proxy"):
         day_score -= 8.0
         week_score -= 5.0
+        penalties.append("trap_exit_proxy")
     if audit.get("panic_absorption_proxy"):
         day_score -= 6.0
         week_score -= 4.0
+        penalties.append("panic_absorption_proxy")
     if audit.get("event_risk_soon"):
         day_score -= 4.0
         week_score -= 6.0
+        penalties.append("event_risk_soon")
 
-    return _clamp_score(day_score), _clamp_score(week_score)
+    breakdown = {
+        "baseline": 50.0,
+        "day": {
+            "z_term": round(z_term, 2),
+            "absorption_term": round(absorption_term, 2),
+            "ret1d_term": round(ret_term, 2),
+            "ema_term": round(ema_term * 0.6, 2),
+            "intent_term": round(intent_term, 2),
+            "atr_penalty": round(atr_penalty, 2),
+        },
+        "week": {
+            "z_term": round(z_term * 0.7, 2),
+            "absorption_term": round(absorption_term * 0.5, 2),
+            "ret1d_term": round(ret_term * 0.5, 2),
+            "ema_term": round(ema_term, 2),
+            "intent_term": round(intent_term, 2),
+            "atr_penalty": round(atr_penalty * 0.4, 2),
+        },
+        "penalties": penalties,
+    }
+    return _clamp_score(day_score), _clamp_score(week_score), breakdown
 
 
 def _bucket_name(audit: dict[str, Any]) -> str:
@@ -202,6 +255,145 @@ def _short_reason(audit: dict[str, Any]) -> str:
     if audit.get("macro_guardrail_applied"):
         bits.append("macro-throttle")
     return ", ".join(bits[:3]) if bits else "insufficient data"
+
+
+def _prediction_reason_text(audit: dict[str, Any]) -> str:
+    breakdown = audit.get("prediction_breakdown")
+    if not isinstance(breakdown, dict):
+        return "prediction factors unavailable"
+    day = breakdown.get("day", {}) if isinstance(breakdown.get("day"), dict) else {}
+    week = breakdown.get("week", {}) if isinstance(breakdown.get("week"), dict) else {}
+    penalties = breakdown.get("penalties") if isinstance(breakdown.get("penalties"), list) else []
+    pen = ",".join(str(x) for x in penalties) if penalties else "none"
+    return (
+        "why "
+        f"day[z {_fmt_metric(day.get('z_term'))}, abs {_fmt_metric(day.get('absorption_term'))}, "
+        f"ret {_fmt_metric(day.get('ret1d_term'))}, ema {_fmt_metric(day.get('ema_term'))}, "
+        f"intent {_fmt_metric(day.get('intent_term'))}, atr-pen {_fmt_metric(day.get('atr_penalty'))}] "
+        f"week[z {_fmt_metric(week.get('z_term'))}, abs {_fmt_metric(week.get('absorption_term'))}, "
+        f"ret {_fmt_metric(week.get('ret1d_term'))}, ema {_fmt_metric(week.get('ema_term'))}, "
+        f"intent {_fmt_metric(week.get('intent_term'))}, atr-pen {_fmt_metric(week.get('atr_penalty'))}] "
+        f"penalties={pen}"
+    )
+
+
+def _first_float_field(row: dict[str, Any], keys: tuple[str, ...]) -> float:
+    for k in keys:
+        if k in row:
+            v = _safe_float(row.get(k))
+            if not math.isnan(v):
+                return v
+    return float("nan")
+
+
+def _assess_fundamental_strength(cfg: TitanConfig, inst: SectorInstrument) -> dict[str, Any]:
+    cache_key = (inst.symbol, inst.exchange)
+    with _FUNDAMENTAL_CACHE_LOCK:
+        cached = _FUNDAMENTAL_CACHE.get(cache_key)
+    if cached is not None:
+        return dict(cached)
+
+    client = create_client(cfg.supabase_url, cfg.supabase_key)
+    try:
+        res = (
+            client.table("market_instruments")
+            .select("*")
+            .eq("symbol", inst.symbol)
+            .eq("exchange", inst.exchange)
+            .limit(1)
+            .execute()
+        )
+    except APIError:
+        out = {"status": "unavailable", "score": None, "reasons": ["fundamental lookup unavailable"]}
+        with _FUNDAMENTAL_CACHE_LOCK:
+            _FUNDAMENTAL_CACHE[cache_key] = dict(out)
+        return out
+
+    rows = list(getattr(res, "data", None) or [])
+    if not rows or not isinstance(rows[0], dict):
+        out = {"status": "unavailable", "score": None, "reasons": ["fundamental row missing"]}
+        with _FUNDAMENTAL_CACHE_LOCK:
+            _FUNDAMENTAL_CACHE[cache_key] = dict(out)
+        return out
+
+    row = rows[0]
+    roe = _first_float_field(row, ("roe", "roe_pct", "return_on_equity", "return_on_equity_pct"))
+    roce = _first_float_field(row, ("roce", "roce_pct", "return_on_capital", "return_on_capital_employed"))
+    de = _first_float_field(row, ("debt_to_equity", "de_ratio", "debt_equity"))
+    margin = _first_float_field(row, ("net_profit_margin", "npm", "operating_margin", "opm"))
+    score = 50.0
+    reasons: list[str] = []
+    used = 0
+
+    if not math.isnan(roe):
+        used += 1
+        if roe >= 15.0:
+            score += 12.0
+            reasons.append(f"ROE strong {_fmt_metric(roe)}")
+        elif roe >= 10.0:
+            score += 6.0
+            reasons.append(f"ROE acceptable {_fmt_metric(roe)}")
+        elif roe < 5.0:
+            score -= 8.0
+            reasons.append(f"ROE weak {_fmt_metric(roe)}")
+    if not math.isnan(roce):
+        used += 1
+        if roce >= 15.0:
+            score += 10.0
+            reasons.append(f"ROCE strong {_fmt_metric(roce)}")
+        elif roce >= 10.0:
+            score += 5.0
+            reasons.append(f"ROCE acceptable {_fmt_metric(roce)}")
+        elif roce < 6.0:
+            score -= 6.0
+            reasons.append(f"ROCE weak {_fmt_metric(roce)}")
+    if not math.isnan(de):
+        used += 1
+        if de <= 0.5:
+            score += 8.0
+            reasons.append(f"debt/equity low {_fmt_metric(de)}")
+        elif de <= 1.0:
+            score += 4.0
+            reasons.append(f"debt/equity moderate {_fmt_metric(de)}")
+        elif de > 2.0:
+            score -= 8.0
+            reasons.append(f"debt/equity high {_fmt_metric(de)}")
+    if not math.isnan(margin):
+        used += 1
+        if margin >= 12.0:
+            score += 6.0
+            reasons.append(f"margin strong {_fmt_metric(margin)}")
+        elif margin < 3.0:
+            score -= 4.0
+            reasons.append(f"margin thin {_fmt_metric(margin)}")
+
+    if used == 0:
+        out = {"status": "unavailable", "score": None, "reasons": ["fundamental fields unavailable"]}
+    else:
+        s = _clamp_score(score)
+        if s >= 65.0:
+            st = "strong"
+        elif s <= 40.0:
+            st = "weak"
+        else:
+            st = "balanced"
+        out = {"status": st, "score": s, "reasons": reasons[:3]}
+
+    with _FUNDAMENTAL_CACHE_LOCK:
+        _FUNDAMENTAL_CACHE[cache_key] = dict(out)
+    return out
+
+
+def _hypothesis_support_tag(audit: dict[str, Any]) -> str:
+    next_week = _safe_float(audit.get("next_week_score"))
+    f_status = str(audit.get("fundamental_status") or "unavailable")
+    if f_status == "unavailable":
+        return "technical_only"
+    if not math.isnan(next_week) and next_week >= 70.0 and f_status == "strong":
+        return "strongly_supported"
+    if not math.isnan(next_week) and next_week >= 60.0 and f_status in ("strong", "balanced"):
+        return "partially_supported"
+    return "low_support"
 
 
 def _apply_cluster_guardrails(ok_results: list[dict[str, Any]]) -> tuple[float, int]:
@@ -442,9 +634,15 @@ def build_equity_live_audit(
         "rows": len(df),
         "option_chain_unavailable": True,
     }
-    next_day_score, next_week_score = _predictive_scores(audit)
+    next_day_score, next_week_score, prediction_breakdown = _predictive_scores(audit)
+    fundamental = _assess_fundamental_strength(cfg, inst)
     audit["next_day_score"] = next_day_score
     audit["next_week_score"] = next_week_score
+    audit["prediction_breakdown"] = prediction_breakdown
+    audit["fundamental_status"] = fundamental.get("status", "unavailable")
+    audit["fundamental_score"] = fundamental.get("score")
+    audit["fundamental_reasons"] = fundamental.get("reasons", [])
+    audit["hypothesis_support"] = _hypothesis_support_tag(audit)
     if not with_narrative:
         return audit, ""
     from brain import generate_titan_narrative
@@ -798,7 +996,7 @@ def run_sector_live(
         for r in ranked:
             lines.append(_format_symbol_metrics_line(r))
         for r in sorted(
-            (x for x in results if not x.get("ok")),
+            (x for x in results if (not x.get("ok")) and not _is_skipped_no_data_error(x.get("error"))),
             key=lambda x: (x["symbol"], x["exchange"]),
         ):
             lines.append("")
@@ -815,6 +1013,8 @@ def run_sector_live(
             lines.append(f"\n--- {r['symbol']} ({r['exchange']}) ---\n")
             lines.append((r.get("post") or "").strip())
         else:
+            if _is_skipped_no_data_error(r.get("error")):
+                continue
             lines.append(f"\n--- {r['symbol']} ({r['exchange']}) FAILED ---\n{r.get('error', '')}\n")
 
     digest_out = "\n".join(lines).strip()
