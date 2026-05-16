@@ -74,6 +74,26 @@ def test_fetch_raises_after_retries(mock_breeze_cls):
         fetch_nifty_data(make_cfg(), max_retries=2)
 
 
+@patch("breeze_client.BreezeConnect")
+def test_fetch_equity_data_no_data_found_returns_empty_and_does_not_retry(mock_breeze_cls, monkeypatch):
+    monkeypatch.setattr(
+        "breeze_client.resolve_breeze_stock_code",
+        lambda sym, ex: sym.strip().upper(),
+    )
+    api = MagicMock()
+    api.get_historical_data.return_value = {
+        "Success": None,
+        "Status": 200,
+        "Error": "No Data Found",
+    }
+    mock_breeze_cls.return_value = api
+
+    df = fetch_equity_data(make_cfg(), "AICHAMP", "NSE", breeze=api, max_retries=4)
+
+    assert df.empty
+    assert api.get_historical_data.call_count == 1
+
+
 def test_volume_absorption_ratio_trailing_avg():
     df = pd.DataFrame(
         {
@@ -134,8 +154,7 @@ def test_fetch_nifty_option_metrics_with_fallback_skips_zero_oi_chain(monkeypatc
             "2026-04-21T06:00:00.000Z",
         ],
     )
-    monkeypatch.setattr(
-        "breeze_client.fetch_nifty_option_metrics",
+    mocked_fetch = MagicMock(
         side_effect=[
             {
                 "call_oi": 0.0,
@@ -151,6 +170,7 @@ def test_fetch_nifty_option_metrics_with_fallback_skips_zero_oi_chain(monkeypatc
             },
         ],
     )
+    monkeypatch.setattr("breeze_client.fetch_nifty_option_metrics", mocked_fetch)
     m = fetch_nifty_option_metrics_with_expiry_fallback(breeze, max_expiry_tries=2)
     assert m["expiry_date"] == "2026-04-21T06:00:00.000Z"
     assert m["fallback_used"] is True

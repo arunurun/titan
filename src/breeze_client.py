@@ -252,7 +252,14 @@ def fetch_equity_data(
                 exchange_code=ex,
                 product_type="cash",
             )
-            if not isinstance(raw, dict) or raw.get("Success") is None:
+            if not isinstance(raw, dict):
+                raise RuntimeError(f"[Breeze] Unexpected historical response: {raw!r}")
+            if raw.get("Success") is None:
+                # Breeze sometimes returns HTTP 200 with Error='No Data Found' for valid but inactive/unavailable scrips.
+                # Treat this as a clean no-data skip so sector runs stay resilient.
+                if _is_breeze_no_data_response(raw):
+                    logger.info("Breeze historical no data for %s: %s", label, raw.get("Error"))
+                    return pd.DataFrame()
                 raise RuntimeError(f"[Breeze] Unexpected historical response: {raw!r}")
             rows = raw["Success"]
             if not rows:
