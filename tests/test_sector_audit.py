@@ -267,3 +267,35 @@ def test_run_sector_live_fails_fast_on_expired_session(mock_load, mock_metrics):
         with pytest.raises(RuntimeError, match="Session token expired"):
             run_sector_live("defence", max_workers=1, digest=True)
     mock_metrics.assert_not_called()
+
+
+def test_prediction_reason_text_is_human_readable():
+    from sector_audit import _prediction_reason_text
+
+    audit = {
+        "next_week_score": 62.0,
+        "prediction_breakdown": {
+            "day": {
+                "z_term": -2.46,
+                "absorption_term": 47.02,
+                "ret1d_term": 3.12,
+                "ema_term": 5.56,
+                "intent_term": 4.62,
+                "atr_penalty": 2.25,
+            },
+            "week": {
+                "z_term": -1.72,
+                "absorption_term": 23.51,
+                "ret1d_term": 1.56,
+                "ema_term": 9.27,
+                "intent_term": 4.62,
+                "atr_penalty": 0.90,
+            },
+            "penalties": [],
+        },
+    }
+    text = _prediction_reason_text(audit)
+    assert "confidence=medium" in text
+    assert "drivers=" in text and "drags=" in text
+    assert "penalties=none" in text
+    assert "factors day[" in text and "week[" in text

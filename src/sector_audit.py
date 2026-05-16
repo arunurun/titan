@@ -123,11 +123,6 @@ def _format_symbol_metrics_line(result: dict[str, Any]) -> str:
     if audit.get("event_risk_soon"):
         flags.append("event-risk<=3d")
     flag_text = ", ".join(flags) if flags else "none"
-    next_day_v = _safe_float(next_day)
-    next_week_v = _safe_float(next_week)
-    show_explain = (not math.isnan(next_day_v) and next_day_v > 75.0) and (
-        not math.isnan(next_week_v) and next_week_v > 75.0
-    )
     fundamental_text = (
         f"{fundamental_status}:{_fmt_metric(fundamental_score)}"
         + (f" ({'; '.join(str(x) for x in fundamental_reasons[:2])})" if fundamental_reasons else "")
@@ -140,12 +135,10 @@ def _format_symbol_metrics_line(result: dict[str, Any]) -> str:
         f"| nextDay {_fmt_metric(next_day)} | nextWeek {_fmt_metric(next_week)} "
         f"| flags={flag_text} | rows {rows}"
     )
-    if show_explain:
-        return (
-            f"{base} | support={support_tag} | fundamentals={fundamental_text} "
-            f"| {_prediction_reason_text(audit)}"
-        )
-    return base
+    return (
+        f"{base} | support={support_tag} | fundamentals={fundamental_text} "
+        f"| {_prediction_reason_text(audit)}"
+    )
 
 
 def _safe_float(x: Any) -> float:
@@ -265,15 +258,46 @@ def _prediction_reason_text(audit: dict[str, Any]) -> str:
     week = breakdown.get("week", {}) if isinstance(breakdown.get("week"), dict) else {}
     penalties = breakdown.get("penalties") if isinstance(breakdown.get("penalties"), list) else []
     pen = ",".join(str(x) for x in penalties) if penalties else "none"
+
+    next_week = _safe_float(audit.get("next_week_score"))
+    if math.isnan(next_week):
+        confidence = "unknown"
+    elif next_week >= 70:
+        confidence = "high"
+    elif next_week >= 55:
+        confidence = "medium"
+    else:
+        confidence = "low"
+    if penalties and confidence == "high":
+        confidence = "medium"
+    elif penalties and confidence == "medium":
+        confidence = "low"
+
+    contributors = [
+        ("participation", _safe_float(week.get("absorption_term"))),
+        ("trend", _safe_float(week.get("ema_term"))),
+        ("momentum", _safe_float(week.get("ret1d_term"))),
+        ("intent", _safe_float(week.get("intent_term"))),
+        ("z-score", _safe_float(week.get("z_term"))),
+    ]
+    drivers = [name for name, val in contributors if not math.isnan(val) and val >= 1.0]
+    drags = [name for name, val in contributors if not math.isnan(val) and val <= -1.0]
+    atr_pen = _safe_float(week.get("atr_penalty"))
+    if not math.isnan(atr_pen) and atr_pen >= 1.0:
+        drags.append("volatility")
+    if not drivers:
+        drivers = ["none"]
+    if not drags:
+        drags = ["none"]
+
     return (
-        "why "
-        f"day[z {_fmt_metric(day.get('z_term'))}, abs {_fmt_metric(day.get('absorption_term'))}, "
+        f"confidence={confidence} | drivers={','.join(drivers[:3])} | drags={','.join(drags[:3])} | penalties={pen} "
+        f"| factors day[z {_fmt_metric(day.get('z_term'))}, abs {_fmt_metric(day.get('absorption_term'))}, "
         f"ret {_fmt_metric(day.get('ret1d_term'))}, ema {_fmt_metric(day.get('ema_term'))}, "
         f"intent {_fmt_metric(day.get('intent_term'))}, atr-pen {_fmt_metric(day.get('atr_penalty'))}] "
         f"week[z {_fmt_metric(week.get('z_term'))}, abs {_fmt_metric(week.get('absorption_term'))}, "
         f"ret {_fmt_metric(week.get('ret1d_term'))}, ema {_fmt_metric(week.get('ema_term'))}, "
-        f"intent {_fmt_metric(week.get('intent_term'))}, atr-pen {_fmt_metric(week.get('atr_penalty'))}] "
-        f"penalties={pen}"
+        f"intent {_fmt_metric(week.get('intent_term'))}, atr-pen {_fmt_metric(week.get('atr_penalty'))}]"
     )
 
 
