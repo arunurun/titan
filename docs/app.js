@@ -72,6 +72,7 @@ function cfg() {
 function setSectorModeUi(mode) {
   const sectorEl = el("sectorId");
   const hintEl = el("sectorHint");
+  if (!sectorEl) return;
   const isSectorMode = mode === "sector";
   sectorEl.disabled = !isSectorMode;
   if (hintEl) {
@@ -173,64 +174,82 @@ async function loadLatestRuns() {
 }
 
 function wireEvents() {
-  el("runMode").addEventListener("change", () => {
-    setSectorModeUi(el("runMode").value);
-  });
+  const runModeEl = el("runMode");
+  if (runModeEl) {
+    runModeEl.addEventListener("change", () => {
+      setSectorModeUi(runModeEl.value);
+    });
+  }
 
-  el("testConnBtn").addEventListener("click", async () => {
-    try {
-      setWorking("Test Connection");
-      await checkConnection({ showSuccess: true });
-    } catch (e) {
-      setStatus(`Connection test failed:\n${e.message}`);
-    }
-  });
+  const testConnBtn = el("testConnBtn");
+  if (testConnBtn) {
+    testConnBtn.addEventListener("click", async () => {
+      try {
+        setWorking("Test Connection");
+        await checkConnection({ showSuccess: true });
+      } catch (e) {
+        setStatus(`Connection test failed:\n${e.message}`);
+      }
+    });
+  }
 
-  el("runTitanBtn").addEventListener("click", async () => {
-    try {
-      setWorking("Dispatch Run Titan");
-      await checkConnection();
-      await dispatchWorkflow(WORKFLOWS.runTitan, {
-        mode: el("runMode").value,
-        sector_id: el("sectorId").value.trim(),
-        max_symbols: el("maxSymbols").value.trim(),
-        workers: el("workers").value.trim(),
-      });
-    } catch (e) {
-      setStatus(`Run Titan dispatch failed:\n${e.message}`);
-    }
-  });
+  const runTitanBtn = el("runTitanBtn");
+  if (runTitanBtn) {
+    runTitanBtn.addEventListener("click", async () => {
+      try {
+        setWorking("Dispatch Run Titan");
+        await checkConnection();
+        await dispatchWorkflow(WORKFLOWS.runTitan, {
+          mode: el("runMode")?.value || "sector",
+          sector_id: (el("sectorId")?.value || "").trim(),
+          max_symbols: (el("maxSymbols")?.value || "").trim(),
+          workers: (el("workers")?.value || "").trim(),
+        });
+      } catch (e) {
+        setStatus(`Run Titan dispatch failed:\n${e.message}`);
+      }
+    });
+  }
 
-  el("validateBtn").addEventListener("click", async () => {
-    try {
-      setWorking("Dispatch Validate Token");
-      await checkConnection();
-      await dispatchWorkflow(WORKFLOWS.validate);
-    } catch (e) {
-      setStatus(`Validate dispatch failed:\n${e.message}`);
-    }
-  });
+  const validateBtn = el("validateBtn");
+  if (validateBtn) {
+    validateBtn.addEventListener("click", async () => {
+      try {
+        setWorking("Dispatch Validate Token");
+        await checkConnection();
+        await dispatchWorkflow(WORKFLOWS.validate);
+      } catch (e) {
+        setStatus(`Validate dispatch failed:\n${e.message}`);
+      }
+    });
+  }
 
-  el("persistBtn").addEventListener("click", async () => {
-    try {
-      setWorking("Dispatch Persist Token");
-      const tokenInput = el("tokenInput").value.trim();
-      if (!tokenInput) throw new Error("Token input is required.");
-      await checkConnection();
-      await dispatchWorkflow(WORKFLOWS.persist, { breeze_token_input: tokenInput });
-    } catch (e) {
-      setStatus(`Persist dispatch failed:\n${e.message}`);
-    }
-  });
+  const persistBtn = el("persistBtn");
+  if (persistBtn) {
+    persistBtn.addEventListener("click", async () => {
+      try {
+        setWorking("Dispatch Persist Token");
+        const tokenInput = (el("tokenInput")?.value || "").trim();
+        if (!tokenInput) throw new Error("Token input is required.");
+        await checkConnection();
+        await dispatchWorkflow(WORKFLOWS.persist, { breeze_token_input: tokenInput });
+      } catch (e) {
+        setStatus(`Persist dispatch failed:\n${e.message}`);
+      }
+    });
+  }
 
-  el("refreshBtn").addEventListener("click", async () => {
-    try {
-      setWorking("Refresh Status");
-      await loadLatestRuns();
-    } catch (e) {
-      setStatus(`Refresh failed:\n${e.message}`);
-    }
-  });
+  const refreshBtn = el("refreshBtn");
+  if (refreshBtn) {
+    refreshBtn.addEventListener("click", async () => {
+      try {
+        setWorking("Refresh Status");
+        await loadLatestRuns();
+      } catch (e) {
+        setStatus(`Refresh failed:\n${e.message}`);
+      }
+    });
+  }
 }
 
 function initStorage() {
@@ -239,7 +258,10 @@ function initStorage() {
   if (proxyEl) {
     proxyEl.textContent = normalizeProxyBase(PROXY_BASE);
   }
-  setSectorModeUi(el("runMode").value);
+  const runModeEl = el("runMode");
+  if (runModeEl) {
+    setSectorModeUi(runModeEl.value);
+  }
 }
 
 try {
