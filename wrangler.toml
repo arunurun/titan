@@ -1,4 +1,4 @@
-name = "titanv1"
+name = "titan"
 main = "proxy/cloudflare-worker.js"
 compatibility_date = "2026-05-16"
 workers_dev = true
