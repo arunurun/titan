@@ -44,6 +44,7 @@ jobs:
 
       - name: Market-open guard (IST)
         id: market_open_guard
+        if: ${{ github.event_name == 'schedule' }}
         env:
           MARKET_HOLIDAYS_IST: ${{ secrets.MARKET_HOLIDAYS_IST }}
         run: |
@@ -79,7 +80,7 @@ jobs:
 
       # Single source of truth: always load Breeze token from Supabase session_config.
       - name: Load Breeze session token (Supabase session_config)
-        if: ${{ steps.market_open_guard.outputs.market_closed != 'true' }}
+        if: ${{ github.event_name != 'schedule' || steps.market_open_guard.outputs.market_closed != 'true' }}
         id: inject_token
         continue-on-error: true
         env:
@@ -98,7 +99,7 @@ jobs:
           exit "$rc"
 
       - name: Trigger breeze-token-updator workflow when token injection fails
-        if: ${{ steps.market_open_guard.outputs.market_closed != 'true' && steps.inject_token.outcome == 'failure' && steps.inject_token.outputs.breeze_session_invalid == 'true' }}
+        if: ${{ (github.event_name != 'schedule' || steps.market_open_guard.outputs.market_closed != 'true') && steps.inject_token.outcome == 'failure' && steps.inject_token.outputs.breeze_session_invalid == 'true' }}
         env:
           GH_PAT: ${{ secrets.BREEZE_TOKEN_UPDATOR_PAT }}
         run: |
@@ -116,14 +117,14 @@ jobs:
           echo "Dispatched arunurun/breeze-token-updator validate_token workflow."
 
       - name: Stop run if token injection failed
-        if: ${{ steps.market_open_guard.outputs.market_closed != 'true' && steps.inject_token.outcome == 'failure' }}
+        if: ${{ (github.event_name != 'schedule' || steps.market_open_guard.outputs.market_closed != 'true') && steps.inject_token.outcome == 'failure' }}
         run: |
           echo "Token injection failed (exit=${{ steps.inject_token.outputs.exit_code }})."
           exit 1
 
       # On branches `main`, `sector`, `analysis`: run all active sectors (excluding unknown). Else: NIFTY live.
       - name: Market audit (NIFTY live or all sectors)
-        if: ${{ steps.market_open_guard.outputs.market_closed != 'true' }}
+        if: ${{ github.event_name != 'schedule' || steps.market_open_guard.outputs.market_closed != 'true' }}
         id: market_audit
         continue-on-error: true
         env:
@@ -160,7 +161,7 @@ jobs:
           exit "$rc"
 
       - name: Trigger breeze-token-updator workflow on invalid token
-        if: ${{ steps.market_open_guard.outputs.market_closed != 'true' && steps.market_audit.outputs.breeze_session_invalid == 'true' }}
+        if: ${{ (github.event_name != 'schedule' || steps.market_open_guard.outputs.market_closed != 'true') && steps.market_audit.outputs.breeze_session_invalid == 'true' }}
         env:
           GH_PAT: ${{ secrets.BREEZE_TOKEN_UPDATOR_PAT }}
         run: |
@@ -178,7 +179,7 @@ jobs:
           echo "Dispatched arunurun/breeze-token-updator validate_token workflow."
 
       - name: Mark run failed if market audit failed
-        if: ${{ steps.market_open_guard.outputs.market_closed != 'true' && steps.market_audit.outcome == 'failure' }}
+        if: ${{ (github.event_name != 'schedule' || steps.market_open_guard.outputs.market_closed != 'true') && steps.market_audit.outcome == 'failure' }}
         run: |
           echo "Market audit step failed (exit=${{ steps.market_audit.outputs.exit_code }})."
           exit 1
