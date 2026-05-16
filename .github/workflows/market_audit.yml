@@ -146,7 +146,7 @@ jobs:
           set +e
           if [ "${{ github.ref_name }}" = "analysis" ] || [ "${{ github.ref_name }}" = "sector" ] || [ "${{ github.ref_name }}" = "main" ]; then
             # Default: one digest narrative per sector run (use --sector-per-symbol-narrative for per-stock posts).
-            python main.py --all-sectors --all-sector-workers 3 --sector-workers 4 --exclude-sectors unknown,non_equity 2>&1 | tee market_audit.log
+            python main.py --all-sectors --all-sector-workers 20 --sector-workers 4 --exclude-sectors unknown,non_equity 2>&1 | tee market_audit.log
             rc=${PIPESTATUS[0]}
           else
             python main.py --live 2>&1 | tee market_audit.log

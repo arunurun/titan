@@ -11,7 +11,7 @@ def test_market_audit_workflow_uses_630am_ist_weekdays() -> None:
     text = path.read_text(encoding="utf-8")
     assert 'cron: "0 1 * * 1-5"' in text
     assert "Market-open guard (IST)" in text
-    assert "--all-sectors --all-sector-workers 3 --sector-workers 4 --exclude-sectors unknown,non_equity" in text
+    assert "--all-sectors --all-sector-workers 20 --sector-workers 4 --exclude-sectors unknown,non_equity" in text
 
 
 def test_run_titan_now_no_default_symbol_cap() -> None:
@@ -20,3 +20,4 @@ def test_run_titan_now_no_default_symbol_cap() -> None:
     assert 'default: ""' in text
     assert "- all_sectors" in text
     assert "all_sector_workers" in text
+    assert 'default: "20"' in text

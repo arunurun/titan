@@ -159,7 +159,7 @@ TEMPLATE = """
         <label>Workers (optional)</label>
         <input name="workers" value="2" />
         <label>All-sector workers (optional; used when mode=all_sectors)</label>
-        <input name="all_sector_workers" value="3" />
+        <input name="all_sector_workers" value="20" />
         <button type="submit">Run Analysis</button>
       </form>
     </div>

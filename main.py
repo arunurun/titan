@@ -154,8 +154,8 @@ def run_all_sectors(
     sectors = [s for s in list_active_sector_ids(include_unknown=False) if s not in set(exclude_sectors)]
     if not sectors:
         raise RuntimeError("No active sectors found after exclusions.")
-    sector_parallelism = all_sector_workers if all_sector_workers is not None else min(3, len(sectors))
-    sector_parallelism = max(1, min(int(sector_parallelism), len(sectors), 8))
+    sector_parallelism = all_sector_workers if all_sector_workers is not None else max(20, len(sectors))
+    sector_parallelism = max(1, min(int(sector_parallelism), len(sectors)))
     logger.info(
         "Running all sectors (%s) with sector_parallelism=%s: %s",
         len(sectors),
@@ -363,7 +363,7 @@ def main() -> None:
         type=int,
         default=None,
         metavar="N",
-        help="Parallel sector runs when using --all-sectors (default: min(3, sector_count)).",
+        help="Parallel sector runs when using --all-sectors (default: max(20, sector_count), bounded by sector_count).",
     )
     p.add_argument(
         "--exclude-sectors",

@@ -27,7 +27,7 @@ on:
       all_sector_workers:
         description: "Optional sector-parallel workers (used when mode=all_sectors)"
         required: false
-        default: "3"
+        default: "20"
 
 permissions:
   contents: read
