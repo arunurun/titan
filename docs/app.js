@@ -248,6 +248,15 @@ function parseCustomSymbols(raw) {
   return deduped;
 }
 
+function isLikelyPortfolioSymbol(symbol) {
+  const sym = String(symbol || "").toUpperCase();
+  if (!sym) return false;
+  if (COMMON_NON_SYMBOLS.has(sym)) return false;
+  // Keep tokens that contain letters; reject pure numeric/price fragments.
+  if (!/[A-Z]/.test(sym)) return false;
+  return CUSTOM_SYMBOL_TOKEN_RE.test(sym);
+}
+
 function normalizeHoldingSymbol(raw) {
   return String(raw || "")
     .toUpperCase()
@@ -263,16 +272,16 @@ function parseSymbolWithExchange(token, defaultExchange = "NSE") {
       const [left, right] = raw.split(sep, 2).map((x) => x.trim());
       const leftNorm = normalizeHoldingSymbol(left);
       const rightNorm = normalizeHoldingSymbol(right);
-      if (EXCHANGE_OPTIONS.has(leftNorm) && CUSTOM_SYMBOL_TOKEN_RE.test(rightNorm)) {
+      if (EXCHANGE_OPTIONS.has(leftNorm) && isLikelyPortfolioSymbol(rightNorm)) {
         return { symbol: rightNorm, exchange: leftNorm };
       }
-      if (EXCHANGE_OPTIONS.has(rightNorm) && CUSTOM_SYMBOL_TOKEN_RE.test(leftNorm)) {
+      if (EXCHANGE_OPTIONS.has(rightNorm) && isLikelyPortfolioSymbol(leftNorm)) {
         return { symbol: leftNorm, exchange: rightNorm };
       }
     }
   }
   const sym = normalizeHoldingSymbol(raw);
-  if (!CUSTOM_SYMBOL_TOKEN_RE.test(sym)) return null;
+  if (!isLikelyPortfolioSymbol(sym)) return null;
   return { symbol: sym, exchange: defaultExchange };
 }
 
@@ -280,6 +289,7 @@ function parseHoldingsSymbolsFromText(rawText, defaultExchange = "NSE") {
   const lines = String(rawText || "").split(/\r?\n/);
   const found = [];
   const seen = new Set();
+  const rejected = [];
   for (const line of lines) {
     const cleaned = String(line || "").trim();
     if (!cleaned || cleaned.startsWith("#")) continue;
@@ -287,31 +297,70 @@ function parseHoldingsSymbolsFromText(rawText, defaultExchange = "NSE") {
     if (tokens.length === 1) {
       tokens = cleaned.split(/\s+/).map((t) => t.trim()).filter(Boolean);
     }
-    if (tokens.length < 2) continue;
-    let qtyIdx = -1;
-    for (let i = 0; i < tokens.length; i += 1) {
-      const tok = tokens[i].replace(/,/g, "");
-      if (/^[+-]?\d+(?:\.\d+)?$/.test(tok)) {
-        qtyIdx = i;
+    if (!tokens.length) continue;
+    const firstColRaw = tokens[0];
+    const parsed = parseSymbolWithExchange(firstColRaw, defaultExchange);
+    if (!parsed) {
+      rejected.push({ token: firstColRaw, reason: "invalid_first_column_symbol" });
+      continue;
+    }
+    if (!seen.has(parsed.symbol)) {
+      seen.add(parsed.symbol);
+      found.push(parsed.symbol);
+    }
+  }
+  return {
+    symbols: found.slice(0, MAX_CUSTOM_SYMBOLS),
+    rejected,
+  };
+}
+
+function _groupPdfItemsByRow(items, tolerance = 2) {
+  const rows = [];
+  for (const item of items || []) {
+    const text = String(item?.str || "").trim();
+    if (!text) continue;
+    const tr = Array.isArray(item?.transform) ? item.transform : [];
+    const x = Number(tr[4] || 0);
+    const y = Number(tr[5] || 0);
+    let row = null;
+    for (const existing of rows) {
+      if (Math.abs(existing.y - y) <= tolerance) {
+        row = existing;
         break;
       }
     }
-    if (qtyIdx < 1) continue;
-    for (let j = qtyIdx - 1; j >= 0; j -= 1) {
-      const parsed = parseSymbolWithExchange(tokens[j], defaultExchange);
-      if (!parsed) continue;
-      if (COMMON_NON_SYMBOLS.has(parsed.symbol)) continue;
-      if (!seen.has(parsed.symbol)) {
-        seen.add(parsed.symbol);
-        found.push(parsed.symbol);
-      }
-      break;
+    if (!row) {
+      row = { y, cells: [] };
+      rows.push(row);
     }
+    row.cells.push({ x, text });
   }
-  return found.slice(0, MAX_CUSTOM_SYMBOLS);
+  return rows;
 }
 
-async function extractPdfText(file) {
+function _parseFirstColumnTokenFromRow(cells, defaultExchange) {
+  if (!Array.isArray(cells) || !cells.length) {
+    return { parsed: null, token: "" };
+  }
+  const sorted = [...cells].sort((a, b) => a.x - b.x);
+  const first = String(sorted[0]?.text || "").trim();
+  const second = String(sorted[1]?.text || "").trim();
+  const candidates = [first];
+  if (second) {
+    candidates.push(`${first}${second}`);
+    candidates.push(`${first} ${second}`);
+  }
+  for (const cand of candidates) {
+    const parsed = parseSymbolWithExchange(cand, defaultExchange);
+    if (parsed) {
+      return { parsed, token: cand };
+    }
+  }
+  return { parsed: null, token: first };
+}
+
+async function extractPortfolioSymbolsFromPdf(file, defaultExchange = "NSE") {
   const pdfjsLib = await import("https://cdn.jsdelivr.net/npm/pdfjs-dist@4.5.136/build/pdf.mjs");
   if (pdfjsLib && pdfjsLib.GlobalWorkerOptions) {
     pdfjsLib.GlobalWorkerOptions.workerSrc =
@@ -319,14 +368,31 @@ async function extractPdfText(file) {
   }
   const bytes = new Uint8Array(await file.arrayBuffer());
   const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
-  const pageTexts = [];
+  const symbols = [];
+  const seen = new Set();
+  const rejected = [];
   for (let i = 1; i <= pdf.numPages; i += 1) {
     const page = await pdf.getPage(i);
     const tc = await page.getTextContent();
-    const txt = (tc.items || []).map((x) => String(x.str || "")).join(" ");
-    pageTexts.push(txt);
+    const rows = _groupPdfItemsByRow(tc.items || []);
+    for (const row of rows) {
+      const { parsed, token } = _parseFirstColumnTokenFromRow(row.cells, defaultExchange);
+      if (!parsed) {
+        if (token) {
+          rejected.push({ token, reason: "invalid_first_column_symbol" });
+        }
+        continue;
+      }
+      if (!seen.has(parsed.symbol)) {
+        seen.add(parsed.symbol);
+        symbols.push(parsed.symbol);
+      }
+    }
   }
-  return pageTexts.join("\n");
+  return {
+    symbols: symbols.slice(0, MAX_CUSTOM_SYMBOLS),
+    rejected,
+  };
 }
 
 async function buildPortfolioSymbolsPayload() {
@@ -348,28 +414,54 @@ async function buildPortfolioSymbolsPayload() {
   });
   const pasted = String(el("portfolioHoldingsText")?.value || "");
   const pdfFile = el("portfolioPdfFile")?.files?.[0] || null;
-  let combinedText = pasted;
+  const accepted = [];
+  const rejected = [];
+  const seen = new Set();
+  const addAccepted = (list) => {
+    for (const sym of list || []) {
+      if (!seen.has(sym)) {
+        seen.add(sym);
+        accepted.push(sym);
+      }
+      if (accepted.length >= MAX_CUSTOM_SYMBOLS) {
+        break;
+      }
+    }
+  };
+
   if (pdfFile) {
     try {
-      const pdfText = await extractPdfText(pdfFile);
-      combinedText = [pdfText, pasted].filter(Boolean).join("\n");
+      const pdfResult = await extractPortfolioSymbolsFromPdf(pdfFile, exchange);
+      addAccepted(pdfResult.symbols);
+      rejected.push(...(pdfResult.rejected || []));
     } catch (e) {
       throw new Error(`PDF extraction failed. ${e.message || e}`);
     }
   }
-  const symbols = parseHoldingsSymbolsFromText(combinedText, exchange);
-  if (!symbols.length) {
-    throw new Error("No symbols parsed from PDF/text. Use lines like NSE:RELIANCE, 10");
+  if (pasted.trim()) {
+    const txtResult = parseHoldingsSymbolsFromText(pasted, exchange);
+    addAccepted(txtResult.symbols);
+    rejected.push(...(txtResult.rejected || []));
   }
+  if (!accepted.length) {
+    throw new Error("No symbols parsed from first column of PDF/text. Use lines like NSE:RELIANCE, 10");
+  }
+  const rejectionPreview = rejected
+    .slice(0, 8)
+    .map((r) => `${r.token} (${r.reason})`)
+    .join(", ");
   return {
     mode: "custom",
     sector_id: sectorId,
     custom_exchange: exchange,
-    custom_symbols: symbols.join(","),
-    max_symbols: maxSymbols || String(symbols.length),
+    custom_symbols: accepted.join(","),
+    max_symbols: maxSymbols || String(accepted.length),
     workers: normalizePositiveInt(el("workers")?.value, "Workers", { min: 1, max: 16 }) || "4",
     all_sector_workers: "",
-    parsed_count: symbols.length,
+    parsed_count: accepted.length,
+    parsed_symbols_preview: accepted.slice(0, 15).join(", "),
+    rejected_count: rejected.length,
+    rejected_preview: rejectionPreview,
   };
 }
 
@@ -528,6 +620,15 @@ function wireEvents() {
           all_sector_workers: payload.all_sector_workers,
         };
         await dispatchWorkflow(WORKFLOWS.runTitan, inputs);
+        const rejectLine =
+          payload.rejected_count > 0
+            ? `\nRejected first-column entries: ${payload.rejected_count}` +
+              (payload.rejected_preview ? `\nRejected sample: ${payload.rejected_preview}` : "")
+            : "\nRejected first-column entries: 0";
+        setStatus(
+          `Dispatched run_titan_now.yml successfully.\n` +
+            `Parsed symbols (${payload.parsed_count}): ${payload.parsed_symbols_preview}${rejectLine}`,
+        );
       } catch (e) {
         setStatus(`Portfolio quick scan failed:\n${e.message}`);
       }
