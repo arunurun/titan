@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 from config_loader import TitanConfig
 from portfolio_analysis import (
     PortfolioHolding,
+    _resolve_symbol,
     analyze_portfolio_holdings,
     collect_holdings_input,
     parse_holdings_text,
@@ -49,6 +50,11 @@ def test_collect_holdings_input_fallback_text_when_pdf_unavailable(monkeypatch):
 
 def test_analyze_portfolio_holdings_uses_equity_audit(monkeypatch):
     monkeypatch.setattr("portfolio_analysis.load_config", lambda: _cfg())
+    monkeypatch.setattr("portfolio_analysis._load_supabase_breeze_token", lambda cfg: "tok")
+    monkeypatch.setattr(
+        "portfolio_analysis._load_active_symbol_universe",
+        lambda cfg: {"NSE": {"HAL": "HAL"}, "BSE": {}},
+    )
     monkeypatch.setattr("breeze_client.create_breeze_session", lambda cfg: MagicMock())
 
     def fake_audit(cfg, breeze, inst, **kwargs):
@@ -71,3 +77,20 @@ def test_analyze_portfolio_holdings_uses_equity_audit(monkeypatch):
     assert result["summary"]["analyzed_positions"] == 1
     assert result["summary"]["portfolio_weighted_next_week_score"] == 68.0
     assert result["top_candidates"][0]["symbol"] == "HAL"
+
+
+def test_resolve_symbol_numeric_suffix_and_alias():
+    universe = {
+        "NSE": {
+            "DATAPATTNS": "DATAPATTNS",
+            "ASTRAMICRO": "ASTRAMICRO",
+            "JYOTIRES": "JYOTIRES",
+        },
+        "BSE": {},
+    }
+    s1 = _resolve_symbol("DATPAT156212", "NSE", by_exchange=universe)
+    s2 = _resolve_symbol("ASTMIC31501", "NSE", by_exchange=universe)
+    s3 = _resolve_symbol("JYORES5101", "NSE", by_exchange=universe)
+    assert s1[0] == "DATAPATTNS"
+    assert s2[0] == "ASTRAMICRO"
+    assert s3[0] == "JYOTIRES"

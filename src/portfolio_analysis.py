@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import difflib
 import math
 import re
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from config_loader import load_config
+from supabase import create_client
 from sector_audit import build_equity_live_audit
 from sector_registry import SectorInstrument
 
@@ -35,6 +37,12 @@ _COMMON_NON_SYMBOLS = {
     "UNIT",
     "ISIN",
     "PORTFOLIO",
+}
+_SYMBOL_ALIAS_HINTS = {
+    # Common PDF truncations/contract-like tails mapped to equities.
+    "ASTMIC": "ASTRAMICRO",
+    "DATPAT": "DATAPATTNS",
+    "JYORES": "JYOTIRES",
 }
 
 
@@ -94,6 +102,122 @@ def extract_text_from_pdf(path_raw: str) -> tuple[str, str | None]:
 def _normalize_symbol(symbol_raw: str) -> str:
     out = "".join(ch for ch in symbol_raw.upper().strip() if ch.isalnum() or ch in {"&", ".", "-"})
     return out
+
+
+def _clean_symbol_key(symbol_raw: str) -> str:
+    return "".join(ch for ch in str(symbol_raw or "").upper() if ch.isalnum())
+
+
+def _strip_numeric_suffix(symbol_key: str) -> str:
+    key = _clean_symbol_key(symbol_key)
+    stripped = re.sub(r"\d{2,}$", "", key)
+    return stripped if len(stripped) >= 3 else key
+
+
+def _load_supabase_breeze_token(cfg) -> str | None:
+    try:
+        client = create_client(cfg.supabase_url, cfg.supabase_key)
+        res = (
+            client.table("session_config")
+            .select("breeze_session_token")
+            .eq("id", 1)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(res, "data", None) or []
+        if rows:
+            tok = (rows[0].get("breeze_session_token") or "").strip()
+            if tok:
+                return tok
+    except Exception:
+        return None
+    return None
+
+
+def _load_active_symbol_universe(cfg) -> dict[str, dict[str, str]]:
+    by_exchange: dict[str, dict[str, str]] = {"NSE": {}, "BSE": {}}
+    try:
+        client = create_client(cfg.supabase_url, cfg.supabase_key)
+        page = 0
+        size = 1000
+        while True:
+            res = (
+                client.table("market_instruments")
+                .select("symbol,exchange,is_active")
+                .eq("is_active", True)
+                .range(page * size, page * size + size - 1)
+                .execute()
+            )
+            rows = list(getattr(res, "data", None) or [])
+            if not rows:
+                break
+            for row in rows:
+                sym = str(row.get("symbol") or "").strip().upper()
+                ex = str(row.get("exchange") or "").strip().upper()
+                if not sym or ex not in by_exchange:
+                    continue
+                by_exchange[ex][_clean_symbol_key(sym)] = sym
+            if len(rows) < size:
+                break
+            page += 1
+    except Exception:
+        return by_exchange
+    return by_exchange
+
+
+def _resolve_symbol(
+    symbol: str,
+    exchange: str,
+    *,
+    by_exchange: dict[str, dict[str, str]],
+) -> tuple[str, str, str, float]:
+    ex = exchange if exchange in _EXCHANGES else "NSE"
+    key_raw = _clean_symbol_key(symbol)
+    key_trim = _strip_numeric_suffix(key_raw)
+    same_map = by_exchange.get(ex, {})
+    other_ex = "BSE" if ex == "NSE" else "NSE"
+    other_map = by_exchange.get(other_ex, {})
+
+    # 1) Exact in same exchange.
+    if key_raw in same_map:
+        return same_map[key_raw], ex, "exact_match", 1.0
+
+    # 2) Trimmed numeric suffix exact.
+    if key_trim in same_map:
+        return same_map[key_trim], ex, "numeric_suffix_stripped", 0.95
+
+    # 3) Alias hints from known broker/PDF patterns.
+    hint = _SYMBOL_ALIAS_HINTS.get(key_trim) or _SYMBOL_ALIAS_HINTS.get(key_raw)
+    if hint:
+        hint_key = _clean_symbol_key(hint)
+        if hint_key in same_map:
+            return same_map[hint_key], ex, "alias_hint", 0.93
+        if hint_key in other_map:
+            return other_map[hint_key], other_ex, "alias_hint_cross_exchange", 0.9
+
+    # 4) Prefix match in same exchange.
+    candidates = [k for k in same_map.keys() if k.startswith(key_trim) or key_trim.startswith(k)]
+    if candidates:
+        best = min(candidates, key=lambda x: abs(len(x) - len(key_trim)))
+        return same_map[best], ex, "prefix_match", 0.86
+
+    # 5) Fuzzy match in same exchange.
+    close = difflib.get_close_matches(key_trim, list(same_map.keys()), n=1, cutoff=0.72)
+    if close:
+        k = close[0]
+        return same_map[k], ex, "fuzzy_match", 0.8
+
+    # 6) Cross-exchange exact/trim/fuzzy fallback.
+    if key_raw in other_map:
+        return other_map[key_raw], other_ex, "cross_exchange_exact", 0.78
+    if key_trim in other_map:
+        return other_map[key_trim], other_ex, "cross_exchange_numeric_trim", 0.76
+    close2 = difflib.get_close_matches(key_trim, list(other_map.keys()), n=1, cutoff=0.75)
+    if close2:
+        k = close2[0]
+        return other_map[k], other_ex, "cross_exchange_fuzzy", 0.72
+
+    return _normalize_symbol(symbol), ex, "unresolved", 0.0
 
 
 def _parse_symbol_with_exchange(token: str) -> tuple[str, str] | None:
@@ -214,20 +338,51 @@ def analyze_portfolio_holdings(
 ) -> dict[str, Any]:
     capped = holdings[: max(1, int(max_positions))]
     cfg = load_config()
+
+    session_token = cfg.breeze_session_token
+    sup_token = _load_supabase_breeze_token(cfg)
+    if sup_token:
+        session_token = sup_token
+
     from breeze_client import create_breeze_session
 
-    breeze = create_breeze_session(cfg)
+    class _BreezeCreds:
+        breeze_api_key = cfg.breeze_api_key
+        breeze_secret = cfg.breeze_secret
+        breeze_session_token = session_token
+
+    breeze = create_breeze_session(_BreezeCreds())
+    symbol_universe = _load_active_symbol_universe(cfg)
     rows: list[dict[str, Any]] = []
     total_weight = 0.0
     weighted_next_week = 0.0
     weighted_intent = 0.0
 
     for h in capped:
+        resolved_symbol, resolved_exchange, map_reason, map_conf = _resolve_symbol(
+            h.symbol,
+            h.exchange,
+            by_exchange=symbol_universe,
+        )
+        if map_reason == "unresolved":
+            rows.append(
+                {
+                    "input_symbol": h.symbol,
+                    "input_exchange": h.exchange,
+                    "resolved_symbol": resolved_symbol,
+                    "resolved_exchange": resolved_exchange,
+                    "mapping_reason": map_reason,
+                    "mapping_confidence": map_conf,
+                    "quantity": h.quantity,
+                    "status": "invalid_symbol_from_pdf",
+                }
+            )
+            continue
         try:
             audit, _ = build_equity_live_audit(
                 cfg,
                 breeze,
-                SectorInstrument(symbol=h.symbol, exchange=h.exchange),
+                SectorInstrument(symbol=resolved_symbol, exchange=resolved_exchange),
                 sector_id="portfolio_custom",
                 with_narrative=False,
                 strict_data=False,
@@ -235,8 +390,14 @@ def analyze_portfolio_holdings(
             if audit.get("skipped_no_data"):
                 rows.append(
                     {
-                        "symbol": h.symbol,
-                        "exchange": h.exchange,
+                        "input_symbol": h.symbol,
+                        "input_exchange": h.exchange,
+                        "resolved_symbol": resolved_symbol,
+                        "resolved_exchange": resolved_exchange,
+                        "mapping_reason": map_reason,
+                        "mapping_confidence": map_conf,
+                        "symbol": resolved_symbol,
+                        "exchange": resolved_exchange,
                         "quantity": h.quantity,
                         "status": "skipped_no_data",
                     }
@@ -252,8 +413,14 @@ def analyze_portfolio_holdings(
                 weighted_intent += float(intent) * weight
             rows.append(
                 {
-                    "symbol": h.symbol,
-                    "exchange": h.exchange,
+                    "input_symbol": h.symbol,
+                    "input_exchange": h.exchange,
+                    "resolved_symbol": resolved_symbol,
+                    "resolved_exchange": resolved_exchange,
+                    "mapping_reason": map_reason,
+                    "mapping_confidence": map_conf,
+                    "symbol": resolved_symbol,
+                    "exchange": resolved_exchange,
                     "quantity": h.quantity,
                     "status": "ok",
                     "next_week_score": next_week,
@@ -266,8 +433,14 @@ def analyze_portfolio_holdings(
         except Exception as exc:  # noqa: BLE001
             rows.append(
                 {
-                    "symbol": h.symbol,
-                    "exchange": h.exchange,
+                    "input_symbol": h.symbol,
+                    "input_exchange": h.exchange,
+                    "resolved_symbol": resolved_symbol,
+                    "resolved_exchange": resolved_exchange,
+                    "mapping_reason": map_reason,
+                    "mapping_confidence": map_conf,
+                    "symbol": resolved_symbol,
+                    "exchange": resolved_exchange,
                     "quantity": h.quantity,
                     "status": "error",
                     "error": str(exc),
@@ -277,10 +450,12 @@ def analyze_portfolio_holdings(
     ok_rows = [r for r in rows if r.get("status") == "ok"]
     skipped_rows = [r for r in rows if r.get("status") == "skipped_no_data"]
     err_rows = [r for r in rows if r.get("status") == "error"]
+    invalid_rows = [r for r in rows if r.get("status") == "invalid_symbol_from_pdf"]
     summary = {
         "requested_positions": len(capped),
         "analyzed_positions": len(ok_rows),
         "skipped_no_data": len(skipped_rows),
+        "invalid_symbol_mappings": len(invalid_rows),
         "errors": len(err_rows),
         "portfolio_weighted_next_week_score": round(weighted_next_week / total_weight, 2)
         if total_weight > 0
