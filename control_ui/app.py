@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from urllib.parse import quote
 
@@ -198,7 +199,9 @@ TEMPLATE = """
     <div class="card">
       <h3>Portfolio Analysis (PDF + fallback text)</h3>
       <p class="hint">Provide PDF path for extraction. If PDF parser is unavailable or extraction fails, pasted holdings text is used.</p>
-      <form method="post" action="/portfolio-analysis">
+      <form method="post" action="/portfolio-analysis" enctype="multipart/form-data">
+        <label>Upload portfolio PDF (preferred)</label>
+        <input type="file" name="portfolio_pdf_file" accept=".pdf,application/pdf" />
         <label>Portfolio PDF path (optional)</label>
         <input name="portfolio_pdf_path" value="{{ portfolio_pdf_path or '' }}" placeholder="C:\\path\\to\\holdings.pdf" />
         <label>Fallback pasted holdings text (optional but recommended)</label>
@@ -453,6 +456,7 @@ def persist_token():
 def run_portfolio_analysis():
     load_dotenv(ROOT / ".env", override=False)
     pdf_path = (request.form.get("portfolio_pdf_path") or "").strip()
+    uploaded = request.files.get("portfolio_pdf_file")
     holdings_text = request.form.get("portfolio_holdings_text", "")
     max_positions_raw = (request.form.get("portfolio_max_positions") or "20").strip()
     try:
@@ -461,7 +465,22 @@ def run_portfolio_analysis():
         max_positions = 20
     max_positions = max(1, min(max_positions, 100))
 
+    tmp_pdf_path: str | None = None
     try:
+        if uploaded and uploaded.filename:
+            if not uploaded.filename.lower().endswith(".pdf"):
+                return _render_page(
+                    message="Uploaded file must be a PDF.",
+                    level="err",
+                    portfolio_pdf_path=pdf_path,
+                    portfolio_holdings_text=holdings_text,
+                    portfolio_max_positions=str(max_positions),
+                )
+            with tempfile.NamedTemporaryFile(prefix="titan_portfolio_", suffix=".pdf", delete=False) as tmp:
+                uploaded.save(tmp.name)
+                tmp_pdf_path = tmp.name
+                pdf_path = tmp_pdf_path
+
         holdings, source, limitations = collect_holdings_input(
             pdf_path=pdf_path,
             pasted_holdings_text=holdings_text,
@@ -503,6 +522,12 @@ def run_portfolio_analysis():
             portfolio_holdings_text=holdings_text,
             portfolio_max_positions=str(max_positions),
         )
+    finally:
+        if tmp_pdf_path:
+            try:
+                os.remove(tmp_pdf_path)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":

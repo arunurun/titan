@@ -31,3 +31,6 @@ provider-universe-sync/data/nse_industry_cache.json
 Thumbs.db
 .idea/
 .vscode/
+
+# Local Cloudflare Wrangler state
+.wrangler/
