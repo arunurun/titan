@@ -33,6 +33,25 @@ const RUN_MODES = new Set(["sector", "all_sectors", "live", "custom"]);
 const EXCHANGE_OPTIONS = new Set(["NSE", "BSE"]);
 const CUSTOM_SYMBOL_TOKEN_RE = /^[A-Z0-9&._-]{1,25}$/;
 const MAX_CUSTOM_SYMBOLS = 120;
+const COMMON_NON_SYMBOLS = new Set([
+  "HOLDINGS",
+  "HOLDING",
+  "SYMBOL",
+  "COMPANY",
+  "QUANTITY",
+  "QTY",
+  "PRICE",
+  "VALUE",
+  "TOTAL",
+  "AVG",
+  "AVERAGE",
+  "COST",
+  "INVESTED",
+  "UNITS",
+  "UNIT",
+  "ISIN",
+  "PORTFOLIO",
+]);
 
 const el = (id) => document.getElementById(id);
 const statusEl = el("status");
@@ -229,6 +248,131 @@ function parseCustomSymbols(raw) {
   return deduped;
 }
 
+function normalizeHoldingSymbol(raw) {
+  return String(raw || "")
+    .toUpperCase()
+    .trim()
+    .replace(/[^A-Z0-9&._-]/g, "");
+}
+
+function parseSymbolWithExchange(token, defaultExchange = "NSE") {
+  const raw = String(token || "").toUpperCase().trim();
+  if (!raw) return null;
+  for (const sep of [":", "-", "/"]) {
+    if (raw.includes(sep)) {
+      const [left, right] = raw.split(sep, 2).map((x) => x.trim());
+      const leftNorm = normalizeHoldingSymbol(left);
+      const rightNorm = normalizeHoldingSymbol(right);
+      if (EXCHANGE_OPTIONS.has(leftNorm) && CUSTOM_SYMBOL_TOKEN_RE.test(rightNorm)) {
+        return { symbol: rightNorm, exchange: leftNorm };
+      }
+      if (EXCHANGE_OPTIONS.has(rightNorm) && CUSTOM_SYMBOL_TOKEN_RE.test(leftNorm)) {
+        return { symbol: leftNorm, exchange: rightNorm };
+      }
+    }
+  }
+  const sym = normalizeHoldingSymbol(raw);
+  if (!CUSTOM_SYMBOL_TOKEN_RE.test(sym)) return null;
+  return { symbol: sym, exchange: defaultExchange };
+}
+
+function parseHoldingsSymbolsFromText(rawText, defaultExchange = "NSE") {
+  const lines = String(rawText || "").split(/\r?\n/);
+  const found = [];
+  const seen = new Set();
+  for (const line of lines) {
+    const cleaned = String(line || "").trim();
+    if (!cleaned || cleaned.startsWith("#")) continue;
+    let tokens = cleaned.split(/[,\t|;]+/).map((t) => t.trim()).filter(Boolean);
+    if (tokens.length === 1) {
+      tokens = cleaned.split(/\s+/).map((t) => t.trim()).filter(Boolean);
+    }
+    if (tokens.length < 2) continue;
+    let qtyIdx = -1;
+    for (let i = 0; i < tokens.length; i += 1) {
+      const tok = tokens[i].replace(/,/g, "");
+      if (/^[+-]?\d+(?:\.\d+)?$/.test(tok)) {
+        qtyIdx = i;
+        break;
+      }
+    }
+    if (qtyIdx < 1) continue;
+    for (let j = qtyIdx - 1; j >= 0; j -= 1) {
+      const parsed = parseSymbolWithExchange(tokens[j], defaultExchange);
+      if (!parsed) continue;
+      if (COMMON_NON_SYMBOLS.has(parsed.symbol)) continue;
+      if (!seen.has(parsed.symbol)) {
+        seen.add(parsed.symbol);
+        found.push(parsed.symbol);
+      }
+      break;
+    }
+  }
+  return found.slice(0, MAX_CUSTOM_SYMBOLS);
+}
+
+async function extractPdfText(file) {
+  const pdfjsLib = await import("https://cdn.jsdelivr.net/npm/pdfjs-dist@4.5.136/build/pdf.mjs");
+  if (pdfjsLib && pdfjsLib.GlobalWorkerOptions) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.5.136/build/pdf.worker.mjs";
+  }
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
+  const pageTexts = [];
+  for (let i = 1; i <= pdf.numPages; i += 1) {
+    const page = await pdf.getPage(i);
+    const tc = await page.getTextContent();
+    const txt = (tc.items || []).map((x) => String(x.str || "")).join(" ");
+    pageTexts.push(txt);
+  }
+  return pageTexts.join("\n");
+}
+
+async function buildPortfolioSymbolsPayload() {
+  const exchange = String(el("portfolioExchange")?.value || "NSE")
+    .trim()
+    .toUpperCase();
+  if (!EXCHANGE_OPTIONS.has(exchange)) {
+    throw new Error("Portfolio exchange must be NSE or BSE.");
+  }
+  const sectorId = String(el("portfolioSectorId")?.value || "portfolio_pdf")
+    .trim()
+    .toLowerCase();
+  if (!/^[a-z0-9_]{1,64}$/.test(sectorId)) {
+    throw new Error("Portfolio sector label must match [a-z0-9_]{1,64}.");
+  }
+  const maxSymbols = normalizePositiveInt(el("portfolioMaxSymbols")?.value, "Portfolio max symbols", {
+    min: 1,
+    max: 120,
+  });
+  const pasted = String(el("portfolioHoldingsText")?.value || "");
+  const pdfFile = el("portfolioPdfFile")?.files?.[0] || null;
+  let combinedText = pasted;
+  if (pdfFile) {
+    try {
+      const pdfText = await extractPdfText(pdfFile);
+      combinedText = [pdfText, pasted].filter(Boolean).join("\n");
+    } catch (e) {
+      throw new Error(`PDF extraction failed. ${e.message || e}`);
+    }
+  }
+  const symbols = parseHoldingsSymbolsFromText(combinedText, exchange);
+  if (!symbols.length) {
+    throw new Error("No symbols parsed from PDF/text. Use lines like NSE:RELIANCE, 10");
+  }
+  return {
+    mode: "custom",
+    sector_id: sectorId,
+    custom_exchange: exchange,
+    custom_symbols: symbols.join(","),
+    max_symbols: maxSymbols || String(symbols.length),
+    workers: normalizePositiveInt(el("workers")?.value, "Workers", { min: 1, max: 16 }) || "4",
+    all_sector_workers: "",
+    parsed_count: symbols.length,
+  };
+}
+
 function buildRunTitanInputs() {
   const mode = (el("runMode")?.value || "sector").trim();
   if (!RUN_MODES.has(mode)) {
@@ -362,6 +506,30 @@ function wireEvents() {
         await loadLatestRuns();
       } catch (e) {
         setStatus(`Refresh failed:\n${e.message}`);
+      }
+    });
+  }
+
+  const portfolioScanBtn = el("portfolioScanBtn");
+  if (portfolioScanBtn) {
+    portfolioScanBtn.addEventListener("click", async () => {
+      try {
+        setWorking("Parse Portfolio PDF/Text");
+        const payload = await buildPortfolioSymbolsPayload();
+        setWorking(`Dispatch Portfolio Quick Scan (${payload.parsed_count} symbols)`);
+        await checkConnection();
+        const inputs = {
+          mode: payload.mode,
+          sector_id: payload.sector_id,
+          custom_exchange: payload.custom_exchange,
+          custom_symbols: payload.custom_symbols,
+          max_symbols: payload.max_symbols,
+          workers: payload.workers,
+          all_sector_workers: payload.all_sector_workers,
+        };
+        await dispatchWorkflow(WORKFLOWS.runTitan, inputs);
+      } catch (e) {
+        setStatus(`Portfolio quick scan failed:\n${e.message}`);
       }
     });
   }

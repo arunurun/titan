@@ -179,6 +179,38 @@
     </div>
 
     <div class="card">
+      <h3>Portfolio PDF Quick Scan</h3>
+      <p class="small">
+        Upload a portfolio PDF (or paste holdings text). Symbols are extracted on-device and dispatched as
+        <code>custom</code> mode for a quick scan.
+      </p>
+      <label>Upload portfolio PDF (optional)</label>
+      <input id="portfolioPdfFile" type="file" accept=".pdf,application/pdf" />
+      <label>Fallback holdings text (optional)</label>
+      <textarea
+        id="portfolioHoldingsText"
+        rows="5"
+        placeholder="NSE:RELIANCE, 10&#10;INFY 5&#10;ASTMIC31501 3"
+      ></textarea>
+      <div class="row two">
+        <div>
+          <label>Portfolio exchange</label>
+          <select id="portfolioExchange">
+            <option value="NSE" selected>NSE</option>
+            <option value="BSE">BSE</option>
+          </select>
+        </div>
+        <div>
+          <label>Portfolio sector label</label>
+          <input id="portfolioSectorId" value="portfolio_pdf" />
+        </div>
+      </div>
+      <label>Max symbols from portfolio</label>
+      <input id="portfolioMaxSymbols" value="40" />
+      <button type="button" class="secondary" id="portfolioScanBtn">Dispatch Portfolio Quick Scan</button>
+    </div>
+
+    <div class="card">
       <h3>Validate Breeze Token</h3>
       <button type="button" class="secondary" id="validateBtn">Dispatch Validate Token</button>
     </div>
@@ -197,6 +229,6 @@
     </div>
   </div>
 
-  <script defer src="./app.js?v=20260517-1"></script>
+  <script defer src="./app.js?v=20260517-2"></script>
 </body>
 </html>
