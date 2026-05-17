@@ -16,6 +16,11 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
 from breeze_session_auth import parse_api_session_from_input, upsert_env_var  # noqa: E402
+from portfolio_analysis import (  # noqa: E402
+    analyze_portfolio_holdings,
+    collect_holdings_input,
+    portfolio_report_text,
+)
 from sector_registry import list_active_sector_ids  # noqa: E402
 
 app = Flask(__name__)
@@ -190,6 +195,20 @@ TEMPLATE = """
       </form>
     </div>
 
+    <div class="card">
+      <h3>Portfolio Analysis (PDF + fallback text)</h3>
+      <p class="hint">Provide PDF path for extraction. If PDF parser is unavailable or extraction fails, pasted holdings text is used.</p>
+      <form method="post" action="/portfolio-analysis">
+        <label>Portfolio PDF path (optional)</label>
+        <input name="portfolio_pdf_path" value="{{ portfolio_pdf_path or '' }}" placeholder="C:\\path\\to\\holdings.pdf" />
+        <label>Fallback pasted holdings text (optional but recommended)</label>
+        <textarea name="portfolio_holdings_text" rows="6" placeholder="NSE:RELIANCE, 10&#10;INFY 5&#10;BSE:TCS, 3">{{ portfolio_holdings_text or '' }}</textarea>
+        <label>Max positions to analyze</label>
+        <input name="portfolio_max_positions" value="{{ portfolio_max_positions or '20' }}" />
+        <button type="submit">Run Portfolio Summary</button>
+      </form>
+    </div>
+
     {% if run_output %}
       <div class="card">
         <h3>Last Analysis Run Output</h3>
@@ -329,11 +348,17 @@ def _render_page(**kwargs):
     if selected_sector not in sectors:
         selected_sector = sectors[0] if sectors else "defence"
     run_mode = str(kwargs.pop("run_mode", None) or "sector")
+    portfolio_pdf_path = str(kwargs.pop("portfolio_pdf_path", None) or "")
+    portfolio_holdings_text = str(kwargs.pop("portfolio_holdings_text", None) or "")
+    portfolio_max_positions = str(kwargs.pop("portfolio_max_positions", None) or "20")
     return render_template_string(
         TEMPLATE,
         sectors=sectors,
         selected_sector=selected_sector,
         run_mode=run_mode,
+        portfolio_pdf_path=portfolio_pdf_path,
+        portfolio_holdings_text=portfolio_holdings_text,
+        portfolio_max_positions=portfolio_max_positions,
         **kwargs,
     )
 
@@ -422,6 +447,62 @@ def persist_token():
         )
     except Exception as exc:  # noqa: BLE001
         return _render_page(message=f"Persist token failed: {exc}", level="err")
+
+
+@app.post("/portfolio-analysis")
+def run_portfolio_analysis():
+    load_dotenv(ROOT / ".env", override=False)
+    pdf_path = (request.form.get("portfolio_pdf_path") or "").strip()
+    holdings_text = request.form.get("portfolio_holdings_text", "")
+    max_positions_raw = (request.form.get("portfolio_max_positions") or "20").strip()
+    try:
+        max_positions = int(max_positions_raw)
+    except ValueError:
+        max_positions = 20
+    max_positions = max(1, min(max_positions, 100))
+
+    try:
+        holdings, source, limitations = collect_holdings_input(
+            pdf_path=pdf_path,
+            pasted_holdings_text=holdings_text,
+        )
+        if not holdings:
+            return _render_page(
+                message="No holdings could be parsed. Review format and retry with fallback text.",
+                level="warn",
+                run_output=portfolio_report_text(
+                    source=source,
+                    limitations=limitations,
+                    parsed_count=0,
+                    result={"summary": {"requested_positions": 0}, "rows": []},
+                ),
+                portfolio_pdf_path=pdf_path,
+                portfolio_holdings_text=holdings_text,
+                portfolio_max_positions=str(max_positions),
+            )
+        result = analyze_portfolio_holdings(holdings, max_positions=max_positions)
+        level = "ok" if result.get("summary", {}).get("analyzed_positions", 0) > 0 else "warn"
+        return _render_page(
+            message=f"Portfolio analysis completed from {source} input.",
+            level=level,
+            run_output=portfolio_report_text(
+                source=source,
+                limitations=limitations,
+                parsed_count=len(holdings),
+                result=result,
+            ),
+            portfolio_pdf_path=pdf_path,
+            portfolio_holdings_text=holdings_text,
+            portfolio_max_positions=str(max_positions),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _render_page(
+            message=f"Portfolio analysis failed: {exc}",
+            level="err",
+            portfolio_pdf_path=pdf_path,
+            portfolio_holdings_text=holdings_text,
+            portfolio_max_positions=str(max_positions),
+        )
 
 
 if __name__ == "__main__":

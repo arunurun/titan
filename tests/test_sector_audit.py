@@ -299,3 +299,114 @@ def test_prediction_reason_text_is_human_readable():
     assert "drivers=" in text and "drags=" in text
     assert "penalties=none" in text
     assert "factors day[" in text and "week[" in text
+
+
+def test_absorption_calibration_v2_fallback_default(monkeypatch):
+    from sector_audit import build_equity_live_audit
+
+    closes = [100.0 + i * 0.1 for i in range(30)]
+    df = pd.DataFrame({"close": closes, "high": closes, "low": closes, "volume": [1e6] * 30})
+    monkeypatch.setattr("breeze_client.fetch_equity_data", lambda *a, **k: df)
+    monkeypatch.setattr("breeze_client.volume_absorption_ratio", lambda _df: 9.0)
+    monkeypatch.setattr("sector_audit._recent_absorption_samples", lambda *a, **k: [])
+    monkeypatch.setattr(
+        "brain.generate_titan_narrative",
+        lambda audit, api_key=None, api_keys=None: "Post body",
+    )
+    inst = SectorInstrument("HAL", "NSE")
+    audit, _ = build_equity_live_audit(make_cfg(), MagicMock(), inst, sector_id="defence")
+    assert audit["absorption_ratio"] == 9.0
+    assert audit["absorption_calibration"]["method"] == "fallback_default"
+    assert audit["absorption_calibration"]["cap"] == pytest.approx(2.5)
+    assert audit["absorption_calibrated_ratio"] == pytest.approx(2.5)
+    assert audit["absorption_for_scoring"] <= 3.0
+
+
+def test_absorption_calibration_v2_uses_historical_percentile(monkeypatch):
+    from sector_audit import build_equity_live_audit
+
+    closes = [100.0 + i * 0.1 for i in range(30)]
+    df = pd.DataFrame({"close": closes, "high": closes, "low": closes, "volume": [1e6] * 30})
+    monkeypatch.setattr("breeze_client.fetch_equity_data", lambda *a, **k: df)
+    monkeypatch.setattr("breeze_client.volume_absorption_ratio", lambda _df: 6.0)
+    monkeypatch.setattr(
+        "sector_audit._recent_absorption_samples",
+        lambda *a, **k: [0.8, 1.0, 1.2, 1.4, 2.0, 2.2, 2.4, 2.6, 2.8, 3.0],
+    )
+    monkeypatch.setattr(
+        "brain.generate_titan_narrative",
+        lambda audit, api_key=None, api_keys=None: "Post body",
+    )
+    inst = SectorInstrument("BHEL", "NSE")
+    audit, _ = build_equity_live_audit(make_cfg(), MagicMock(), inst, sector_id="defence")
+    assert audit["absorption_calibration"]["method"] == "symbol_daily_features_p90"
+    assert audit["absorption_calibration"]["sample_count"] == 10
+    assert audit["absorption_calibration"]["cap"] == pytest.approx(2.82, abs=1e-2)
+    assert audit["absorption_calibrated_ratio"] == pytest.approx(2.82, abs=1e-2)
+
+
+def test_predictive_scores_use_calibrated_absorption():
+    from sector_audit import _predictive_scores
+
+    base_audit = {
+        "z_score": 0.0,
+        "absorption_ratio": 9.0,
+        "absorption_for_scoring": 1.2,
+        "return_1d_pct": 0.0,
+        "ema_200_distance_pct": 0.0,
+        "atr_14_pct": 0.0,
+        "effective_intent_score": 50.0,
+    }
+    day1, week1, _ = _predictive_scores(base_audit)
+    base_audit["absorption_ratio"] = 1.2
+    day2, week2, _ = _predictive_scores(base_audit)
+    assert day1 == day2
+    assert week1 == week2
+
+
+def test_sell_signal_framework_states():
+    from sector_audit import _derive_sell_signal
+
+    hold_signal, hold_risk, _ = _derive_sell_signal(
+        {
+            "next_week_score": 72.0,
+            "effective_intent_score": 64.0,
+            "z_score": 1.8,
+            "return_1d_pct": 1.1,
+            "ema_200_distance_pct": 4.2,
+            "atr_14_pct": 2.3,
+            "fundamental_status": "strong",
+        }
+    )
+    trim_signal, trim_risk, _ = _derive_sell_signal(
+        {
+            "next_week_score": 53.0,
+            "effective_intent_score": 50.0,
+            "z_score": -0.7,
+            "return_1d_pct": -0.4,
+            "ema_200_distance_pct": -1.2,
+            "atr_14_pct": 3.2,
+            "fundamental_status": "balanced",
+            "event_risk_soon": True,
+        }
+    )
+    exit_signal, exit_risk, reasons = _derive_sell_signal(
+        {
+            "next_week_score": 40.0,
+            "effective_intent_score": 42.0,
+            "z_score": -2.4,
+            "return_1d_pct": -2.6,
+            "ema_200_distance_pct": -7.0,
+            "atr_14_pct": 6.8,
+            "trap_exit_proxy": True,
+            "macro_guardrail_applied": True,
+            "fundamental_status": "weak",
+        }
+    )
+    assert hold_signal == "hold"
+    assert hold_risk < 4.0
+    assert trim_signal == "trim"
+    assert 4.0 <= trim_risk < 7.0
+    assert exit_signal == "exit-risk"
+    assert exit_risk >= 7.0
+    assert reasons

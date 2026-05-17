@@ -21,6 +21,16 @@ ICICI session tokens are short-lived. Before each scheduled run (or when this ap
 1. Log in via browser / run `python scripts/breeze_session.py` to refresh.
 2. Update **GitHub secret `BREEZE_SESSION_TOKEN`**, local **`.env`**, and **Supabase `session_config`** so they all match the new token.
 
+## Manual token validator alert
+
+`Validate Breeze Token (Manual)` now sends an optional action-required email when token validation fails (missing row/token or invalid/expired token). The email includes a clickable **Login to Breeze** link.
+
+Set these repository secrets to enable email alerts for that workflow:
+
+- `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`
+- `EMAIL_FROM`, `EMAIL_TO`
+- Optional: `SMTP_USE_TLS`, `TOKEN_UPDATE_URL`
+
 ## Schedule (GitHub)
 
 Workflow runs **weekdays** during **09:15–15:30 IST** (crons are **UTC**; see `market_audit.yml`). Includes **11:00 IST** and **11:15 IST** slots. ICICI session tokens still expire independently.
@@ -51,6 +61,14 @@ If ICICI ever documents an unattended session API, you could wire a small job to
 ## Optional: email after each successful `--live`
 
 Set `SMTP_HOST`, `SMTP_PORT` (default 587), `SMTP_USER`, `SMTP_PASSWORD`, `EMAIL_FROM`, `EMAIL_TO` (comma-separated). Same post text as Supabase. In GitHub, add matching **repository secrets** (see `market_audit.yml` `Live market audit` env).
+
+## Optional: all-sector consolidated email
+
+Default `--all-sectors` behavior stays the same: Titan sends one success email per sector run.
+
+To switch to one combined email for the whole all-sector execution, set:
+
+- `TITAN_ALL_SECTORS_SINGLE_DIGEST=1`
 
 ## Verify
 

@@ -29,6 +29,10 @@ const SECTOR_OPTIONS = [
   "telecom",
   "textiles",
 ];
+const RUN_MODES = new Set(["sector", "all_sectors", "live", "custom"]);
+const EXCHANGE_OPTIONS = new Set(["NSE", "BSE"]);
+const CUSTOM_SYMBOL_TOKEN_RE = /^[A-Z0-9&._-]{1,25}$/;
+const MAX_CUSTOM_SYMBOLS = 120;
 
 const el = (id) => document.getElementById(id);
 const statusEl = el("status");
@@ -73,16 +77,37 @@ function setSectorModeUi(mode) {
   const sectorEl = el("sectorId");
   const hintEl = el("sectorHint");
   const allSectorWorkersEl = el("allSectorWorkers");
+  const customSymbolsEl = el("customSymbols");
+  const customSymbolsHintEl = el("customSymbolsHint");
+  const customExchangeEl = el("customExchange");
+  const customExchangeHintEl = el("customExchangeHint");
   if (!sectorEl) return;
   const isSectorMode = mode === "sector";
   const isAllSectorsMode = mode === "all_sectors";
+  const isCustomMode = mode === "custom";
   sectorEl.disabled = !isSectorMode;
   if (allSectorWorkersEl) {
     allSectorWorkersEl.disabled = !isAllSectorsMode;
   }
+  if (customSymbolsEl) {
+    customSymbolsEl.disabled = !isCustomMode;
+  }
+  if (customExchangeEl) {
+    customExchangeEl.disabled = !isCustomMode;
+  }
   if (hintEl) {
     hintEl.textContent = isSectorMode
       ? "Used only when mode=sector."
+      : "Ignored for selected mode.";
+  }
+  if (customSymbolsHintEl) {
+    customSymbolsHintEl.textContent = isCustomMode
+      ? "Used only when mode=custom."
+      : "Ignored for selected mode.";
+  }
+  if (customExchangeHintEl) {
+    customExchangeHintEl.textContent = isCustomMode
+      ? "Used only when mode=custom."
       : "Ignored for selected mode.";
   }
 }
@@ -163,6 +188,93 @@ async function dispatchWorkflow(filename, inputs = {}) {
   setStatus(`Dispatched ${filename} successfully.`);
 }
 
+function normalizePositiveInt(raw, field, { min = 1, max = 500 } = {}) {
+  const value = String(raw || "").trim();
+  if (!value) return "";
+  if (!/^\d+$/.test(value)) {
+    throw new Error(`${field} must be a whole number.`);
+  }
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < min || n > max) {
+    throw new Error(`${field} must be between ${min} and ${max}.`);
+  }
+  return String(n);
+}
+
+function parseCustomSymbols(raw) {
+  const chunks = String(raw || "")
+    .toUpperCase()
+    .split(/[\s,;\n\r\t]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const deduped = [];
+  const seen = new Set();
+  for (const sym of chunks) {
+    if (!CUSTOM_SYMBOL_TOKEN_RE.test(sym)) {
+      throw new Error(
+        `Invalid custom symbol "${sym}". Use A-Z, 0-9, &, ., _, - (max 25 chars).`,
+      );
+    }
+    if (!seen.has(sym)) {
+      seen.add(sym);
+      deduped.push(sym);
+    }
+  }
+  if (!deduped.length) {
+    throw new Error("Custom mode requires at least one symbol.");
+  }
+  if (deduped.length > MAX_CUSTOM_SYMBOLS) {
+    throw new Error(`Custom mode supports up to ${MAX_CUSTOM_SYMBOLS} symbols per run.`);
+  }
+  return deduped;
+}
+
+function buildRunTitanInputs() {
+  const mode = (el("runMode")?.value || "sector").trim();
+  if (!RUN_MODES.has(mode)) {
+    throw new Error("Mode is invalid.");
+  }
+  const workers = normalizePositiveInt(el("workers")?.value, "Workers", { min: 1, max: 16 });
+  const maxSymbols = normalizePositiveInt(el("maxSymbols")?.value, "Max Symbols", {
+    min: 1,
+    max: 500,
+  });
+  const allSectorWorkers = normalizePositiveInt(
+    el("allSectorWorkers")?.value,
+    "All-sector workers",
+    { min: 1, max: 200 },
+  );
+  const sectorId = (el("sectorId")?.value || "").trim();
+
+  const inputs = {
+    mode,
+    sector_id: sectorId,
+    max_symbols: maxSymbols,
+    workers,
+    all_sector_workers: allSectorWorkers,
+  };
+
+  if (mode === "sector" && !sectorId) {
+    throw new Error("Sector ID is required for sector mode.");
+  }
+
+  if (mode === "custom") {
+    const parsed = parseCustomSymbols(el("customSymbols")?.value || "");
+    const customExchange = String(el("customExchange")?.value || "NSE")
+      .trim()
+      .toUpperCase();
+    if (!EXCHANGE_OPTIONS.has(customExchange)) {
+      throw new Error("Custom exchange must be NSE or BSE.");
+    }
+    const customSectorId = sectorId || "custom_ui";
+    inputs.sector_id = customSectorId;
+    inputs.custom_symbols = parsed.join(",");
+    inputs.custom_exchange = customExchange;
+  }
+
+  return inputs;
+}
+
 async function loadLatestRuns() {
   const runs = await ghApi("/runs?limit=20");
   const relevant = (runs.workflow_runs || []).filter((r) =>
@@ -202,15 +314,12 @@ function wireEvents() {
   if (runTitanBtn) {
     runTitanBtn.addEventListener("click", async () => {
       try {
-        setWorking("Dispatch Run Titan");
+        setWorking("Validate run inputs");
+        const inputs = buildRunTitanInputs();
+        const modeLabel = inputs.mode === "custom" ? "custom symbol analysis" : `${inputs.mode} analysis`;
+        setWorking(`Dispatch Run Titan (${modeLabel})`);
         await checkConnection();
-        await dispatchWorkflow(WORKFLOWS.runTitan, {
-          mode: el("runMode")?.value || "sector",
-          sector_id: (el("sectorId")?.value || "").trim(),
-          max_symbols: (el("maxSymbols")?.value || "").trim(),
-          workers: (el("workers")?.value || "").trim(),
-          all_sector_workers: (el("allSectorWorkers")?.value || "").trim(),
-        });
+        await dispatchWorkflow(WORKFLOWS.runTitan, inputs);
       } catch (e) {
         setStatus(`Run Titan dispatch failed:\n${e.message}`);
       }

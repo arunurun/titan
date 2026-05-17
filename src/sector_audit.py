@@ -25,7 +25,15 @@ MAX_WORKERS = 4
 _GEMINI_SECTOR_LOCK = threading.Lock()
 _FUNDAMENTAL_CACHE_LOCK = threading.Lock()
 _FUNDAMENTAL_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+_ABSORPTION_CALIBRATION_LOCK = threading.Lock()
+_ABSORPTION_CALIBRATION_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+_THREAD_LOCAL = threading.local()
 IST = ZoneInfo("Asia/Kolkata")
+ABSORPTION_CAP_DEFAULT = 2.5
+ABSORPTION_CAP_MIN_HISTORY = 8
+ABSORPTION_CAP_LOOKBACK = 45
+ABSORPTION_CAP_PERCENTILE = 90.0
+ABSORPTION_CAP_MAX = 5.0
 
 
 def _fmt_metric(x: Any, digits: int = 2) -> str:
@@ -101,6 +109,7 @@ def _format_symbol_metrics_line(result: dict[str, Any]) -> str:
     z = audit.get("z_score")
     intent = audit.get("effective_intent_score", audit.get("intent_score"))
     absorption = audit.get("absorption_ratio")
+    absorption_score = audit.get("absorption_for_scoring")
     ret1d = audit.get("return_1d_pct")
     ema_dist = audit.get("ema_200_distance_pct")
     atr_pct = audit.get("atr_14_pct")
@@ -110,6 +119,11 @@ def _format_symbol_metrics_line(result: dict[str, Any]) -> str:
     fundamental_score = audit.get("fundamental_score")
     fundamental_reasons = audit.get("fundamental_reasons") if isinstance(audit.get("fundamental_reasons"), list) else []
     support_tag = audit.get("hypothesis_support", "technical_only")
+    sell_signal = audit.get("sell_signal", "unknown")
+    sell_reasons = audit.get("sell_signal_reasons") if isinstance(audit.get("sell_signal_reasons"), list) else []
+    calibration = audit.get("absorption_calibration") if isinstance(audit.get("absorption_calibration"), dict) else {}
+    cap = calibration.get("cap")
+    cap_method = calibration.get("method", "n/a")
     rows = audit.get("rows")
     flags: list[str] = []
     if audit.get("panic_absorption_proxy"):
@@ -130,14 +144,20 @@ def _format_symbol_metrics_line(result: dict[str, Any]) -> str:
     base = (
         f"{symbol} ({exchange}) | intent {_fmt_metric(intent)} [{_intent_label(intent)}] "
         f"| z {_fmt_metric(z)} [{_z_label(z)}] | absorption {_fmt_metric(absorption, 3)} "
-        f"[{_absorption_label(absorption)}] | ret1d {_fmt_metric(ret1d)}% "
+        f"[{_absorption_label(absorption)}] | absScore {_fmt_metric(absorption_score, 2)} "
+        f"| absCap {_fmt_metric(cap, 2)} ({cap_method}) "
+        f"| ret1d {_fmt_metric(ret1d)}% "
         f"| ema200_delta {_fmt_metric(ema_dist)}% | atr14 {_fmt_metric(atr_pct)}% "
         f"| nextDay {_fmt_metric(next_day)} | nextWeek {_fmt_metric(next_week)} "
+        f"| sell {sell_signal} "
         f"| flags={flag_text} | rows {rows}"
+    )
+    sell_reason_text = (
+        f" ({'; '.join(str(x) for x in sell_reasons[:2])})" if sell_reasons else ""
     )
     return (
         f"{base} | support={support_tag} | fundamentals={fundamental_text} "
-        f"| {_prediction_reason_text(audit)}"
+        f"| sellReason={sell_signal}{sell_reason_text} | {_prediction_reason_text(audit)}"
     )
 
 
@@ -148,9 +168,143 @@ def _safe_float(x: Any) -> float:
         return float("nan")
 
 
+def _percentile(values: list[float], pct: float) -> float:
+    xs = sorted(x for x in values if not math.isnan(x))
+    if not xs:
+        return float("nan")
+    if len(xs) == 1:
+        return xs[0]
+    rank = (max(0.0, min(100.0, float(pct))) / 100.0) * (len(xs) - 1)
+    lo = int(math.floor(rank))
+    hi = int(math.ceil(rank))
+    if lo == hi:
+        return xs[lo]
+    frac = rank - lo
+    return xs[lo] + ((xs[hi] - xs[lo]) * frac)
+
+
+def _recent_absorption_samples(cfg: TitanConfig, inst: SectorInstrument) -> list[float]:
+    client = create_client(cfg.supabase_url, cfg.supabase_key)
+    try:
+        res = (
+            client.table("symbol_daily_features")
+            .select("absorption_ratio")
+            .eq("symbol", inst.symbol)
+            .eq("exchange", inst.exchange)
+            .order("trade_date", desc=True)
+            .limit(ABSORPTION_CAP_LOOKBACK)
+            .execute()
+        )
+    except Exception:
+        return []
+    rows = list(getattr(res, "data", None) or [])
+    out: list[float] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        v = _safe_float(row.get("absorption_ratio"))
+        if math.isnan(v) or math.isinf(v) or v <= 0.0:
+            continue
+        out.append(v)
+    return out
+
+
+def _resolve_absorption_cap(cfg: TitanConfig, inst: SectorInstrument) -> dict[str, Any]:
+    key = (inst.symbol, inst.exchange)
+    with _ABSORPTION_CALIBRATION_LOCK:
+        cached = _ABSORPTION_CALIBRATION_CACHE.get(key)
+    if cached is not None:
+        return dict(cached)
+
+    samples = _recent_absorption_samples(cfg, inst)
+    method = "fallback_default"
+    cap = ABSORPTION_CAP_DEFAULT
+    if len(samples) >= ABSORPTION_CAP_MIN_HISTORY:
+        pctl = _percentile(samples, ABSORPTION_CAP_PERCENTILE)
+        if not math.isnan(pctl):
+            cap = max(1.0, min(ABSORPTION_CAP_MAX, pctl))
+            method = "symbol_daily_features_p90"
+    out = {
+        "method": method,
+        "cap": round(cap, 4),
+        "sample_count": len(samples),
+        "lookback": ABSORPTION_CAP_LOOKBACK,
+    }
+    with _ABSORPTION_CALIBRATION_LOCK:
+        _ABSORPTION_CALIBRATION_CACHE[key] = dict(out)
+    return out
+
+
 def _is_skipped_no_data_error(error: Any) -> bool:
     msg = str(error or "").lower()
     return ("no rows returned" in msg and "skipped" in msg) or "skipped_no_data" in msg
+
+
+def _classify_error_code(error: Any) -> str:
+    msg = str(error or "").lower()
+    if _is_skipped_no_data_error(msg):
+        return "no_data_skipped"
+    if "historical fetch failed after retries" in msg:
+        return "data_fetch_failed"
+    if "session token expired" in msg or "auth/permission" in msg:
+        return "auth_or_session"
+    return "runtime_error"
+
+
+def _normalize_absorption_for_scoring(absorption_raw: float) -> float:
+    """
+    Keep raw absorption for reporting, but compress extreme outliers for scoring.
+    This avoids thin/illiquid names getting unrealistically huge score boosts.
+    """
+    v = _safe_float(absorption_raw)
+    if math.isnan(v):
+        return float("nan")
+    if math.isinf(v) and v > 0:
+        return 3.0
+    if v <= 0.0:
+        return 0.0
+    # log scale with soft cap around 3x participation
+    return min(3.0, (math.log1p(v) / math.log(4.0)) * 3.0)
+
+
+def _calibrate_absorption_v2(
+    cfg: TitanConfig,
+    inst: SectorInstrument,
+    absorption_raw: float,
+) -> tuple[float, float, dict[str, Any]]:
+    meta = _resolve_absorption_cap(cfg, inst)
+    raw = _safe_float(absorption_raw)
+    cap = _safe_float(meta.get("cap"))
+    if math.isnan(cap) or cap <= 0.0:
+        cap = ABSORPTION_CAP_DEFAULT
+        meta = {**meta, "method": "fallback_default", "cap": cap}
+
+    if math.isnan(raw):
+        calibrated_raw = float("nan")
+    elif raw <= 0.0:
+        calibrated_raw = 0.0
+    elif math.isinf(raw) and raw > 0.0:
+        calibrated_raw = cap
+    else:
+        calibrated_raw = min(raw, cap)
+    calibrated_for_scoring = _normalize_absorption_for_scoring(calibrated_raw)
+    return calibrated_raw, calibrated_for_scoring, {
+        **meta,
+        "raw": raw,
+        "calibrated_raw": calibrated_raw,
+    }
+
+
+def _thread_breeze_session(cfg: TitanConfig) -> Any:
+    from breeze_client import create_breeze_session
+
+    breeze = getattr(_THREAD_LOCAL, "breeze", None)
+    token = getattr(_THREAD_LOCAL, "breeze_token", None)
+    if breeze is None or token != cfg.breeze_session_token:
+        breeze = create_breeze_session(cfg)
+        _THREAD_LOCAL.breeze = breeze
+        _THREAD_LOCAL.breeze_token = cfg.breeze_session_token
+    return breeze
 
 
 def _clamp_score(x: float) -> float:
@@ -165,7 +319,7 @@ def _predictive_scores(audit: dict[str, Any]) -> tuple[float, float, dict[str, A
     - next_week_score favors persistence (trend distance and lower noise).
     """
     z = _safe_float(audit.get("z_score"))
-    absorption = _safe_float(audit.get("absorption_ratio"))
+    absorption = _safe_float(audit.get("absorption_for_scoring", audit.get("absorption_ratio")))
     ret1d = _safe_float(audit.get("return_1d_pct"))
     ema_dist = _safe_float(audit.get("ema_200_distance_pct"))
     atr_pct = _safe_float(audit.get("atr_14_pct"))
@@ -301,6 +455,96 @@ def _prediction_reason_text(audit: dict[str, Any]) -> str:
     )
 
 
+def _derive_sell_signal(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
+    risk = 0.0
+    reasons: list[str] = []
+
+    def add(points: float, reason: str) -> None:
+        nonlocal risk
+        risk += points
+        reasons.append(reason)
+
+    next_week = _safe_float(audit.get("next_week_score"))
+    eff = _safe_float(audit.get("effective_intent_score", audit.get("intent_score")))
+    z = _safe_float(audit.get("z_score"))
+    ret1d = _safe_float(audit.get("return_1d_pct"))
+    ema_dist = _safe_float(audit.get("ema_200_distance_pct"))
+    atr_pct = _safe_float(audit.get("atr_14_pct"))
+
+    if not math.isnan(next_week):
+        if next_week < 45.0:
+            add(3.0, f"nextWeek weak {_fmt_metric(next_week)}")
+        elif next_week < 55.0:
+            add(1.0, f"nextWeek soft {_fmt_metric(next_week)}")
+    if not math.isnan(eff):
+        if eff < 45.0:
+            add(2.0, f"intent defensive {_fmt_metric(eff)}")
+        elif eff < 52.0:
+            add(1.0, f"intent cooling {_fmt_metric(eff)}")
+    if not math.isnan(z):
+        if z <= -2.0:
+            add(2.0, f"z bearish {_fmt_metric(z)}")
+        elif z <= -1.0:
+            add(1.0, f"z below mean {_fmt_metric(z)}")
+    if not math.isnan(ret1d):
+        if ret1d <= -2.0:
+            add(2.0, f"1d return weak {_fmt_metric(ret1d)}%")
+        elif ret1d <= -1.0:
+            add(1.0, f"1d return soft {_fmt_metric(ret1d)}%")
+    if not math.isnan(ema_dist):
+        if ema_dist <= -6.0:
+            add(2.0, f"below ema200 {_fmt_metric(ema_dist)}%")
+        elif ema_dist <= -2.0:
+            add(1.0, f"ema200 drift {_fmt_metric(ema_dist)}%")
+    if not math.isnan(atr_pct):
+        if atr_pct >= 6.0:
+            add(2.0, f"atr elevated {_fmt_metric(atr_pct)}%")
+        elif atr_pct >= 4.0:
+            add(1.0, f"atr high {_fmt_metric(atr_pct)}%")
+
+    if audit.get("trap_exit_proxy"):
+        add(2.0, "trap-exit proxy")
+    if audit.get("panic_absorption_proxy"):
+        add(1.0, "panic-absorption proxy")
+    if audit.get("cluster_guardrail_applied"):
+        add(1.0, "cluster guardrail")
+    if audit.get("macro_guardrail_applied"):
+        add(1.0, "macro guardrail")
+    if audit.get("event_guardrail_applied") or audit.get("event_risk_soon"):
+        add(1.0, "event risk")
+
+    f_status = str(audit.get("fundamental_status") or "unavailable")
+    if f_status == "weak":
+        add(2.0, "fundamentals weak")
+    elif f_status == "balanced":
+        add(1.0, "fundamentals balanced")
+    elif f_status == "strong":
+        risk = max(0.0, risk - 1.0)
+
+    risk = round(risk, 2)
+    if risk >= 7.0:
+        signal = "exit-risk"
+    elif risk >= 4.0:
+        signal = "trim"
+    else:
+        signal = "hold"
+    if not reasons:
+        reasons = ["technical+risk profile stable"]
+    return signal, risk, reasons[:4]
+
+
+def _refresh_symbol_scoring_outputs(audit: dict[str, Any]) -> None:
+    next_day_score, next_week_score, prediction_breakdown = _predictive_scores(audit)
+    audit["next_day_score"] = next_day_score
+    audit["next_week_score"] = next_week_score
+    audit["prediction_breakdown"] = prediction_breakdown
+    audit["hypothesis_support"] = _hypothesis_support_tag(audit)
+    sell_signal, sell_risk_score, sell_reasons = _derive_sell_signal(audit)
+    audit["sell_signal"] = sell_signal
+    audit["sell_signal_risk_score"] = sell_risk_score
+    audit["sell_signal_reasons"] = sell_reasons
+
+
 def _first_float_field(row: dict[str, Any], keys: tuple[str, ...]) -> float:
     for k in keys:
         if k in row:
@@ -327,7 +571,7 @@ def _assess_fundamental_strength(cfg: TitanConfig, inst: SectorInstrument) -> di
             .limit(1)
             .execute()
         )
-    except APIError:
+    except Exception:
         out = {"status": "unavailable", "score": None, "reasons": ["fundamental lookup unavailable"]}
         with _FUNDAMENTAL_CACHE_LOCK:
             _FUNDAMENTAL_CACHE[cache_key] = dict(out)
@@ -594,7 +838,12 @@ def build_equity_live_audit(
         else float("nan")
     )
     z = calculate_z_score(series, window=20)
-    absorption = volume_absorption_ratio(df)
+    absorption_raw = volume_absorption_ratio(df)
+    absorption_calibrated_raw, absorption_for_scoring, absorption_calibration = _calibrate_absorption_v2(
+        cfg,
+        inst,
+        absorption_raw,
+    )
     ema_200 = calculate_ema(series, span=200)
     ema_distance_pct = (
         ((close_last / ema_200) - 1.0) * 100.0
@@ -618,12 +867,12 @@ def build_equity_live_audit(
         else float("nan")
     )
     pcr = float("nan")
-    intent = calculate_intent_score(pcr, z, absorption)
+    intent = calculate_intent_score(pcr, z, absorption_for_scoring)
     panic_absorption_proxy = (
-        not math.isnan(ret1d) and ret1d < 0.0 and not math.isnan(absorption) and absorption >= 1.5
+        not math.isnan(ret1d) and ret1d < 0.0 and not math.isnan(absorption_raw) and absorption_raw >= 1.5
     )
     trap_exit_proxy = (
-        not math.isnan(ret1d) and ret1d > 0.0 and not math.isnan(absorption) and absorption <= 0.5
+        not math.isnan(ret1d) and ret1d > 0.0 and not math.isnan(absorption_raw) and absorption_raw <= 0.5
     )
     event_info = _event_flags_for_symbol(inst.symbol, event_snapshot)
     audit: dict[str, Any] = {
@@ -633,7 +882,10 @@ def build_equity_live_audit(
         "symbol": inst.symbol,
         "exchange": inst.exchange,
         "z_score": z,
-        "absorption_ratio": absorption,
+        "absorption_ratio": absorption_raw,
+        "absorption_calibrated_ratio": absorption_calibrated_raw,
+        "absorption_for_scoring": absorption_for_scoring,
+        "absorption_calibration": absorption_calibration,
         "close_last": close_last,
         "return_1d_pct": ret1d,
         "ema_200": ema_200,
@@ -658,15 +910,11 @@ def build_equity_live_audit(
         "rows": len(df),
         "option_chain_unavailable": True,
     }
-    next_day_score, next_week_score, prediction_breakdown = _predictive_scores(audit)
     fundamental = _assess_fundamental_strength(cfg, inst)
-    audit["next_day_score"] = next_day_score
-    audit["next_week_score"] = next_week_score
-    audit["prediction_breakdown"] = prediction_breakdown
     audit["fundamental_status"] = fundamental.get("status", "unavailable")
     audit["fundamental_score"] = fundamental.get("score")
     audit["fundamental_reasons"] = fundamental.get("reasons", [])
-    audit["hypothesis_support"] = _hypothesis_support_tag(audit)
+    _refresh_symbol_scoring_outputs(audit)
     if not with_narrative:
         return audit, ""
     from brain import generate_titan_narrative
@@ -731,10 +979,9 @@ def _process_one(
     *,
     event_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    from breeze_client import create_breeze_session
     from supabase_log import save_audit_log
 
-    breeze = create_breeze_session(cfg)
+    breeze = _thread_breeze_session(cfg)
     audit, post = build_equity_live_audit(
         cfg,
         breeze,
@@ -755,6 +1002,7 @@ def _process_one(
             "exchange": inst.exchange,
             "post": "",
             "error": f"[Breeze] No rows returned for {inst.symbol} ({inst.exchange}); skipped",
+            "error_code": "no_data_skipped",
         }
     save_audit_log({"audit": audit, "post": post}, cfg)
     return {
@@ -764,6 +1012,7 @@ def _process_one(
         "audit": audit,
         "post": post,
         "error": None,
+        "error_code": None,
     }
 
 
@@ -775,9 +1024,7 @@ def _process_one_metrics(
     event_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Breeze + metrics only; no Gemini (used with --sector-digest)."""
-    from breeze_client import create_breeze_session
-
-    breeze = create_breeze_session(cfg)
+    breeze = _thread_breeze_session(cfg)
     audit, _ = build_equity_live_audit(
         cfg,
         breeze,
@@ -799,6 +1046,7 @@ def _process_one_metrics(
             "exchange": inst.exchange,
             "audit": None,
             "error": f"[Breeze] No rows returned for {inst.symbol} ({inst.exchange}); skipped",
+            "error_code": "no_data_skipped",
         }
     return {
         "ok": True,
@@ -806,6 +1054,7 @@ def _process_one_metrics(
         "exchange": inst.exchange,
         "audit": audit,
         "error": None,
+        "error_code": None,
     }
 
 
@@ -815,10 +1064,11 @@ def run_sector_live(
     max_workers: int | None = None,
     max_symbols: int | None = None,
     digest: bool = True,
+    send_email: bool = True,
     macro_snapshot: dict[str, Any] | None = None,
     event_snapshot: dict[str, Any] | None = None,
     instruments_override: list[SectorInstrument] | None = None,
-) -> None:
+) -> str:
     from email_notify import send_success_post_email
     from breeze_client import create_breeze_session
 
@@ -854,6 +1104,7 @@ def run_sector_live(
                     "symbol": inst.symbol,
                     "exchange": inst.exchange,
                     "error": str(e),
+                    "error_code": _classify_error_code(str(e)),
                 }
                 if digest:
                     err_row["audit"] = None
@@ -884,6 +1135,8 @@ def run_sector_live(
         red_ratio, cluster_downgrades = _apply_cluster_guardrails(ok_results)
         event_adjustments = _apply_event_guardrails(ok_results)
         macro_applied, macro_reason = _apply_macro_guardrails(ok_results, macro_snapshot)
+        for r in ok_results:
+            _refresh_symbol_scoring_outputs(r["audit"])
         persist_meta = persist_sector_run_analytics(
             cfg,
             sector=sector_id,
@@ -923,6 +1176,13 @@ def run_sector_live(
         }
         for r in ok_results:
             by_bucket[_bucket_name(r["audit"])].append(r)
+        failed_rows = [x for x in results if not x.get("ok")]
+        skipped_rows = [x for x in failed_rows if _is_skipped_no_data_error(x.get("error"))]
+        hard_failed_rows = [x for x in failed_rows if not _is_skipped_no_data_error(x.get("error"))]
+        hard_failure_breakdown: dict[str, int] = {}
+        for r in hard_failed_rows:
+            code = str(r.get("error_code") or _classify_error_code(r.get("error")))
+            hard_failure_breakdown[code] = hard_failure_breakdown.get(code, 0) + 1
 
         today = comparison.get("today") if isinstance(comparison, dict) else {}
         dlt = comparison.get("delta") if isinstance(comparison, dict) else {}
@@ -990,6 +1250,16 @@ def run_sector_live(
                 + (", ".join(qc_warnings) if qc_warnings else "ok")
             ),
                 "",
+                "--- Data reconciliation ---",
+                f"Symbols requested: {len(results)} | successful: {ok_count} | skipped(no data): {len(skipped_rows)} | hard failures: {len(hard_failed_rows)}",
+                (
+                    "Skipped samples: "
+                    + (", ".join(f"{x['symbol']}({x['exchange']})" for x in skipped_rows[:8]) if skipped_rows else "none")
+                ),
+                (
+                    "Hard-failure breakdown: "
+                    + (", ".join(f"{k}={v}" for k, v in sorted(hard_failure_breakdown.items())) if hard_failure_breakdown else "none")
+                ),
                 "--- Prediction quality gate ---",
                 f"Gate status: {'PASS' if quality_gate['passed'] else 'FAIL'}",
                 f"Successful symbols: {quality_gate['ok_count']}/{quality_gate['total_count']} ({_fmt_metric(quality_gate['coverage_ratio'] * 100.0)}%)",
@@ -1027,9 +1297,10 @@ def run_sector_live(
             lines.append(f"--- {r['symbol']} ({r['exchange']}) FAILED ---")
             lines.append(r.get("error", "") or "")
         digest_text = "\n".join(lines).strip()
-        send_success_post_email(digest_text, subject_prefix=f"Titan V12.0 sector {sector_id}")
+        if send_email:
+            send_success_post_email(digest_text, subject_prefix=f"Titan V12.0 sector {sector_id}")
         print(digest_text)
-        return
+        return digest_text
 
     lines = [f"Titan sector run: {sector_id!r} — {ok_count}/{len(results)} succeeded\n"]
     for r in sorted(results, key=lambda x: (x["symbol"], x["exchange"])):
@@ -1042,7 +1313,8 @@ def run_sector_live(
             lines.append(f"\n--- {r['symbol']} ({r['exchange']}) FAILED ---\n{r.get('error', '')}\n")
 
     digest_out = "\n".join(lines).strip()
-    send_success_post_email(digest_out, subject_prefix=f"Titan V12.0 sector {sector_id}")
+    if send_email:
+        send_success_post_email(digest_out, subject_prefix=f"Titan V12.0 sector {sector_id}")
     try:
         from analysis_store import persist_sector_run_analytics, update_sector_period_rollups
 
@@ -1059,3 +1331,4 @@ def run_sector_live(
     except Exception:
         logger.exception("Analysis store persist hook failed")
     print(digest_out)
+    return digest_out

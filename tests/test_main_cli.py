@@ -221,3 +221,62 @@ def test_all_sectors_invokes_parallel_runner(monkeypatch):
         macro_snapshot=None,
         event_snapshot=None,
     )
+
+
+def test_run_all_sectors_default_sends_per_sector_email(monkeypatch):
+    import main as main_mod
+    import sector_audit
+    import sector_registry
+
+    monkeypatch.delenv("TITAN_ALL_SECTORS_SINGLE_DIGEST", raising=False)
+    monkeypatch.setattr(main_mod, "send_success_post_email", MagicMock())
+    monkeypatch.setattr(sector_registry, "list_active_sector_ids", lambda include_unknown=False: ["defence", "energy"])
+
+    def _fake_run_sector_live(sector_id, **kwargs):
+        assert kwargs["send_email"] is True
+        return f"Digest {sector_id}"
+
+    monkeypatch.setattr(sector_audit, "run_sector_live", _fake_run_sector_live)
+
+    main_mod.run_all_sectors(
+        max_workers=2,
+        all_sector_workers=2,
+        max_symbols=None,
+        digest=True,
+        exclude_sectors=(),
+        macro_snapshot=None,
+        event_snapshot=None,
+    )
+    main_mod.send_success_post_email.assert_not_called()
+
+
+def test_run_all_sectors_single_digest_env(monkeypatch):
+    import main as main_mod
+    import sector_audit
+    import sector_registry
+
+    monkeypatch.setenv("TITAN_ALL_SECTORS_SINGLE_DIGEST", "1")
+    mock_email = MagicMock()
+    monkeypatch.setattr(main_mod, "send_success_post_email", mock_email)
+    monkeypatch.setattr(sector_registry, "list_active_sector_ids", lambda include_unknown=False: ["defence", "energy"])
+
+    def _fake_run_sector_live(sector_id, **kwargs):
+        assert kwargs["send_email"] is False
+        return f"Digest for {sector_id}"
+
+    monkeypatch.setattr(sector_audit, "run_sector_live", _fake_run_sector_live)
+
+    main_mod.run_all_sectors(
+        max_workers=2,
+        all_sector_workers=2,
+        max_symbols=None,
+        digest=True,
+        exclude_sectors=(),
+        macro_snapshot=None,
+        event_snapshot=None,
+    )
+    mock_email.assert_called_once()
+    body = mock_email.call_args[0][0]
+    assert "Titan all-sectors consolidated digest" in body
+    assert "=== Sector: defence ===" in body
+    assert "=== Sector: energy ===" in body

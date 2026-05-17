@@ -6,10 +6,12 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from threading import Lock
 
 from dotenv import dotenv_values, load_dotenv
 
@@ -52,6 +54,7 @@ from titan_engine import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("titan.main")
+CUSTOM_SYMBOL_RE = re.compile(r"^[A-Z0-9&._-]{1,25}$")
 
 
 def build_dummy_audit() -> dict:
@@ -138,6 +141,13 @@ def _parse_csv_list(raw: str) -> tuple[str, ...]:
     return tuple(x.strip().lower() for x in raw.split(",") if x.strip())
 
 
+def _env_truthy(name: str, default: bool = False) -> bool:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    return raw.lower() in ("1", "true", "yes", "on")
+
+
 def run_all_sectors(
     *,
     max_workers: int | None,
@@ -162,7 +172,12 @@ def run_all_sectors(
         sector_parallelism,
         ", ".join(sectors),
     )
+    single_digest = _env_truthy("TITAN_ALL_SECTORS_SINGLE_DIGEST", default=False)
+    if single_digest:
+        logger.info("All-sector email mode: single consolidated digest.")
     failed: list[str] = []
+    successful_posts: dict[str, str] = {}
+    successful_posts_lock = Lock()
 
     def _run_sector(sid: str) -> None:
         logger.info("Running sector: %s", sid)
@@ -170,12 +185,15 @@ def run_all_sectors(
             max_workers=max_workers,
             max_symbols=max_symbols,
             digest=digest,
+            send_email=not single_digest,
         )
         if macro_snapshot is not None:
             run_kwargs["macro_snapshot"] = macro_snapshot
         if event_snapshot is not None:
             run_kwargs["event_snapshot"] = event_snapshot
-        run_sector_live(sid, **run_kwargs)
+        post_text = run_sector_live(sid, **run_kwargs)
+        with successful_posts_lock:
+            successful_posts[sid] = post_text
 
     with ThreadPoolExecutor(max_workers=sector_parallelism) as pool:
         future_map = {pool.submit(_run_sector, sid): sid for sid in sectors}
@@ -186,6 +204,23 @@ def run_all_sectors(
             except Exception:
                 failed.append(sid)
                 logger.exception("Sector run failed: %s", sid)
+    if single_digest and successful_posts:
+        lines = [
+            "Titan all-sectors consolidated digest",
+            f"Sectors requested: {len(sectors)} | succeeded: {len(successful_posts)} | failed: {len(failed)}",
+            "",
+        ]
+        if failed:
+            lines.append("Failed sectors: " + ", ".join(sorted(failed)))
+            lines.append("")
+        for sid in sorted(successful_posts):
+            lines.append(f"=== Sector: {sid} ===")
+            lines.append(successful_posts[sid].strip())
+            lines.append("")
+        send_success_post_email(
+            "\n".join(lines).strip(),
+            subject_prefix="Titan V12.0 all sectors",
+        )
     if failed:
         raise RuntimeError(f"All-sector run completed with failures in: {', '.join(failed)}")
 
@@ -328,6 +363,25 @@ def run_live() -> None:
     print(format_social_post(post))
 
 
+def _parse_custom_symbols(raw: str) -> list[str]:
+    tokens = [tok.strip().upper() for tok in re.split(r"[\s,;\n\r\t]+", raw or "") if tok.strip()]
+    if not tokens:
+        raise ValueError("custom symbol list is empty")
+    out: list[str] = []
+    seen: set[str] = set()
+    for symbol in tokens:
+        if not CUSTOM_SYMBOL_RE.fullmatch(symbol):
+            raise ValueError(
+                f"invalid custom symbol {symbol!r}; use A-Z, 0-9, &, ., _, - (max 25 chars)"
+            )
+        if symbol not in seen:
+            seen.add(symbol)
+            out.append(symbol)
+    if len(out) > 120:
+        raise ValueError("custom symbol list exceeds max size (120)")
+    return out
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Titan V12.0")
     p.add_argument("--dry-run", action="store_true", help="Simulate with dummy data")
@@ -381,6 +435,21 @@ def main() -> None:
         "--sector-digest",
         action="store_true",
         help=argparse.SUPPRESS,
+    )
+    p.add_argument(
+        "--custom-symbols",
+        type=str,
+        default="",
+        metavar="CSV",
+        help="Run sector audit on explicit symbols (comma/space/newline separated).",
+    )
+    p.add_argument(
+        "--custom-exchange",
+        type=str,
+        choices=("NSE", "BSE"),
+        default="NSE",
+        metavar="EXCH",
+        help="Exchange applied to --custom-symbols entries (NSE or BSE).",
     )
     p.add_argument(
         "--macro-json",
@@ -447,8 +516,10 @@ def main() -> None:
             raise
         return
 
-    if args.sector.strip():
+    custom_symbols_raw = args.custom_symbols.strip()
+    if args.sector.strip() or custom_symbols_raw:
         from sector_audit import run_sector_live
+        from sector_registry import SectorInstrument
 
         # --sector-digest kept for backward compatibility (no-op; digest is default).
         sector_digest = not args.sector_per_symbol_narrative
@@ -457,6 +528,18 @@ def main() -> None:
             max_symbols=args.sector_max_symbols,
             digest=sector_digest,
         )
+        sector_id = args.sector.strip() or "custom_ui"
+        if custom_symbols_raw:
+            symbols = _parse_custom_symbols(custom_symbols_raw)
+            run_kwargs["instruments_override"] = [
+                SectorInstrument(symbol=symbol, exchange=args.custom_exchange) for symbol in symbols
+            ]
+            logger.info(
+                "Running custom symbol analysis for %d symbols on %s (sector label=%s)",
+                len(symbols),
+                args.custom_exchange,
+                sector_id,
+            )
         if macro_snapshot is not None:
             run_kwargs["macro_snapshot"] = macro_snapshot
         if event_snapshot is not None:
@@ -464,7 +547,7 @@ def main() -> None:
 
         try:
             run_sector_live(
-                args.sector.strip(),
+                sector_id,
                 **run_kwargs,
             )
         except Exception as e:

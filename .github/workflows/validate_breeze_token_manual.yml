@@ -25,4 +25,12 @@ jobs:
           BREEZE_SECRET: ${{ secrets.BREEZE_SECRET }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          TOKEN_UPDATE_URL: ${{ secrets.TOKEN_UPDATE_URL }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          SMTP_USE_TLS: ${{ secrets.SMTP_USE_TLS }}
         run: python scripts/validate_breeze_token_from_supabase.py

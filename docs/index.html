@@ -104,6 +104,7 @@
             <option value="sector" selected>sector</option>
             <option value="all_sectors">all_sectors</option>
             <option value="live">live</option>
+            <option value="custom">custom</option>
           </select>
         </div>
         <div>
@@ -153,6 +154,27 @@
           <p class="small">Used when mode=all_sectors (parallel sectors).</p>
         </div>
       </div>
+      <div class="row">
+        <div>
+          <label>Custom Symbols (comma, space, or newline separated)</label>
+          <textarea
+            id="customSymbols"
+            rows="4"
+            placeholder="RELIANCE, TCS, INFY"
+          ></textarea>
+          <p class="small" id="customSymbolsHint">Used only when mode=custom.</p>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Custom Exchange</label>
+          <select id="customExchange">
+            <option value="NSE" selected>NSE</option>
+            <option value="BSE">BSE</option>
+          </select>
+          <p class="small" id="customExchangeHint">Used only when mode=custom.</p>
+        </div>
+      </div>
       <button type="button" id="runTitanBtn">Dispatch Run Titan Now</button>
     </div>
 
@@ -175,6 +197,6 @@
     </div>
   </div>
 
-  <script defer src="./app.js?v=20260516-2"></script>
+  <script defer src="./app.js?v=20260517-1"></script>
 </body>
 </html>
