@@ -13,6 +13,7 @@ on:
           - all_sectors
           - live
           - custom
+          - portfolio
       sector_id:
         description: "Sector id (used when mode=sector)"
         required: false
@@ -37,6 +38,14 @@ on:
         description: "Exchange code for custom symbols (NSE or BSE, used when mode=custom)"
         required: false
         default: "NSE"
+      portfolio_holdings_json:
+        description: "Portfolio holdings payload JSON (used when mode=portfolio)"
+        required: false
+        default: ""
+      portfolio_max_positions:
+        description: "Max holdings to evaluate for mode=portfolio"
+        required: false
+        default: "50"
 
 permissions:
   contents: read
@@ -79,6 +88,12 @@ jobs:
         run: |
           if [ "${{ inputs.mode }}" = "live" ]; then
             python main.py --live
+          elif [ "${{ inputs.mode }}" = "portfolio" ]; then
+            ARGS="--custom-exchange ${{ inputs.custom_exchange }}"
+            if [ -n "${{ inputs.portfolio_max_positions }}" ]; then
+              ARGS="$ARGS --portfolio-max-positions ${{ inputs.portfolio_max_positions }}"
+            fi
+            python main.py $ARGS --portfolio-holdings-json "${{ inputs.portfolio_holdings_json }}"
           elif [ "${{ inputs.mode }}" = "custom" ]; then
             ARGS="--sector ${{ inputs.sector_id }} --custom-exchange ${{ inputs.custom_exchange }} --sector-digest"
             if [ -n "${{ inputs.max_symbols }}" ]; then

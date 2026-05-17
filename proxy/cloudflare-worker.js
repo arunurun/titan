@@ -12,7 +12,7 @@ const ALLOWED_WORKFLOWS = new Set([
   "validate_breeze_token_manual.yml",
   "persist_breeze_token_manual.yml",
 ]);
-const RUN_MODES = new Set(["sector", "all_sectors", "live", "custom"]);
+const RUN_MODES = new Set(["sector", "all_sectors", "live", "custom", "portfolio"]);
 const ALLOWED_EXCHANGES = new Set(["NSE", "BSE"]);
 const SYMBOL_RE = /^[A-Z0-9&._-]{1,25}$/;
 const SECTOR_ID_RE = /^[a-z0-9_]{1,64}$/;
@@ -60,6 +60,64 @@ function sanitizeCustomSymbols(raw) {
   return out.join(",");
 }
 
+function sanitizePortfolioHoldingsJson(raw) {
+  const txt = toStringInput(raw);
+  if (!txt) {
+    throw new Error("portfolio_holdings_json is required for mode=portfolio");
+  }
+  if (txt.length > 250000) {
+    throw new Error("portfolio_holdings_json is too long");
+  }
+  let payload;
+  try {
+    payload = JSON.parse(txt);
+  } catch (_e) {
+    throw new Error("portfolio_holdings_json must be valid JSON");
+  }
+  if (!Array.isArray(payload)) {
+    throw new Error("portfolio_holdings_json must be an array");
+  }
+  if (payload.length < 1 || payload.length > 300) {
+    throw new Error("portfolio_holdings_json must contain 1..300 holdings");
+  }
+  const out = [];
+  for (const row of payload) {
+    if (!row || typeof row !== "object") {
+      throw new Error("each portfolio holding must be an object");
+    }
+    const symbol = toStringInput(row.symbol).toUpperCase();
+    if (!SYMBOL_RE.test(symbol)) {
+      throw new Error(`Invalid portfolio symbol: ${symbol || "<empty>"}`);
+    }
+    const quantityRaw = row.quantity ?? row.qty;
+    const quantity = Number(quantityRaw);
+    if (!Number.isFinite(quantity) || quantity === 0) {
+      throw new Error(`Invalid quantity for symbol ${symbol}`);
+    }
+    const clean = {
+      symbol,
+      quantity: quantity,
+    };
+    const ex = toStringInput(row.exchange).toUpperCase();
+    if (ex) {
+      if (!ALLOWED_EXCHANGES.has(ex)) {
+        throw new Error(`Invalid exchange for symbol ${symbol}`);
+      }
+      clean.exchange = ex;
+    }
+    const avgBuyRaw = row.avg_buy_price ?? row.buy_price ?? row.avg_price;
+    if (avgBuyRaw !== undefined && avgBuyRaw !== null && toStringInput(String(avgBuyRaw)) !== "") {
+      const avgBuy = Number(avgBuyRaw);
+      if (!Number.isFinite(avgBuy) || avgBuy <= 0) {
+        throw new Error(`Invalid avg_buy_price for symbol ${symbol}`);
+      }
+      clean.avg_buy_price = avgBuy;
+    }
+    out.push(clean);
+  }
+  return JSON.stringify(out);
+}
+
 function sanitizeRunTitanInputs(inputObj) {
   const input = inputObj && typeof inputObj === "object" ? inputObj : {};
   const mode = toStringInput(input.mode) || "sector";
@@ -74,6 +132,11 @@ function sanitizeRunTitanInputs(inputObj) {
     min: 1,
     max: 200,
   });
+  const portfolioMaxPositions = parseBoundedInt(
+    input.portfolio_max_positions,
+    "portfolio_max_positions",
+    { min: 1, max: 300 },
+  );
 
   const cleaned = {
     mode,
@@ -81,6 +144,8 @@ function sanitizeRunTitanInputs(inputObj) {
     max_symbols: maxSymbols,
     workers,
     all_sector_workers: allSectorWorkers,
+    portfolio_holdings_json: "",
+    portfolio_max_positions: portfolioMaxPositions,
   };
 
   if (mode === "sector") {
@@ -100,6 +165,17 @@ function sanitizeRunTitanInputs(inputObj) {
     cleaned.sector_id = effectiveSectorId;
     cleaned.custom_symbols = sanitizeCustomSymbols(input.custom_symbols);
     cleaned.custom_exchange = customExchange;
+  } else if (mode === "portfolio") {
+    const customExchange = toStringInput(input.custom_exchange).toUpperCase() || "NSE";
+    if (!ALLOWED_EXCHANGES.has(customExchange)) {
+      throw new Error("custom_exchange must be NSE or BSE");
+    }
+    cleaned.custom_exchange = customExchange;
+    cleaned.portfolio_holdings_json = sanitizePortfolioHoldingsJson(input.portfolio_holdings_json);
+    if (!cleaned.portfolio_max_positions) {
+      cleaned.portfolio_max_positions = "50";
+    }
+    cleaned.sector_id = "";
   } else {
     cleaned.sector_id = "";
   }

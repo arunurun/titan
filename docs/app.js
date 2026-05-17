@@ -29,10 +29,11 @@ const SECTOR_OPTIONS = [
   "telecom",
   "textiles",
 ];
-const RUN_MODES = new Set(["sector", "all_sectors", "live", "custom"]);
+const RUN_MODES = new Set(["sector", "all_sectors", "live", "custom", "portfolio"]);
 const EXCHANGE_OPTIONS = new Set(["NSE", "BSE"]);
 const CUSTOM_SYMBOL_TOKEN_RE = /^[A-Z0-9&._-]{1,25}$/;
 const MAX_CUSTOM_SYMBOLS = 120;
+const MAX_PORTFOLIO_HOLDINGS = 150;
 const COMMON_NON_SYMBOLS = new Set([
   "HOLDINGS",
   "HOLDING",
@@ -285,10 +286,19 @@ function parseSymbolWithExchange(token, defaultExchange = "NSE") {
   return { symbol: sym, exchange: defaultExchange };
 }
 
-function parseHoldingsSymbolsFromText(rawText, defaultExchange = "NSE") {
+function _parseNumericToken(raw) {
+  const t = String(raw || "")
+    .replace(/,/g, "")
+    .trim();
+  if (!/^[+-]?\d+(?:\.\d+)?$/.test(t)) return null;
+  const n = Number(t);
+  if (!Number.isFinite(n)) return null;
+  return n;
+}
+
+function parsePortfolioRowsFromText(rawText, defaultExchange = "NSE") {
   const lines = String(rawText || "").split(/\r?\n/);
-  const found = [];
-  const seen = new Set();
+  const holdings = [];
   const rejected = [];
   for (const line of lines) {
     const cleaned = String(line || "").trim();
@@ -304,13 +314,22 @@ function parseHoldingsSymbolsFromText(rawText, defaultExchange = "NSE") {
       rejected.push({ token: firstColRaw, reason: "invalid_first_column_symbol" });
       continue;
     }
-    if (!seen.has(parsed.symbol)) {
-      seen.add(parsed.symbol);
-      found.push(parsed.symbol);
+    const nums = tokens.slice(1).map(_parseNumericToken).filter((n) => n !== null);
+    if (!nums.length || Number(nums[0]) === 0) {
+      rejected.push({ token: cleaned, reason: "missing_or_zero_quantity" });
+      continue;
     }
+    const quantity = Number(nums[0]);
+    const avgBuy = nums.length >= 2 && Number(nums[1]) > 0 ? Number(nums[1]) : null;
+    holdings.push({
+      symbol: parsed.symbol,
+      exchange: parsed.exchange,
+      quantity,
+      avg_buy_price: avgBuy,
+    });
   }
   return {
-    symbols: found.slice(0, MAX_CUSTOM_SYMBOLS),
+    holdings: holdings.slice(0, MAX_PORTFOLIO_HOLDINGS),
     rejected,
   };
 }
@@ -341,7 +360,7 @@ function _groupPdfItemsByRow(items, tolerance = 2) {
 
 function _parseFirstColumnTokenFromRow(cells, defaultExchange) {
   if (!Array.isArray(cells) || !cells.length) {
-    return { parsed: null, token: "" };
+    return { parsed: null, token: "", sorted: [] };
   }
   const sorted = [...cells].sort((a, b) => a.x - b.x);
   const first = String(sorted[0]?.text || "").trim();
@@ -354,13 +373,13 @@ function _parseFirstColumnTokenFromRow(cells, defaultExchange) {
   for (const cand of candidates) {
     const parsed = parseSymbolWithExchange(cand, defaultExchange);
     if (parsed) {
-      return { parsed, token: cand };
+      return { parsed, token: cand, sorted };
     }
   }
-  return { parsed: null, token: first };
+  return { parsed: null, token: first, sorted };
 }
 
-async function extractPortfolioSymbolsFromPdf(file, defaultExchange = "NSE") {
+async function extractPortfolioRowsFromPdf(file, defaultExchange = "NSE") {
   const pdfjsLib = await import("https://cdn.jsdelivr.net/npm/pdfjs-dist@4.5.136/build/pdf.mjs");
   if (pdfjsLib && pdfjsLib.GlobalWorkerOptions) {
     pdfjsLib.GlobalWorkerOptions.workerSrc =
@@ -368,29 +387,40 @@ async function extractPortfolioSymbolsFromPdf(file, defaultExchange = "NSE") {
   }
   const bytes = new Uint8Array(await file.arrayBuffer());
   const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
-  const symbols = [];
-  const seen = new Set();
+  const holdings = [];
   const rejected = [];
   for (let i = 1; i <= pdf.numPages; i += 1) {
     const page = await pdf.getPage(i);
     const tc = await page.getTextContent();
     const rows = _groupPdfItemsByRow(tc.items || []);
     for (const row of rows) {
-      const { parsed, token } = _parseFirstColumnTokenFromRow(row.cells, defaultExchange);
+      const { parsed, token, sorted } = _parseFirstColumnTokenFromRow(row.cells, defaultExchange);
       if (!parsed) {
         if (token) {
           rejected.push({ token, reason: "invalid_first_column_symbol" });
         }
         continue;
       }
-      if (!seen.has(parsed.symbol)) {
-        seen.add(parsed.symbol);
-        symbols.push(parsed.symbol);
+      const nums = sorted
+        .slice(1)
+        .map((cell) => _parseNumericToken(cell.text))
+        .filter((n) => n !== null);
+      if (!nums.length || Number(nums[0]) === 0) {
+        rejected.push({ token: token || parsed.symbol, reason: "missing_or_zero_quantity" });
+        continue;
       }
+      const quantity = Number(nums[0]);
+      const avgBuy = nums.length >= 2 && Number(nums[1]) > 0 ? Number(nums[1]) : null;
+      holdings.push({
+        symbol: parsed.symbol,
+        exchange: parsed.exchange,
+        quantity,
+        avg_buy_price: avgBuy,
+      });
     }
   }
   return {
-    symbols: symbols.slice(0, MAX_CUSTOM_SYMBOLS),
+    holdings: holdings.slice(0, MAX_PORTFOLIO_HOLDINGS),
     rejected,
   };
 }
@@ -402,64 +432,83 @@ async function buildPortfolioSymbolsPayload() {
   if (!EXCHANGE_OPTIONS.has(exchange)) {
     throw new Error("Portfolio exchange must be NSE or BSE.");
   }
-  const sectorId = String(el("portfolioSectorId")?.value || "portfolio_pdf")
-    .trim()
-    .toLowerCase();
-  if (!/^[a-z0-9_]{1,64}$/.test(sectorId)) {
-    throw new Error("Portfolio sector label must match [a-z0-9_]{1,64}.");
-  }
-  const maxSymbols = normalizePositiveInt(el("portfolioMaxSymbols")?.value, "Portfolio max symbols", {
+  const maxPositions = normalizePositiveInt(el("portfolioMaxSymbols")?.value, "Portfolio max symbols", {
     min: 1,
-    max: 120,
+    max: MAX_PORTFOLIO_HOLDINGS,
   });
   const pasted = String(el("portfolioHoldingsText")?.value || "");
   const pdfFile = el("portfolioPdfFile")?.files?.[0] || null;
   const accepted = [];
   const rejected = [];
-  const seen = new Set();
+  const merged = new Map();
   const addAccepted = (list) => {
-    for (const sym of list || []) {
-      if (!seen.has(sym)) {
-        seen.add(sym);
-        accepted.push(sym);
+    for (const row of list || []) {
+      const symbol = String(row.symbol || "").toUpperCase();
+      const exch = String(row.exchange || exchange).toUpperCase();
+      const quantity = Number(row.quantity || 0);
+      const avgBuy =
+        row.avg_buy_price !== null && row.avg_buy_price !== undefined ? Number(row.avg_buy_price) : null;
+      if (!symbol || !Number.isFinite(quantity) || quantity === 0) continue;
+      const key = `${exch}:${symbol}`;
+      if (!merged.has(key)) {
+        merged.set(key, { symbol, exchange: exch, quantity: 0, cost: 0, qtyCost: 0 });
       }
-      if (accepted.length >= MAX_CUSTOM_SYMBOLS) {
+      const rec = merged.get(key);
+      rec.quantity += quantity;
+      if (avgBuy !== null && Number.isFinite(avgBuy) && avgBuy > 0) {
+        const qabs = Math.abs(quantity);
+        rec.cost += qabs * avgBuy;
+        rec.qtyCost += qabs;
+      }
+    }
+    for (const rec of merged.values()) {
+      if (accepted.length >= MAX_PORTFOLIO_HOLDINGS) {
         break;
       }
+      accepted.push({
+        symbol: rec.symbol,
+        exchange: rec.exchange,
+        quantity: Number(rec.quantity.toFixed(4)),
+        avg_buy_price: rec.qtyCost > 0 ? Number((rec.cost / rec.qtyCost).toFixed(4)) : null,
+      });
     }
   };
 
   if (pdfFile) {
     try {
-      const pdfResult = await extractPortfolioSymbolsFromPdf(pdfFile, exchange);
-      addAccepted(pdfResult.symbols);
+      const pdfResult = await extractPortfolioRowsFromPdf(pdfFile, exchange);
+      addAccepted(pdfResult.holdings);
       rejected.push(...(pdfResult.rejected || []));
     } catch (e) {
       throw new Error(`PDF extraction failed. ${e.message || e}`);
     }
   }
   if (pasted.trim()) {
-    const txtResult = parseHoldingsSymbolsFromText(pasted, exchange);
-    addAccepted(txtResult.symbols);
+    const txtResult = parsePortfolioRowsFromText(pasted, exchange);
+    addAccepted(txtResult.holdings);
     rejected.push(...(txtResult.rejected || []));
   }
   if (!accepted.length) {
-    throw new Error("No symbols parsed from first column of PDF/text. Use lines like NSE:RELIANCE, 10");
+    throw new Error(
+      "No holdings parsed from first column of PDF/text. Expected: SYMBOL, QTY, BUY_PRICE (buy price optional).",
+    );
   }
   const rejectionPreview = rejected
     .slice(0, 8)
     .map((r) => `${r.token} (${r.reason})`)
     .join(", ");
   return {
-    mode: "custom",
-    sector_id: sectorId,
+    mode: "portfolio",
     custom_exchange: exchange,
-    custom_symbols: accepted.join(","),
-    max_symbols: maxSymbols || String(accepted.length),
+    portfolio_holdings_json: JSON.stringify(accepted),
+    portfolio_max_positions: maxPositions || String(accepted.length),
     workers: normalizePositiveInt(el("workers")?.value, "Workers", { min: 1, max: 16 }) || "4",
     all_sector_workers: "",
     parsed_count: accepted.length,
-    parsed_symbols_preview: accepted.slice(0, 15).join(", "),
+    parsed_symbols_preview: accepted
+      .slice(0, 12)
+      .map((x) => `${x.symbol}[q=${x.quantity}${x.avg_buy_price ? `,buy=${x.avg_buy_price}` : ""}]`)
+      .join(", "),
     rejected_count: rejected.length,
     rejected_preview: rejectionPreview,
   };
@@ -492,6 +541,9 @@ function buildRunTitanInputs() {
 
   if (mode === "sector" && !sectorId) {
     throw new Error("Sector ID is required for sector mode.");
+  }
+  if (mode === "portfolio") {
+    throw new Error("Use the 'Portfolio PDF Quick Scan' section for portfolio mode.");
   }
 
   if (mode === "custom") {
@@ -608,14 +660,13 @@ function wireEvents() {
       try {
         setWorking("Parse Portfolio PDF/Text");
         const payload = await buildPortfolioSymbolsPayload();
-        setWorking(`Dispatch Portfolio Quick Scan (${payload.parsed_count} symbols)`);
+        setWorking(`Dispatch Portfolio Position Analysis (${payload.parsed_count} holdings)`);
         await checkConnection();
         const inputs = {
           mode: payload.mode,
-          sector_id: payload.sector_id,
           custom_exchange: payload.custom_exchange,
-          custom_symbols: payload.custom_symbols,
-          max_symbols: payload.max_symbols,
+          portfolio_holdings_json: payload.portfolio_holdings_json,
+          portfolio_max_positions: payload.portfolio_max_positions,
           workers: payload.workers,
           all_sector_workers: payload.all_sector_workers,
         };
@@ -626,8 +677,8 @@ function wireEvents() {
               (payload.rejected_preview ? `\nRejected sample: ${payload.rejected_preview}` : "")
             : "\nRejected first-column entries: 0";
         setStatus(
-          `Dispatched run_titan_now.yml successfully.\n` +
-            `Parsed symbols (${payload.parsed_count}): ${payload.parsed_symbols_preview}${rejectLine}`,
+          `Dispatched portfolio position analysis.\n` +
+            `Parsed holdings (${payload.parsed_count}): ${payload.parsed_symbols_preview}${rejectLine}`,
         );
       } catch (e) {
         setStatus(`Portfolio quick scan failed:\n${e.message}`);

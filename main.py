@@ -452,6 +452,23 @@ def main() -> None:
         help="Exchange applied to --custom-symbols entries (NSE or BSE).",
     )
     p.add_argument(
+        "--portfolio-holdings-json",
+        type=str,
+        default="",
+        metavar="JSON",
+        help=(
+            "Portfolio holdings payload as JSON array with symbol, quantity/qty, optional avg_buy_price/buy_price "
+            "and exchange."
+        ),
+    )
+    p.add_argument(
+        "--portfolio-max-positions",
+        type=int,
+        default=50,
+        metavar="N",
+        help="Max holdings to evaluate for --portfolio-holdings-json mode.",
+    )
+    p.add_argument(
         "--macro-json",
         type=str,
         default="",
@@ -517,6 +534,40 @@ def main() -> None:
         return
 
     custom_symbols_raw = args.custom_symbols.strip()
+    portfolio_holdings_raw = args.portfolio_holdings_json.strip()
+    if portfolio_holdings_raw:
+        from portfolio_analysis import (
+            analyze_portfolio_holdings,
+            parse_portfolio_holdings_json,
+            portfolio_report_text,
+        )
+
+        try:
+            holdings = parse_portfolio_holdings_json(
+                portfolio_holdings_raw,
+                default_exchange=args.custom_exchange,
+            )
+            logger.info("Running portfolio position analysis for %d holdings", len(holdings))
+            result = analyze_portfolio_holdings(
+                holdings,
+                max_positions=max(1, int(args.portfolio_max_positions)),
+            )
+            print(
+                portfolio_report_text(
+                    source="workflow_portfolio_json",
+                    limitations=[],
+                    parsed_count=len(holdings),
+                    result=result,
+                )
+            )
+        except Exception as e:
+            summary = str(e).strip().split("\n", 1)[0].strip()
+            if len(summary) > 180:
+                summary = summary[:177] + "..."
+            send_failure_email(summary, detail=traceback.format_exc())
+            raise
+        return
+
     if args.sector.strip() or custom_symbols_raw:
         from sector_audit import run_sector_live
         from sector_registry import SectorInstrument

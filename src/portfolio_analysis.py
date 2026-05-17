@@ -52,6 +52,7 @@ class PortfolioHolding:
     exchange: str
     quantity: float
     source_line: str
+    avg_buy_price: float | None = None
 
 
 def _try_load_pdf_reader():
@@ -281,24 +282,124 @@ def _parse_line(line: str) -> PortfolioHolding | None:
     # Reject obvious header lines like "SYMBOL QTY".
     if symbol in _COMMON_NON_SYMBOLS or symbol_token.upper() in _COMMON_NON_SYMBOLS:
         return None
-    return PortfolioHolding(symbol=symbol, exchange=exchange, quantity=qty, source_line=cleaned)
+    avg_buy_price: float | None = None
+    for k in range(qty_idx + 1, len(tokens)):
+        tok = tokens[k].replace(",", "")
+        if _QTY_RE.match(tok):
+            cand = float(tok)
+            if cand > 0:
+                avg_buy_price = cand
+                break
+    return PortfolioHolding(
+        symbol=symbol,
+        exchange=exchange,
+        quantity=qty,
+        avg_buy_price=avg_buy_price,
+        source_line=cleaned,
+    )
 
 
 def parse_holdings_text(text: str) -> list[PortfolioHolding]:
-    grouped: dict[tuple[str, str], float] = {}
+    grouped: dict[tuple[str, str], dict[str, float]] = {}
     for raw_line in (text or "").splitlines():
         parsed = _parse_line(raw_line)
         if not parsed:
             continue
         key = (parsed.symbol, parsed.exchange)
-        grouped[key] = grouped.get(key, 0.0) + parsed.quantity
+        row = grouped.setdefault(
+            key,
+            {
+                "qty": 0.0,
+                "cost": 0.0,
+                "qty_with_cost": 0.0,
+            },
+        )
+        row["qty"] += parsed.quantity
+        if isinstance(parsed.avg_buy_price, (int, float)) and parsed.avg_buy_price > 0:
+            q = abs(parsed.quantity)
+            row["cost"] += q * float(parsed.avg_buy_price)
+            row["qty_with_cost"] += q
     out = [
-        PortfolioHolding(symbol=symbol, exchange=exchange, quantity=round(quantity, 4), source_line="")
-        for (symbol, exchange), quantity in grouped.items()
-        if quantity != 0.0
+        PortfolioHolding(
+            symbol=symbol,
+            exchange=exchange,
+            quantity=round(row["qty"], 4),
+            avg_buy_price=(
+                round(row["cost"] / row["qty_with_cost"], 4) if row["qty_with_cost"] > 0 else None
+            ),
+            source_line="",
+        )
+        for (symbol, exchange), row in grouped.items()
+        if row["qty"] != 0.0
     ]
     out.sort(key=lambda x: (x.exchange, x.symbol))
     return out
+
+
+def parse_portfolio_holdings_json(raw: str, *, default_exchange: str = "NSE") -> list[PortfolioHolding]:
+    try:
+        payload = json.loads(raw or "[]")
+    except json.JSONDecodeError as exc:
+        raise ValueError("portfolio holdings JSON is invalid") from exc
+    if not isinstance(payload, list):
+        raise ValueError("portfolio holdings JSON must be an array")
+    if len(payload) > 300:
+        raise ValueError("portfolio holdings JSON exceeds max size (300)")
+    rows: list[PortfolioHolding] = []
+    for idx, item in enumerate(payload, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"portfolio holding #{idx} must be an object")
+        symbol_raw = str(item.get("symbol") or "").strip()
+        exchange_raw = str(item.get("exchange") or "").strip().upper() or default_exchange
+        qty_raw = item.get("quantity", item.get("qty"))
+        if not symbol_raw:
+            raise ValueError(f"portfolio holding #{idx} is missing symbol")
+        try:
+            qty = float(qty_raw)
+        except Exception as exc:
+            raise ValueError(f"portfolio holding #{idx} has invalid quantity") from exc
+        if qty == 0.0 or math.isnan(qty):
+            raise ValueError(f"portfolio holding #{idx} quantity must be non-zero")
+        buy_price_raw = item.get("avg_buy_price", item.get("buy_price", item.get("avg_price")))
+        avg_buy_price: float | None = None
+        if buy_price_raw not in (None, ""):
+            try:
+                avg_buy_price = float(buy_price_raw)
+            except Exception as exc:
+                raise ValueError(f"portfolio holding #{idx} has invalid avg_buy_price") from exc
+            if avg_buy_price <= 0 or math.isnan(avg_buy_price):
+                avg_buy_price = None
+
+        if any(sep in symbol_raw for sep in (":", "-", "/")):
+            parsed = _parse_symbol_with_exchange(symbol_raw)
+            if parsed:
+                exch, sym = parsed
+                if exch not in _EXCHANGES:
+                    exch = default_exchange
+                rows.append(
+                    PortfolioHolding(
+                        symbol=sym,
+                        exchange=exch,
+                        quantity=qty,
+                        avg_buy_price=avg_buy_price,
+                        source_line=symbol_raw,
+                    )
+                )
+                continue
+        sym = _normalize_symbol(symbol_raw)
+        if not _SYMBOL_RE.match(sym):
+            raise ValueError(f"portfolio holding #{idx} has invalid symbol")
+        exch = exchange_raw if exchange_raw in _EXCHANGES else default_exchange
+        rows.append(
+            PortfolioHolding(
+                symbol=sym,
+                exchange=exch,
+                quantity=qty,
+                avg_buy_price=avg_buy_price,
+                source_line=symbol_raw,
+            )
+        )
+    return rows
 
 
 def collect_holdings_input(
@@ -357,6 +458,9 @@ def analyze_portfolio_holdings(
     total_weight = 0.0
     weighted_next_week = 0.0
     weighted_intent = 0.0
+    total_invested = 0.0
+    total_current = 0.0
+    realized_rows = 0
 
     for h in capped:
         resolved_symbol, resolved_exchange, map_reason, map_conf = _resolve_symbol(
@@ -405,12 +509,61 @@ def analyze_portfolio_holdings(
                 continue
             next_week = audit.get("next_week_score")
             intent = audit.get("effective_intent_score", audit.get("intent_score"))
+            current_price = audit.get("close_last")
+            sell_signal = str(audit.get("sell_signal") or "hold")
+            sell_signal_risk = audit.get("sell_signal_risk_score")
+            sell_signal_reasons = audit.get("sell_signal_reasons") if isinstance(audit.get("sell_signal_reasons"), list) else []
+            avg_buy = float(h.avg_buy_price) if isinstance(h.avg_buy_price, (int, float)) else None
+            q_abs = abs(float(h.quantity))
+            invested_value = (avg_buy * q_abs) if isinstance(avg_buy, float) and avg_buy > 0 else None
+            current_value = (
+                float(current_price) * q_abs if isinstance(current_price, (int, float)) and not math.isnan(float(current_price)) else None
+            )
+            pnl_abs = (
+                (current_value - invested_value)
+                if isinstance(current_value, (int, float)) and isinstance(invested_value, (int, float))
+                else None
+            )
+            pnl_pct = (
+                ((pnl_abs / invested_value) * 100.0)
+                if isinstance(pnl_abs, (int, float)) and isinstance(invested_value, (int, float)) and invested_value != 0
+                else None
+            )
+            if isinstance(invested_value, (int, float)) and isinstance(current_value, (int, float)):
+                total_invested += float(invested_value)
+                total_current += float(current_value)
+                realized_rows += 1
             weight = abs(float(h.quantity))
             total_weight += weight
             if isinstance(next_week, (int, float)):
                 weighted_next_week += float(next_week) * weight
             if isinstance(intent, (int, float)):
                 weighted_intent += float(intent) * weight
+            action_reasons: list[str] = []
+            action_tag = "hold"
+            if sell_signal == "exit-risk":
+                action_tag = "exit_risk"
+                action_reasons.append("sell_signal=exit-risk")
+            elif sell_signal == "trim":
+                action_tag = "trim"
+                action_reasons.append("sell_signal=trim")
+            elif isinstance(pnl_pct, (int, float)) and pnl_pct <= -8:
+                action_tag = "exit_risk"
+                action_reasons.append("drawdown <= -8%")
+            elif (
+                sell_signal == "hold"
+                and isinstance(next_week, (int, float))
+                and isinstance(intent, (int, float))
+                and float(next_week) >= 70.0
+                and float(intent) >= 65.0
+                and (pnl_pct is None or float(pnl_pct) <= 20.0)
+            ):
+                action_tag = "buy_more"
+                action_reasons.append("trend persistence + intent support")
+            else:
+                action_tag = "hold"
+                action_reasons.append("no strong sell risk")
+
             rows.append(
                 {
                     "input_symbol": h.symbol,
@@ -422,12 +575,23 @@ def analyze_portfolio_holdings(
                     "symbol": resolved_symbol,
                     "exchange": resolved_exchange,
                     "quantity": h.quantity,
+                    "avg_buy_price": avg_buy,
                     "status": "ok",
                     "next_week_score": next_week,
                     "intent_score": intent,
                     "z_score": audit.get("z_score"),
                     "return_1d_pct": audit.get("return_1d_pct"),
                     "absorption_ratio": audit.get("absorption_ratio"),
+                    "current_price": current_price,
+                    "invested_value": invested_value,
+                    "current_value": current_value,
+                    "unrealized_pnl_value": pnl_abs,
+                    "unrealized_pnl_pct": round(float(pnl_pct), 2) if isinstance(pnl_pct, (int, float)) else None,
+                    "sell_signal": sell_signal,
+                    "sell_signal_risk_score": sell_signal_risk,
+                    "sell_signal_reasons": sell_signal_reasons,
+                    "action_tag": action_tag,
+                    "action_reasons": action_reasons,
                 }
             )
         except Exception as exc:  # noqa: BLE001
@@ -442,6 +606,7 @@ def analyze_portfolio_holdings(
                     "symbol": resolved_symbol,
                     "exchange": resolved_exchange,
                     "quantity": h.quantity,
+                    "avg_buy_price": h.avg_buy_price,
                     "status": "error",
                     "error": str(exc),
                 }
@@ -463,6 +628,19 @@ def analyze_portfolio_holdings(
         "portfolio_weighted_intent_score": round(weighted_intent / total_weight, 2)
         if total_weight > 0
         else None,
+        "positions_with_cost_basis": realized_rows,
+        "portfolio_invested_value": round(total_invested, 2) if realized_rows else None,
+        "portfolio_current_value": round(total_current, 2) if realized_rows else None,
+        "portfolio_unrealized_pnl_value": round(total_current - total_invested, 2) if realized_rows else None,
+        "portfolio_unrealized_pnl_pct": round(((total_current - total_invested) / total_invested) * 100.0, 2)
+        if realized_rows and total_invested != 0
+        else None,
+        "action_counts": {
+            "buy_more": sum(1 for r in ok_rows if r.get("action_tag") == "buy_more"),
+            "hold": sum(1 for r in ok_rows if r.get("action_tag") == "hold"),
+            "trim": sum(1 for r in ok_rows if r.get("action_tag") == "trim"),
+            "exit_risk": sum(1 for r in ok_rows if r.get("action_tag") == "exit_risk"),
+        },
     }
     ranked = sorted(
         ok_rows,

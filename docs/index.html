@@ -105,6 +105,7 @@
             <option value="all_sectors">all_sectors</option>
             <option value="live">live</option>
             <option value="custom">custom</option>
+            <option value="portfolio">portfolio</option>
           </select>
         </div>
         <div>
@@ -181,8 +182,8 @@
     <div class="card">
       <h3>Portfolio PDF Quick Scan</h3>
       <p class="small">
-        Upload a portfolio PDF (or paste holdings text). Symbols are extracted on-device and dispatched as
-        <code>custom</code> mode for a quick scan.
+        Upload a portfolio PDF (or paste holdings text). Holdings are extracted on-device as
+        <code>symbol, quantity, avg buy price</code> and dispatched for position-aware buy/hold/sell analysis.
       </p>
       <label>Upload portfolio PDF (optional)</label>
       <input id="portfolioPdfFile" type="file" accept=".pdf,application/pdf" />
@@ -190,7 +191,7 @@
       <textarea
         id="portfolioHoldingsText"
         rows="5"
-        placeholder="NSE:RELIANCE, 10&#10;INFY 5&#10;ASTMIC31501 3"
+        placeholder="NSE:RELIANCE, 10, 2380.5&#10;INFY 5 1452&#10;ASTMIC31501,3,710"
       ></textarea>
       <div class="row two">
         <div>
@@ -205,7 +206,7 @@
           <input id="portfolioSectorId" value="portfolio_pdf" />
         </div>
       </div>
-      <label>Max symbols from portfolio</label>
+      <label>Max holdings from portfolio</label>
       <input id="portfolioMaxSymbols" value="40" />
       <button type="button" class="secondary" id="portfolioScanBtn">Dispatch Portfolio Quick Scan</button>
     </div>
@@ -229,6 +230,6 @@
     </div>
   </div>
 
-  <script defer src="./app.js?v=20260517-3"></script>
+  <script defer src="./app.js?v=20260517-4"></script>
 </body>
 </html>

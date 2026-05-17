@@ -280,3 +280,33 @@ def test_run_all_sectors_single_digest_env(monkeypatch):
     assert "Titan all-sectors consolidated digest" in body
     assert "=== Sector: defence ===" in body
     assert "=== Sector: energy ===" in body
+
+
+def test_portfolio_holdings_json_invokes_portfolio_analysis(monkeypatch, capsys):
+    import main as main_mod
+    import portfolio_analysis
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prog",
+            "--portfolio-holdings-json",
+            '[{"symbol":"HAL","quantity":10,"avg_buy_price":100}]',
+            "--portfolio-max-positions",
+            "10",
+        ],
+    )
+    monkeypatch.setattr(
+        portfolio_analysis,
+        "analyze_portfolio_holdings",
+        lambda holdings, max_positions=20: {
+            "summary": {"analyzed_positions": len(holdings), "max_positions": max_positions},
+            "rows": [],
+            "top_candidates": [],
+        },
+    )
+    main_mod.main()
+    out = capsys.readouterr().out
+    assert "workflow_portfolio_json" in out
+    assert '"analyzed_positions": 1' in out
