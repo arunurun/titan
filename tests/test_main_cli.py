@@ -382,7 +382,8 @@ def test_portfolio_holdings_json_invokes_portfolio_analysis(monkeypatch, capsys)
     main_mod.main()
     out = capsys.readouterr().out
     assert "workflow_portfolio_json" in out
-    assert '"analyzed_positions": 1' in out
+    assert "Titan portfolio digest" in out
+    assert "Analyzed: 1" in out
     mock_email.assert_called_once()
     assert mock_email.call_args[1].get("subject_prefix") == "Titan V12.0 portfolio"
 

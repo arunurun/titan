@@ -29,6 +29,7 @@ _COMMON_NON_SYMBOLS = {
     "PRICE",
     "VALUE",
     "TOTAL",
+    "SUBTOTAL",
     "AVG",
     "AVERAGE",
     "COST",
@@ -219,6 +220,39 @@ def _resolve_symbol(
         return other_map[k], other_ex, "cross_exchange_fuzzy", 0.72
 
     return _normalize_symbol(symbol), ex, "unresolved", 0.0
+
+
+_ROLLUP_MAX_INVESTED_SINGLE_LINE_INR = 1_000_000_000_000.0  # ₹1e12 single-line notionals treated as corrupt
+
+
+def _holding_is_statement_line(h: PortfolioHolding) -> bool:
+    """Reject broker PDF totals / footers mistaken for tickers."""
+    k = _clean_symbol_key(h.symbol)
+    raw_u = str(h.symbol or "").upper().strip()
+    if len(k) >= 10 and k.startswith("TOTAL"):
+        return True
+    if len(k) >= 8 and k.startswith("TOTAL") and any(ch.isdigit() for ch in raw_u):
+        return True
+    if k in {"SUBTOTAL", "GRANDTOTAL", "TOTALVALUE", "NETVALUE", "NETASSET"}:
+        return True
+    return False
+
+
+def _rollup_includes_position(invested: float | None, current: float | None) -> bool:
+    """Exclude obvious quantity/price OCR mistakes from headline portfolio P&L."""
+    if not isinstance(invested, (int, float)) or not isinstance(current, (int, float)):
+        return False
+    inv = float(invested)
+    cur = float(current)
+    if inv <= 0 or cur < 0 or math.isnan(inv) or math.isnan(cur):
+        return False
+    if inv > _ROLLUP_MAX_INVESTED_SINGLE_LINE_INR:
+        return False
+    if inv > max(500_000.0, cur * 1_000.0):
+        return False
+    if cur > max(500_000.0, inv * 5_000.0):
+        return False
+    return True
 
 
 def _parse_symbol_with_exchange(token: str) -> tuple[str, str] | None:
@@ -465,9 +499,22 @@ def analyze_portfolio_holdings(
     weighted_intent = 0.0
     total_invested = 0.0
     total_current = 0.0
-    realized_rows = 0
+    basis_rows = 0
+    rollup_positions = 0
+    rollup_excluded_outliers = 0
 
     for h in capped:
+        if _holding_is_statement_line(h):
+            rows.append(
+                {
+                    "input_symbol": h.symbol,
+                    "input_exchange": h.exchange,
+                    "quantity": h.quantity,
+                    "status": "ignored_statement_line",
+                    "note": "Skipped (broker total / statement token, not a holding)",
+                }
+            )
+            continue
         resolved_symbol, resolved_exchange, map_reason, map_conf = _resolve_symbol(
             h.symbol,
             h.exchange,
@@ -535,9 +582,13 @@ def analyze_portfolio_holdings(
                 else None
             )
             if isinstance(invested_value, (int, float)) and isinstance(current_value, (int, float)):
-                total_invested += float(invested_value)
-                total_current += float(current_value)
-                realized_rows += 1
+                basis_rows += 1
+                if _rollup_includes_position(invested_value, current_value):
+                    total_invested += float(invested_value)
+                    total_current += float(current_value)
+                    rollup_positions += 1
+                else:
+                    rollup_excluded_outliers += 1
             weight = abs(float(h.quantity))
             total_weight += weight
             if isinstance(next_week, (int, float)):
@@ -569,6 +620,11 @@ def analyze_portfolio_holdings(
                 action_tag = "hold"
                 action_reasons.append("no strong sell risk")
 
+            roll_included = (
+                isinstance(invested_value, (int, float))
+                and isinstance(current_value, (int, float))
+                and _rollup_includes_position(invested_value, current_value)
+            )
             rows.append(
                 {
                     "input_symbol": h.symbol,
@@ -597,6 +653,7 @@ def analyze_portfolio_holdings(
                     "sell_signal_reasons": sell_signal_reasons,
                     "action_tag": action_tag,
                     "action_reasons": action_reasons,
+                    "included_in_headline_rollup": roll_included,
                 }
             )
         except Exception as exc:  # noqa: BLE001
@@ -621,24 +678,28 @@ def analyze_portfolio_holdings(
     skipped_rows = [r for r in rows if r.get("status") == "skipped_no_data"]
     err_rows = [r for r in rows if r.get("status") == "error"]
     invalid_rows = [r for r in rows if r.get("status") == "invalid_symbol_from_pdf"]
+    ignored_statement = [r for r in rows if r.get("status") == "ignored_statement_line"]
     summary = {
         "requested_positions": len(capped),
         "analyzed_positions": len(ok_rows),
         "skipped_no_data": len(skipped_rows),
         "invalid_symbol_mappings": len(invalid_rows),
         "errors": len(err_rows),
+        "ignored_statement_lines": len(ignored_statement),
         "portfolio_weighted_next_week_score": round(weighted_next_week / total_weight, 2)
         if total_weight > 0
         else None,
         "portfolio_weighted_intent_score": round(weighted_intent / total_weight, 2)
         if total_weight > 0
         else None,
-        "positions_with_cost_basis": realized_rows,
-        "portfolio_invested_value": round(total_invested, 2) if realized_rows else None,
-        "portfolio_current_value": round(total_current, 2) if realized_rows else None,
-        "portfolio_unrealized_pnl_value": round(total_current - total_invested, 2) if realized_rows else None,
+        "positions_with_cost_basis": basis_rows,
+        "portfolio_rollup_positions": rollup_positions,
+        "portfolio_rollup_excluded_outliers": rollup_excluded_outliers,
+        "portfolio_invested_value": round(total_invested, 2) if rollup_positions else None,
+        "portfolio_current_value": round(total_current, 2) if rollup_positions else None,
+        "portfolio_unrealized_pnl_value": round(total_current - total_invested, 2) if rollup_positions else None,
         "portfolio_unrealized_pnl_pct": round(((total_current - total_invested) / total_invested) * 100.0, 2)
-        if realized_rows and total_invested != 0
+        if rollup_positions and total_invested != 0
         else None,
         "action_counts": {
             "buy_more": sum(1 for r in ok_rows if r.get("action_tag") == "buy_more"),
@@ -657,6 +718,160 @@ def analyze_portfolio_holdings(
         "top_candidates": ranked[:5],
         "rows": rows,
     }
+
+
+_ACTION_DIGEST_LABEL = {
+    "buy_more": "ADD — buy more",
+    "hold": "HOLD",
+    "trim": "TRIM — take profits",
+    "exit_risk": "EXIT RISK — cut exposure",
+}
+
+
+def _format_inr_plain(value: float | None) -> str:
+    if value is None:
+        return "—"
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    if math.isnan(v):
+        return "—"
+    ax = abs(v)
+    if ax >= 1e7:
+        return f"₹{v / 1e7:,.2f} Cr"
+    if ax >= 1e5:
+        return f"₹{v / 1e5:,.2f} L"
+    return f"₹{v:,.0f}"
+
+
+def portfolio_email_digest_plaintext(
+    *,
+    source: str,
+    limitations: list[str],
+    parsed_count: int,
+    result: dict[str, Any],
+) -> str:
+    """
+    Human-readable body for email/UI. Uses same section headers as email_notify HTML heuristic.
+    """
+    summary = result.get("summary") or {}
+    ok_rows = [r for r in (result.get("rows") or []) if r.get("status") == "ok"]
+    ac = summary.get("action_counts") or {}
+
+    def sec(title: str) -> list[str]:
+        return ["", f"--- {title} ---", ""]
+
+    out: list[str] = []
+    out.append(f"Titan portfolio digest ({source}). Lines submitted: {parsed_count}.")
+
+    out.extend(sec("Coverage"))
+    out.append(f"Analyzed: {summary.get('analyzed_positions')}")
+    out.append(f"No market data: {summary.get('skipped_no_data')}")
+    out.append(f"Invalid / unresolved symbols: {summary.get('invalid_symbol_mappings')}")
+    out.append(f"Run errors: {summary.get('errors')}")
+    isl = summary.get("ignored_statement_lines") or 0
+    if isl:
+        out.append(f"PDF statement/total lines skipped: {isl}")
+    nw = summary.get("portfolio_weighted_next_week_score")
+    wi = summary.get("portfolio_weighted_intent_score")
+    if isinstance(nw, (int, float)) and isinstance(wi, (int, float)):
+        out.append(f"Qty-weighted scores — next week: {nw} | intent: {wi}")
+
+    out.extend(sec("Headline P/L (unrealized, where cost basis is trusted)"))
+    rp = int(summary.get("portfolio_rollup_positions") or 0)
+    br = int(summary.get("positions_with_cost_basis") or 0)
+    bo = int(summary.get("portfolio_rollup_excluded_outliers") or 0)
+    if rp:
+        out.append(f"Rows with cost × qty: {br} | used in portfolio totals: {rp}")
+        if bo:
+            out.append(
+                f"(Excluded {bo} row(s) with impossible notionals — typical garbled PDF qty/avg price.)",
+            )
+        out.append(f"Invested (sum): {_format_inr_plain(summary.get('portfolio_invested_value'))}")
+        out.append(f"Current value (sum): {_format_inr_plain(summary.get('portfolio_current_value'))}")
+        pnl = summary.get("portfolio_unrealized_pnl_value")
+        pctp = summary.get("portfolio_unrealized_pnl_pct")
+        out.append(
+            f"Unrealized P/L: {_format_inr_plain(pnl)}"
+            + (f" ({pctp:+.2f}% vs invested rollup)" if isinstance(pctp, (int, float)) else ""),
+        )
+    else:
+        out.append(
+            "No trustworthy portfolio-level P/L (add average buy prices per line, "
+            "and remove broker TOTAL rows from extracted text). "
+            "Per-symbol rows below still show Titan actions where data exists.",
+        )
+
+    out.extend(sec("Titan protocol — what to do"))
+    out.append(_ACTION_DIGEST_LABEL["exit_risk"])
+    out.append(_ACTION_DIGEST_LABEL["trim"])
+    out.append(_ACTION_DIGEST_LABEL["hold"])
+    out.append(_ACTION_DIGEST_LABEL["buy_more"])
+    out.append("")
+    out.append("Your mix this run:")
+    out.append(
+        f"  Exit risk: {ac.get('exit_risk', 0)} | Trim: {ac.get('trim', 0)} | "
+        f"Hold: {ac.get('hold', 0)} | Add: {ac.get('buy_more', 0)}",
+    )
+
+    out.extend(sec("Per-symbol metrics"))
+    out.append("SYMBOL | Titan action | Unrl P/L % | NextWk | Sell-signal note")
+    prio = {"exit_risk": 0, "trim": 1, "hold": 2, "buy_more": 3}
+
+    def nw_val(r: dict[str, Any]) -> float:
+        v = r.get("next_week_score")
+        return float(v) if isinstance(v, (int, float)) else -999.0
+
+    ordered = sorted(
+        ok_rows,
+        key=lambda r: (prio.get(str(r.get("action_tag")), 9), -nw_val(r)),
+    )
+    max_rows = 40
+    for r in ordered[:max_rows]:
+        sym = str(r.get("symbol") or r.get("input_symbol") or "?")
+        tag = str(r.get("action_tag") or "hold")
+        label = _ACTION_DIGEST_LABEL.get(tag, tag)
+        pnl_pct = r.get("unrealized_pnl_pct")
+        pls = f"{float(pnl_pct):+.1f}%" if isinstance(pnl_pct, (int, float)) else "n/a"
+        nws = r.get("next_week_score")
+        nwx = f"{float(nws):.1f}" if isinstance(nws, (int, float)) else "—"
+        ss = r.get("sell_signal_reasons")
+        reason = ""
+        if isinstance(ss, list) and ss:
+            reason = str(ss[0])
+        elif r.get("action_reasons"):
+            ar = r.get("action_reasons")
+            if isinstance(ar, list) and ar:
+                reason = str(ar[0])
+        reason = (reason or "")[:96]
+        rollup_flag = ""
+        if isinstance(r.get("included_in_headline_rollup"), bool) and not r.get("included_in_headline_rollup"):
+            if isinstance(pnl_pct, (int, float)) or r.get("invested_value") is not None:
+                rollup_flag = " *"
+        out.append(f"{sym} | {label} | {pls} | {nwx} | {reason}{rollup_flag}")
+    if len(ordered) > max_rows:
+        out.append(f"... ({len(ordered) - max_rows} more rows in full JSON export if needed)")
+    if any(r.get("included_in_headline_rollup") is False for r in ordered[:max_rows]):
+        out.append("* excluded from headline P/L rollup (check qty / average buy)")
+
+    skipped = [r for r in result.get("rows") or [] if r.get("status") in ("skipped_no_data", "invalid_symbol_from_pdf")]
+    if skipped[:12]:
+        out.extend(sec("Needs your review (no trade view)"))
+        for r in skipped[:12]:
+            out.append(
+                f"- {r.get('input_symbol')} → {r.get('resolved_symbol')} "
+                f"[{r.get('status')}]",
+            )
+
+    if limitations:
+        out.extend(sec("Parse / input notes"))
+        for lim in limitations:
+            out.append(f"- {lim}")
+
+    out.extend(sec("Disclaimer"))
+    out.append("Not investment advice. Validate symbols, quantities, and averages against your statement.")
+    return "\n".join(line for line in out if line is not None).rstrip() + "\n"
 
 
 def portfolio_report_text(

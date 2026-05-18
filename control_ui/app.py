@@ -21,7 +21,7 @@ from breeze_session_auth import parse_api_session_from_input, upsert_env_var  # 
 from portfolio_analysis import (  # noqa: E402
     analyze_portfolio_holdings,
     collect_holdings_input,
-    portfolio_report_text,
+    portfolio_email_digest_plaintext,
 )
 from sector_registry import list_active_sector_ids  # noqa: E402
 
@@ -509,7 +509,7 @@ def run_portfolio_analysis():
             return _render_page(
                 message="No holdings could be parsed. Review format and retry with fallback text.",
                 level="warn",
-                run_output=portfolio_report_text(
+                run_output=portfolio_email_digest_plaintext(
                     source=source,
                     limitations=limitations,
                     parsed_count=0,
@@ -523,7 +523,7 @@ def run_portfolio_analysis():
         return _render_page(
             message=f"Portfolio analysis completed from {source} input.",
             level=level,
-            run_output=portfolio_report_text(
+            run_output=portfolio_email_digest_plaintext(
                 source=source,
                 limitations=limitations,
                 parsed_count=len(holdings),

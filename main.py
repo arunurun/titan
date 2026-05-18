@@ -648,7 +648,7 @@ def main() -> None:
         from portfolio_analysis import (
             analyze_portfolio_holdings,
             parse_portfolio_holdings_json,
-            portfolio_report_text,
+            portfolio_email_digest_plaintext,
         )
 
         try:
@@ -661,7 +661,7 @@ def main() -> None:
                 holdings,
                 max_positions=max(1, int(args.portfolio_max_positions)),
             )
-            report = portfolio_report_text(
+            report = portfolio_email_digest_plaintext(
                 source="workflow_portfolio_json",
                 limitations=[],
                 parsed_count=len(holdings),
