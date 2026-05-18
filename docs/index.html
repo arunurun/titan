@@ -132,7 +132,7 @@
     @media (min-width: 760px) { .row.two { grid-template-columns: 1fr 1fr; } }
   </style>
 </head>
-<body>
+<body data-page="control">
   <div class="container">
     <h1>Titan Mobile Control</h1>
     <div class="header-line"></div>
@@ -222,11 +222,13 @@
       <h3>Sector insight in app (TWA)</h3>
       <p class="small">
         Same digest text as email, read from Supabase after each successful sector/custom digest run.
+        <strong>Refresh runs &amp; insight</strong> (below) reloads GitHub and, when the latest Run Titan job succeeded, fills this box automatically.
+        <a href="./insights.html">Open full-screen insights page</a>.
         Configure the Worker with <code>SUPABASE_URL</code> + <code>SUPABASE_SERVICE_ROLE_KEY</code>, add column
         <code>full_digest</code> if needed (<code>sql/alter_llm_digest_memory_add_full_digest.sql</code>), then deploy proxy + UI.
       </p>
       <label for="sectorInsightBody">Latest saved digest for selected Sector ID</label>
-      <textarea id="sectorInsightBody" class="insight-pre" rows="14" readonly placeholder="Tap Load sector insight…"></textarea>
+      <textarea id="sectorInsightBody" class="insight-pre" rows="14" readonly placeholder="Use Refresh runs &amp; insight or Load sector insight…"></textarea>
       <button type="button" class="secondary" id="loadSectorInsightBtn">Load sector insight</button>
     </div>
 
@@ -251,11 +253,11 @@
       <h3>Latest workflow runs</h3>
       <div id="status" class="status">Loading UI…</div>
       <div class="runs-footer">
-        <button type="button" class="btn-sm" id="refreshBtn">Refresh status</button>
+        <button type="button" class="btn-sm" id="refreshBtn">Refresh runs &amp; insight</button>
       </div>
     </div>
   </div>
 
-  <script defer src="./app.js?v=20260518-12"></script>
+  <script defer src="./app.js?v=20260518-14"></script>
 </body>
 </html>
