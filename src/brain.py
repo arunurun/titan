@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import textwrap
 import time
 from collections.abc import Sequence
 from typing import Any
@@ -208,6 +209,72 @@ def generate_sector_digest_narrative(
         api_key=api_key,
         api_keys=api_keys,
     )
+
+
+_PORTFOLIO_SUMMARY_USER_PREFIX = """You are summarizing a Titan portfolio-scan JSON snapshot for internal review.
+
+Produce plain text ONLY:
+• 4 to 8 lines, each beginning with '- ' (ASCII hyphen plus space).
+• Lead with aggregate posture (weighted next-week vs intent scores, headline P/L if present, action bucket counts).
+• Call out concentrated names (high Book %) that carry exit_risk / trim labels; mention extreme tape facts (deep single-day %) when supplied.
+• If coverage_summary shows gaps (skipped symbols, invalid mappings), cite them succinctly — data may be incomplete.
+• Stay factual; do not invent figures not shown in JSON.
+• Titan protocol wording: forensic context only — never use Buy, Sell, Target, SL, Stop Loss or equivalent trade commands.
+• Prefer neutral verbs: 'elevated risk flags', 'warrants sizing review against your mandate', 'concentrated exposure under model exit_risk'.
+
+"""
+
+
+def generate_portfolio_llm_summary(
+    audit_data: dict[str, Any],
+    *,
+    model_name: str | None = None,
+    api_key: str | None = None,
+    api_keys: Sequence[str] | None = None,
+) -> str:
+    """
+    One Gemini call: short bullet summary for portfolio email digest.
+    Same compliance policy gate as narratives (forbidden wording scan + optional repair).
+    """
+    resolved_model = (model_name or os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash-lite").strip()
+    keys = _resolve_gemini_keys(api_keys, api_key)
+    compact = _env_truthy("GEMINI_COMPACT_PROMPT", default=True)
+    payload = sanitize_for_json(audit_data)
+    json_body = (
+        json.dumps(payload, default=str, separators=(",", ":"), ensure_ascii=False)
+        if compact
+        else json.dumps(payload, default=str, indent=2)
+    )
+    prompt = (
+        textwrap.dedent(_PORTFOLIO_SUMMARY_USER_PREFIX).strip()
+        + "\n\nAudit payload (JSON):\n"
+        + json_body
+        + "\n\nRespond with the bullet list only.\n"
+    )
+
+    def _gen(user_text: str) -> str:
+        try:
+            return _generate(keys, resolved_model, user_text)
+        except Exception as e:
+            raise RuntimeError(f"[Gemini] {e}") from e
+
+    text = _gen(prompt)
+    if _policy_check_passes(text):
+        return text
+    if not _env_truthy("GEMINI_COMPLIANCE_RETRY", default=True):
+        raise ValueError(
+            "[Gemini] Portfolio brief failed compliance on first draft; blocked "
+            "(GEMINI_COMPLIANCE_RETRY=false, no repair call)"
+        )
+    repair = (
+        "Your bullets failed wording policy. Rewrite keeping the same factual points "
+        "using Titan forensic language only — no forbidden trade imperatives.\n\n"
+        f"Rejected draft:\n{text}"
+    )
+    text2 = _gen(repair)
+    if _policy_check_passes(text2):
+        return text2
+    raise ValueError("[Gemini] Portfolio brief failed compliance after retry.")
 
 
 def generate_titan_narrative(

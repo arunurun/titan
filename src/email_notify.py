@@ -110,35 +110,60 @@ def _render_success_html(post_text: str, *, subject: str) -> str:
             blocks.append(card(name, body, color=badge_color))
             continue
         if name.lower() == "per-symbol metrics":
-            rows: list[str] = []
+            pipe_rows: list[list[str]] = []
+            other_lines: list[str] = []
             for item in items:
                 if item.startswith("--- ") and item.endswith(" ---"):
                     continue
                 if "|" in item:
-                    cols = [escape(x.strip()) for x in item.split("|")]
-                    symbol = cols[0] if cols else ""
-                    facts = "<br>".join(cols[1:])
-                    rows.append(
+                    pipe_rows.append([x.strip() for x in item.split("|")])
+                else:
+                    other_lines.append(item)
+            parts: list[str] = []
+            if pipe_rows and len({len(r) for r in pipe_rows}) == 1:
+                ncol = len(pipe_rows[0])
+                if ncol >= 4:
+                    thead = "".join(
+                        f'<th style="text-align:left;padding:8px;border-bottom:2px solid #ddd;font-size:13px;">{escape(h)}</th>'
+                        for h in pipe_rows[0]
+                    )
+                    tbody = "".join(
                         "<tr>"
-                        f'<td style="padding:8px;border-bottom:1px solid #eee;vertical-align:top;font-weight:600;">{symbol}</td>'
-                        f'<td style="padding:8px;border-bottom:1px solid #eee;vertical-align:top;font-family:monospace;font-size:12px;">{facts}</td>'
-                        "</tr>"
+                        + "".join(
+                            f'<td style="padding:8px;border-bottom:1px solid #eee;font-size:12px;vertical-align:top;">{escape(cell)}</td>'
+                            for cell in row
+                        )
+                        + "</tr>"
+                        for row in pipe_rows[1:]
+                    )
+                    parts.append(
+                        '<table style="width:100%;border-collapse:collapse;margin:0;">'
+                        f"<thead><tr>{thead}</tr></thead><tbody>{tbody}</tbody></table>"
                     )
                 else:
-                    rows.append(
-                        "<tr>"
-                        '<td colspan="2" style="padding:8px;border-bottom:1px solid #eee;">'
-                        f"{escape(item)}</td></tr>"
+                    legacy_rows = []
+                    for row in pipe_rows:
+                        cols = [escape(x) for x in row]
+                        facts = "<br>".join(cols[1:]) if len(cols) > 1 else ""
+                        legacy_rows.append(
+                            "<tr>"
+                            f'<td style="padding:8px;border-bottom:1px solid #eee;vertical-align:top;font-weight:600;">{cols[0]}</td>'
+                            f'<td style="padding:8px;border-bottom:1px solid #eee;vertical-align:top;font-family:monospace;font-size:12px;">{facts}</td>'
+                            "</tr>"
+                        )
+                    parts.append(
+                        '<table style="width:100%;border-collapse:collapse;">'
+                        "<thead><tr>"
+                        '<th style="text-align:left;padding:8px;border-bottom:2px solid #ddd;">Symbol</th>'
+                        '<th style="text-align:left;padding:8px;border-bottom:2px solid #ddd;">Metrics</th>'
+                        "</tr></thead>"
+                        f"<tbody>{''.join(legacy_rows)}</tbody></table>"
                     )
-            table = (
-                '<table style="width:100%;border-collapse:collapse;">'
-                "<thead><tr>"
-                '<th style="text-align:left;padding:8px;border-bottom:2px solid #ddd;">Symbol</th>'
-                '<th style="text-align:left;padding:8px;border-bottom:2px solid #ddd;">Metrics</th>'
-                "</tr></thead>"
-                f"<tbody>{''.join(rows)}</tbody></table>"
-            )
-            blocks.append(card(name, table, color=color))
+            for note in other_lines:
+                parts.append(
+                    f'<p style="margin:12px 0 0;color:#5f6368;font-size:12px;line-height:1.4;">{escape(note)}</p>'
+                )
+            blocks.append(card(name, "".join(parts) if parts else "<p>No data.</p>", color=color))
             continue
         if all(":" in item for item in items):
             rows = []

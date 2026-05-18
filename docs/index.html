@@ -119,6 +119,13 @@
       overflow: auto;
       font-size: 0.9rem;
     }
+    textarea.insight-pre {
+      min-height: 220px;
+      max-height: 480px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.8rem;
+      line-height: 1.35;
+    }
     .small { font-size: 0.82rem; color: var(--muted); }
     .row { display: grid; grid-template-columns: 1fr; gap: 8px; }
     .hidden { display: none; }
@@ -212,6 +219,18 @@
     </div>
 
     <div class="card">
+      <h3>Sector insight in app (TWA)</h3>
+      <p class="small">
+        Same digest text as email, read from Supabase after each successful sector/custom digest run.
+        Configure the Worker with <code>SUPABASE_URL</code> + <code>SUPABASE_SERVICE_ROLE_KEY</code>, add column
+        <code>full_digest</code> if needed (<code>sql/alter_llm_digest_memory_add_full_digest.sql</code>), then deploy proxy + UI.
+      </p>
+      <label for="sectorInsightBody">Latest saved digest for selected Sector ID</label>
+      <textarea id="sectorInsightBody" class="insight-pre" rows="14" readonly placeholder="Tap Load sector insight…"></textarea>
+      <button type="button" class="secondary" id="loadSectorInsightBtn">Load sector insight</button>
+    </div>
+
+    <div class="card">
       <h3>Portfolio PDF Quick Scan</h3>
       <p class="small">
         Upload a portfolio PDF (or paste holdings text). Parsed on-device as <code>symbol, quantity, avg buy price</code>.
@@ -237,6 +256,6 @@
     </div>
   </div>
 
-  <script defer src="./app.js?v=20260518-11"></script>
+  <script defer src="./app.js?v=20260518-12"></script>
 </body>
 </html>
