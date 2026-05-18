@@ -26,7 +26,9 @@ These have `data/sector_allowlists/<sector_key>.json` and were processed with `s
 
 ## Operations: ranking + winners + Titan
 
-For any sector after curation:
+GitHub Action **`refresh_sector_rankings_weekly.yml`** runs **every Saturday** (UTC cron) and refreshes all sectors via `scripts/refresh_all_sector_rankings.py` (default `--top-n 10`). Weekday **Run Titan** dispatches should use **priority** scope so picks come from that persisted list (see control UI / `run_titan_now.yml`).
+
+For a manual single-sector refresh:
 
 ```powershell
 $env:BREEZE_SESSION_TOKEN = (python scripts/fetch_breeze_session_from_supabase.py)
@@ -35,7 +37,7 @@ python scripts/refresh_sector_daily_winners.py --sector <sector_key> --top-n 10
 python main.py --sector <sector_key> --sector-priority-only --sector-priority-top-n 10 --sector-workers 1
 ```
 
-Round 3 sectors may still need ranking refresh + Titan after you run the above with a valid Breeze session.
+Use the scheduled Saturday job for a full refresh; run the block above only when you need an ad-hoc update for one sector.
 
 ## Notes
 
