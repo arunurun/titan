@@ -31,7 +31,7 @@ const SECTOR_OPTIONS = [
   "telecom",
   "textiles",
 ];
-const RUN_MODES = new Set(["sector", "all_sectors", "live", "custom", "portfolio"]);
+const RUN_MODES = new Set(["sector", "all_sectors", "custom"]);
 const TITAN_SCOPES = new Set(["full", "priority"]);
 const EXCHANGE_OPTIONS = new Set(["NSE", "BSE"]);
 const CUSTOM_SYMBOL_TOKEN_RE = /^[A-Z0-9&._-]{1,25}$/;
@@ -579,9 +579,6 @@ function buildRunTitanInputs() {
       }
     }
     inputs.priority_top_n = ptn;
-  }
-  if (mode === "portfolio") {
-    throw new Error("Use the 'Portfolio PDF Quick Scan' section for portfolio mode.");
   }
 
   if (mode === "custom") {
