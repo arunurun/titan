@@ -287,7 +287,20 @@ def test_run_sector_live_digest_one_gemini_call(mock_load, mock_metrics, mock_em
             "brain.generate_sector_digest_narrative", return_value="One combined post"
         ) as mock_digest:
             with patch("supabase_log.save_audit_log") as mock_save:
-                run_sector_live("defence", max_workers=2, digest=True)
+                with patch(
+                    "analysis_store.persist_sector_run_analytics",
+                    return_value={"persisted": True, "run_id": "test-run-digest"},
+                ):
+                    with patch("analysis_store.update_sector_period_rollups"):
+                        with patch(
+                            "analysis_store.build_comparison_payload",
+                            return_value={"enabled": False},
+                        ):
+                            with patch(
+                                "analysis_store.persist_llm_digest_memory",
+                                return_value={"persisted": True},
+                            ):
+                                run_sector_live("defence", max_workers=2, digest=True)
 
     mock_digest.assert_called_once()
     assert mock_save.call_count == 2
@@ -344,12 +357,25 @@ def test_run_sector_live_macro_guardrail_applied(mock_load, mock_metrics, mock_e
     with patch("breeze_client.create_breeze_session", return_value=MagicMock()):
         with patch("brain.generate_sector_digest_narrative", return_value="One combined post"):
             with patch("supabase_log.save_audit_log"):
-                run_sector_live(
-                    "defence",
-                    max_workers=2,
-                    digest=True,
-                    macro_snapshot={"gift_nifty_change_pct": -0.8, "india_vix": 17.5},
-                )
+                with patch(
+                    "analysis_store.persist_sector_run_analytics",
+                    return_value={"persisted": True, "run_id": "test-run-macro"},
+                ):
+                    with patch("analysis_store.update_sector_period_rollups"):
+                        with patch(
+                            "analysis_store.build_comparison_payload",
+                            return_value={"enabled": False},
+                        ):
+                            with patch(
+                                "analysis_store.persist_llm_digest_memory",
+                                return_value={"persisted": True},
+                            ):
+                                run_sector_live(
+                                    "defence",
+                                    max_workers=2,
+                                    digest=True,
+                                    macro_snapshot={"gift_nifty_change_pct": -0.8, "india_vix": 17.5},
+                                )
 
     body = mock_email.call_args[0][0]
     assert "Macro guardrail applied: yes" in body

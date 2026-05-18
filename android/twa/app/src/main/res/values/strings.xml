@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Titan Control</string>
+    <!-- Must match the host where you deploy docs/ (see README + Digital Asset Links). -->
+    <string name="twa_default_url">https://titan-ui.arunjain-real.workers.dev</string>
+</resources>
