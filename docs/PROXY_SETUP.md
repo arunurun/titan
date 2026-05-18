@@ -37,7 +37,7 @@ It requires a small backend proxy that stores GitHub PAT server-side.
 
 - `404 Not Found`
   - Cause: `PROXY_BASE` points to a URL that is not the backend Worker API.
-  - Fix: set `PROXY_BASE` to the Worker base URL that exposes `/health`, `/dispatch`, `/runs`, `/insights/latest`, then redeploy UI.
+  - Fix: set `PROXY_BASE` to the Worker base URL that exposes `/health`, `/dispatch`, `/runs`, `/workflow-run/{id}`, `/insights/latest`, then redeploy UI.
 - `401 Auth/permission error from GitHub`
   - Cause: invalid/expired `GITHUB_PAT` in Worker secrets.
   - Fix: rotate `GITHUB_PAT` in Cloudflare Worker secrets.
@@ -56,6 +56,8 @@ The UI uses a hardcoded `PROXY_BASE` constant and no longer requires manual prox
   - body: `{ "workflow": "<filename>", "ref": "main", "inputs": { ... } }`
 - `GET /runs?limit=20`
   - returns GitHub workflow runs payload
+- `GET /workflow-run/{id}`
+  - returns a small JSON view of one GitHub Actions run (including `inputs` for workflow_dispatch), used to align a completed run with a Supabase sector digest
 - `GET /insights/latest?sector=<id>`
   - returns `{ "ok": true, "insight": null }` or `{ "ok": true, "insight": { "run_id", "sector", "recorded_at", "text" } }`
   - requires Worker secrets `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`

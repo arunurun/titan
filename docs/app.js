@@ -86,7 +86,7 @@ function normalizeProxyBase(raw = PROXY_BASE) {
   parsed.search = "";
   parsed.hash = "";
   const parts = parsed.pathname.split("/").filter(Boolean);
-  const knownApiSuffixes = new Set(["health", "runs", "dispatch", "insights", "latest"]);
+  const knownApiSuffixes = new Set(["health", "runs", "dispatch", "insights", "latest", "workflow-run"]);
   while (parts.length && knownApiSuffixes.has(parts[parts.length - 1].toLowerCase())) {
     parts.pop();
   }
@@ -134,8 +134,11 @@ function setSectorModeUi(mode) {
   }
 }
 
-function initSectorOptions() {
-  const sectorEl = el("sectorId");
+/** Matches Worker SECTOR_ID_RE for workflow + Supabase sector keys. */
+const SECTOR_INPUT_RE = /^[a-z0-9_]{1,64}$/;
+
+function initSectorOptions(selectId = "sectorId") {
+  const sectorEl = el(selectId);
   if (!sectorEl) return;
   sectorEl.innerHTML = "";
   for (const sid of SECTOR_OPTIONS) {
@@ -152,7 +155,7 @@ function classifyProxyError(status, responseText) {
   if (status === 404) {
     return (
       "404 from proxy endpoint.\n" +
-      "This URL does not expose Titan API routes (/health, /dispatch, /runs, /insights/latest).\n" +
+      "This URL does not expose Titan API routes (/health, /dispatch, /runs, /workflow-run/{id}, /insights/latest).\n" +
       "Use the backend Worker URL, not the UI page URL."
     );
   }
@@ -535,41 +538,137 @@ function buildRunTitanInputs() {
   return inputs;
 }
 
+async function fetchInsightTextForSector(sectorId) {
+  const sid = String(sectorId || "").trim().toLowerCase();
+  if (!sid || !SECTOR_INPUT_RE.test(sid)) return null;
+  const data = await ghApi(`/insights/latest?sector=${encodeURIComponent(sid)}`);
+  if (!data || data.ok !== true) {
+    throw new Error("Unexpected response from /insights/latest.");
+  }
+  const insight = data.insight;
+  if (!insight || !String(insight.text || "").trim()) return null;
+  return insight;
+}
+
+function applyInsightToTextarea(textareaEl, insight, sectorLabel) {
+  if (!textareaEl || !insight) return;
+  const when = insight.recorded_at ? `Recorded: ${insight.recorded_at}\n` : "";
+  const lab = sectorLabel || insight.sector || "";
+  textareaEl.value = `${when}Sector: ${lab}\nRun: ${insight.run_id || "n/a"}\n\n${insight.text}`;
+}
+
+function syncSectorDropdowns(sectorId) {
+  const sid = String(sectorId || "").trim().toLowerCase();
+  if (!sid || !SECTOR_INPUT_RE.test(sid)) return;
+  for (const id of ["sectorId", "insightSectorId"]) {
+    const sel = el(id);
+    if (!sel) continue;
+    const ok = [...sel.options].some((o) => o.value === sid);
+    if (ok) sel.value = sid;
+  }
+}
+
 async function loadLatestSectorInsight() {
   const sectorId = (el("sectorId")?.value || "").trim().toLowerCase();
   if (!sectorId) {
     throw new Error("Pick a sector in the Sector ID dropdown.");
   }
-  const data = await ghApi(`/insights/latest?sector=${encodeURIComponent(sectorId)}`);
-  if (!data || data.ok !== true) {
-    throw new Error("Unexpected response from /insights/latest.");
-  }
-  const insight = data.insight;
   const outEl = el("sectorInsightBody");
-  if (!outEl) return insight;
-  if (!insight || !String(insight.text || "").trim()) {
-    outEl.value = "";
+  const ins = await fetchInsightTextForSector(sectorId);
+  if (!ins) {
+    if (outEl) outEl.value = "";
     return null;
   }
-  const when = insight.recorded_at ? `Recorded: ${insight.recorded_at}\n` : "";
-  outEl.value = `${when}Run: ${insight.run_id || "n/a"}\n\n${insight.text}`;
-  return insight;
+  applyInsightToTextarea(outEl, ins, sectorId);
+  return { ...ins, sector: sectorId };
 }
 
-async function loadLatestRuns() {
-  const runs = await ghApi("/runs?limit=20");
-  const relevant = (runs.workflow_runs || []).filter((r) => {
-    const name = r.path.split("/").pop();
+/**
+ * Lists recent workflow runs; if the latest Run Titan Now job completed successfully,
+ * fetches workflow inputs and loads the matching Supabase digest into the insight textarea.
+ */
+async function refreshRunsAndMaybeLoadInsight(insightTextareaId = "sectorInsightBody") {
+  await checkConnection();
+  const runs = await ghApi("/runs?limit=40");
+  const workflowRuns = runs.workflow_runs || [];
+  const titanFile = WORKFLOWS.runTitan;
+  const titanRuns = workflowRuns.filter((r) => (r.path || "").split("/").pop() === titanFile);
+  const controlRuns = workflowRuns.filter((r) => {
+    const name = (r.path || "").split("/").pop();
     return Object.values(WORKFLOWS).includes(name);
   });
-  if (!relevant.length) {
-    setStatus("No recent runs for control workflows.");
-    return;
-  }
-  const lines = relevant.slice(0, 10).map(
+  const listSource = controlRuns.length ? controlRuns : workflowRuns;
+  const lines = listSource.slice(0, 10).map(
     (r) => `${r.status}/${r.conclusion || "-"} | ${r.name} | #${r.run_number} | ${r.html_url}`,
   );
-  setStatus(lines.join("\n"));
+  const insightTextarea = insightTextareaId ? el(insightTextareaId) : null;
+  let insightNote = "";
+
+  const latestTitan = titanRuns[0];
+  if (!latestTitan) {
+    insightNote = "\n\nNo “Run Titan Now” workflow in the recent list.";
+  } else if (latestTitan.status !== "completed") {
+    insightNote = `\n\nLatest Run Titan: ${latestTitan.status} (#${latestTitan.run_number}). Insight loads when status is completed.`;
+    if (insightTextarea) insightTextarea.value = "";
+  } else if (latestTitan.conclusion !== "success") {
+    insightNote = `\n\nLatest Run Titan finished with conclusion “${latestTitan.conclusion || "unknown"}”. No insight pulled.`;
+    if (insightTextarea) insightTextarea.value = "";
+  } else {
+    const detail = await ghApi(`/workflow-run/${latestTitan.id}`);
+    const inputs = detail.inputs || {};
+    const mode = String(inputs.mode || "").trim().toLowerCase();
+    let sectorToLoad = String(inputs.sector_id || "").trim().toLowerCase();
+
+    if (mode === "sector" || mode === "custom") {
+      syncSectorDropdowns(sectorToLoad);
+    } else {
+      const fromUi = (el("insightSectorId") || el("sectorId"))?.value || "";
+      sectorToLoad = String(fromUi).trim().toLowerCase();
+    }
+
+    if (mode === "portfolio" || mode === "live") {
+      insightNote = `\n\nLatest run mode is “${mode}”. Supabase digest auto-load applies to sector/custom and all_sectors (using the sector you pick).`;
+      if (insightTextarea) insightTextarea.value = "";
+    } else if (!sectorToLoad || !SECTOR_INPUT_RE.test(sectorToLoad)) {
+      insightNote =
+        "\n\nPick a valid sector in the Sector ID dropdown, then tap Refresh again to load the latest Supabase digest for that sector.";
+      if (insightTextarea) insightTextarea.value = "";
+    } else {
+      const ins = await fetchInsightTextForSector(sectorToLoad);
+      if (ins && insightTextarea) {
+        applyInsightToTextarea(insightTextarea, ins, sectorToLoad);
+        insightNote = `\n\nSupabase digest loaded for “${sectorToLoad}” (after successful Run Titan #${latestTitan.run_number}, mode=${mode || "?"}).`;
+      } else {
+        insightNote = `\n\nNo Supabase row yet for “${sectorToLoad}” (or persist disabled). Workflow succeeded — wait for DB or run sql/alter_llm_digest_memory_add_full_digest.sql if needed.`;
+        if (insightTextarea) insightTextarea.value = "";
+      }
+    }
+  }
+  setStatus(lines.join("\n") + insightNote);
+}
+
+function initProxyLine() {
+  const proxyEl = el("proxyBase");
+  if (proxyEl) {
+    proxyEl.textContent = normalizeProxyBase(PROXY_BASE);
+  }
+}
+
+function initInsightsPage() {
+  initProxyLine();
+  initSectorOptions("insightSectorId");
+  const rb = el("insightPageRefreshBtn");
+  if (rb) {
+    rb.addEventListener("click", async () => {
+      try {
+        setWorking("Refresh runs & insight");
+        await refreshRunsAndMaybeLoadInsight("insightDigestBody");
+      } catch (e) {
+        setStatus(`Refresh failed:\n${e.message}`);
+      }
+    });
+  }
+  setStatus("Insights page ready. Pick a sector if needed, then Refresh runs & insight.");
 }
 
 function wireEvents() {
@@ -615,12 +714,12 @@ function wireEvents() {
         await checkConnection();
         let suffix = "";
         if (inputs.mode === "sector") {
-          suffix = `After the GitHub Action finishes, tap **Load sector insight** below for “${inputs.sector_id}”.`;
+          suffix = `When the GitHub Action completes, tap **Refresh runs & insight** below to load the digest for “${inputs.sector_id}”.`;
         } else if (inputs.mode === "custom") {
-          suffix = `After the run finishes, tap **Load sector insight** for label “${inputs.sector_id}”.`;
+          suffix = `When the run completes, tap **Refresh runs & insight** to load the digest for label “${inputs.sector_id}”.`;
         } else if (inputs.mode === "all_sectors") {
           suffix =
-            "After runs finish, pick each sector in the dropdown and tap **Load sector insight** (one sector at a time).";
+            "When the job completes, choose a sector and tap **Refresh runs & insight** to load that sector’s latest digest from Supabase.";
         }
         await dispatchWorkflow(WORKFLOWS.runTitan, inputs, suffix);
       } catch (e) {
@@ -661,8 +760,8 @@ function wireEvents() {
   if (refreshBtn) {
     refreshBtn.addEventListener("click", async () => {
       try {
-        setWorking("Refresh status");
-        await loadLatestRuns();
+        setWorking("Refresh runs & insight");
+        await refreshRunsAndMaybeLoadInsight("sectorInsightBody");
       } catch (e) {
         setStatus(`Refresh failed:\n${e.message}`);
       }
@@ -722,21 +821,24 @@ function wireEvents() {
 }
 
 function initStorage() {
-  initSectorOptions();
-  const proxyEl = el("proxyBase");
-  if (proxyEl) {
-    proxyEl.textContent = normalizeProxyBase(PROXY_BASE);
-  }
+  initProxyLine();
+  initSectorOptions("sectorId");
   const runModeEl = el("runMode");
   if (runModeEl) {
     setSectorModeUi(runModeEl.value);
   }
 }
 
+const UI_PAGE = document.body.getAttribute("data-page") || "control";
+
 try {
-  wireEvents();
-  initStorage();
-  setStatus("UI ready.");
+  if (UI_PAGE === "insights") {
+    initInsightsPage();
+  } else {
+    wireEvents();
+    initStorage();
+    setStatus("UI ready.");
+  }
 } catch (e) {
   setStatus(`UI init failed:\n${e.message}`);
 }

@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Titan — Sector insights</title>
+  <style>
+    :root {
+      --g-blue: #4285f4;
+      --g-red: #ea4335;
+      --g-yellow: #fbbc05;
+      --g-green: #34a853;
+      --text: #202124;
+      --muted: #5f6368;
+      --border: #e0e3e7;
+      --surface: #ffffff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 12px;
+      background: #fff;
+      color: var(--text);
+      font-family: Arial, sans-serif;
+    }
+    .container { max-width: 760px; margin: 0 auto; }
+    .header-line {
+      height: 4px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--g-blue) 0 25%, var(--g-red) 25% 50%, var(--g-yellow) 50% 75%, var(--g-green) 75% 100%);
+      margin-bottom: 12px;
+    }
+    h1 { font-size: 1.35rem; margin: 0 0 8px; }
+    .muted { color: var(--muted); font-size: 0.92rem; margin: 0 0 12px; }
+    .card {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 12px;
+      margin-bottom: 12px;
+      background: var(--surface);
+    }
+    h3 { margin: 0 0 10px; font-size: 1.05rem; }
+    label { display: block; margin-top: 8px; font-size: 0.9rem; }
+    select, textarea, button {
+      width: 100%;
+      margin-top: 6px;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 0.95rem;
+    }
+    button {
+      border: none;
+      border-radius: 999px;
+      padding: 11px 14px;
+      background: var(--g-blue);
+      color: #fff;
+      font-weight: bold;
+      cursor: pointer;
+    }
+    button.secondary { background: var(--g-green); }
+    .nav-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+    .nav-row a {
+      color: var(--g-blue);
+      font-weight: 600;
+      text-decoration: none;
+    }
+    .nav-row a:hover { text-decoration: underline; }
+    .proxy-line {
+      margin-top: 8px;
+      font-size: 0.78rem;
+      color: var(--muted);
+      word-break: break-all;
+    }
+    .status {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #f8f9fa;
+      padding: 10px;
+      white-space: pre-wrap;
+      max-height: 200px;
+      overflow: auto;
+      font-size: 0.88rem;
+    }
+    textarea.digest {
+      min-height: 55vh;
+      max-height: 70vh;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.8rem;
+      line-height: 1.35;
+    }
+  </style>
+</head>
+<body data-page="insights">
+  <div class="container">
+    <div class="nav-row">
+      <a href="./index.html">← Control panel</a>
+    </div>
+    <h1>Sector insights</h1>
+    <div class="header-line"></div>
+    <p class="muted">
+      When the latest <strong>Run Titan Now</strong> job has finished successfully, <strong>Refresh runs &amp; insight</strong>
+      loads workflow inputs and pulls the latest digest from Supabase for the matching sector (or the sector you select for <code>all_sectors</code>).
+    </p>
+
+    <div class="card">
+      <h3>Connection</h3>
+      <p class="proxy-line">Proxy: <code id="proxyBase">loading…</code></p>
+    </div>
+
+    <div class="card">
+      <h3>Sector &amp; refresh</h3>
+      <label for="insightSectorId">Sector ID</label>
+      <select id="insightSectorId"></select>
+      <button type="button" class="secondary" id="insightPageRefreshBtn">Refresh runs &amp; insight</button>
+    </div>
+
+    <div class="card">
+      <h3>Digest</h3>
+      <label for="insightDigestBody">Latest saved digest</label>
+      <textarea id="insightDigestBody" class="digest" rows="20" readonly placeholder="Tap Refresh runs &amp; insight…"></textarea>
+    </div>
+
+    <div class="card">
+      <h3>Status</h3>
+      <div id="status" class="status">Loading…</div>
+    </div>
+  </div>
+
+  <script defer src="./app.js?v=20260518-14"></script>
+</body>
+</html>

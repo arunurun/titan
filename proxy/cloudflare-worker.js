@@ -378,6 +378,27 @@ export default {
         return json(data);
       }
 
+      const workflowRunMatch = path.match(/^\/workflow-run\/(\d+)$/);
+      if (isGetLike && workflowRunMatch) {
+        const runId = workflowRunMatch[1];
+        const data = await gh(env, `/actions/runs/${runId}`);
+        const inputs = data.inputs && typeof data.inputs === "object" ? data.inputs : {};
+        const safe = {
+          id: data.id,
+          name: data.name,
+          status: data.status,
+          conclusion: data.conclusion,
+          html_url: data.html_url,
+          run_number: data.run_number,
+          created_at: data.created_at,
+          updated_at: data.updated_at,
+          display_title: data.display_title,
+          path: data.path,
+          inputs,
+        };
+        return json(safe);
+      }
+
       if (isGetLike && path === "/health") {
         const supabaseUrl = Boolean(String(env.SUPABASE_URL || "").trim());
         const supabaseKey = Boolean(String(env.SUPABASE_SERVICE_ROLE_KEY || "").trim());
