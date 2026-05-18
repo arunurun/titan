@@ -20,10 +20,22 @@ def _smtp_config() -> dict[str, object] | None:
     host = os.environ.get("SMTP_HOST", "").strip()
     raw_to = os.environ.get("EMAIL_TO", "").strip()
     from_addr = os.environ.get("EMAIL_FROM", "").strip()
-    if not host or not raw_to or not from_addr:
+    missing: list[str] = []
+    if not host:
+        missing.append("SMTP_HOST")
+    if not from_addr:
+        missing.append("EMAIL_FROM")
+    if not raw_to:
+        missing.append("EMAIL_TO")
+    if missing:
+        logger.info(
+            "Email notify skipped: set repository/env secrets %s (and SMTP_USER/SMTP_PASSWORD if required).",
+            ", ".join(missing),
+        )
         return None
     to_addrs = [x.strip() for x in raw_to.split(",") if x.strip()]
     if not to_addrs:
+        logger.info("Email notify skipped: EMAIL_TO has no addresses.")
         return None
     user = os.environ.get("SMTP_USER", "").strip()
     # Gmail app passwords are often pasted as "xxxx xxxx xxxx xxxx"; SMTP expects no spaces.
@@ -236,7 +248,6 @@ def send_success_post_email(post_text: str, *, subject_prefix: str = "Titan V12.
     """
     cfg = _smtp_config()
     if not cfg:
-        logger.info("Email notify skipped (set SMTP_HOST, EMAIL_FROM, EMAIL_TO, and password if required).")
         return False
 
     from_addr = str(cfg["from"])

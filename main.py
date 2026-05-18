@@ -668,7 +668,14 @@ def main() -> None:
                 result=result,
             )
             print(report)
-            send_success_post_email(report, subject_prefix="Titan V12.0 portfolio")
+            emailed_ok = send_success_post_email(report, subject_prefix="Titan V12.0 portfolio")
+            if not emailed_ok:
+                logger.warning(
+                    "Portfolio run finished but success email was not sent. "
+                    "If this is GitHub Actions, add repository secrets: SMTP_HOST, EMAIL_FROM, EMAIL_TO; "
+                    "plus SMTP_USER and SMTP_PASSWORD when your provider requires login. "
+                    "See the workflow log for lines starting with 'Email notify skipped' or 'SMTP send failed'."
+                )
         except Exception as e:
             summary = str(e).strip().split("\n", 1)[0].strip()
             if len(summary) > 180:
