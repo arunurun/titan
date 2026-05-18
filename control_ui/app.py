@@ -13,6 +13,7 @@ from flask import Flask, render_template_string, request
 from supabase import create_client
 
 ROOT = Path(__file__).resolve().parent.parent
+PORTFOLIO_MAX_ANALYSIS_POSITIONS = 75
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
@@ -173,14 +174,6 @@ TEMPLATE = """
             <option value="{{ sid }}" {% if selected_sector == sid %}selected{% endif %}>{{ sid }}</option>
           {% endfor %}
         </select>
-        <label>Priority top N (optional; blank = 10 per sector, 5 when running all sectors)</label>
-        <input name="priority_top_n" value="{{ priority_top_n_field }}" placeholder="default by mode" />
-        <label>Max symbols (optional; full mode only; cap universe)</label>
-        <input name="max_symbols" value="" placeholder="all" />
-        <label>Workers (optional)</label>
-        <input name="workers" value="2" />
-        <label>All-sector workers (optional; mode = all sectors)</label>
-        <input name="all_sector_workers" value="20" />
         <button type="submit">Run Analysis</button>
       </form>
     </div>
@@ -224,8 +217,7 @@ TEMPLATE = """
         <input name="portfolio_pdf_path" value="{{ portfolio_pdf_path or '' }}" placeholder="C:\\path\\to\\holdings.pdf" />
         <label>Fallback pasted holdings text (optional but recommended)</label>
         <textarea name="portfolio_holdings_text" rows="6" placeholder="NSE:RELIANCE, 10&#10;INFY 5&#10;BSE:TCS, 3">{{ portfolio_holdings_text or '' }}</textarea>
-        <label>Max positions to analyze</label>
-        <input name="portfolio_max_positions" value="{{ portfolio_max_positions or '20' }}" />
+        <p class="hint">Analyzes up to {{ portfolio_max_analysis_positions }} holdings per run.</p>
         <button type="submit">Run Portfolio Summary</button>
       </form>
     </div>
@@ -296,11 +288,7 @@ def _persist_token_to_supabase(token: str) -> None:
 def _run_titan_now(
     mode: str,
     sector_id: str,
-    max_symbols: str,
-    workers: str,
-    all_sector_workers: str,
     titan_scope: str,
-    priority_top_n: str,
 ) -> tuple[int, str]:
     mode = (mode or "sector").strip().lower()
     scope = (titan_scope or "priority").strip().lower()
@@ -314,24 +302,12 @@ def _run_titan_now(
     elif mode == "all_sectors":
         cmd.extend(["--all-sectors", "--exclude-sectors", "unknown,non_equity"])
         if scope == "priority":
-            topn = (priority_top_n or "").strip() or "5"
-            cmd.extend(["--sector-priority-only", "--sector-priority-top-n", topn])
-        if (max_symbols or "").strip():
-            cmd.extend(["--sector-max-symbols", max_symbols.strip()])
-        if (workers or "").strip():
-            cmd.extend(["--sector-workers", workers.strip()])
-        if (all_sector_workers or "").strip():
-            cmd.extend(["--all-sector-workers", all_sector_workers.strip()])
+            cmd.extend(["--sector-priority-only", "--sector-priority-top-n", "10"])
     else:
         sid = (sector_id or "").strip() or "defence"
         cmd.extend(["--sector", sid, "--sector-digest"])
         if scope == "priority":
-            topn = (priority_top_n or "").strip() or "10"
-            cmd.extend(["--sector-priority-only", "--sector-priority-top-n", topn])
-        if (max_symbols or "").strip():
-            cmd.extend(["--sector-max-symbols", max_symbols.strip()])
-        if (workers or "").strip():
-            cmd.extend(["--sector-workers", workers.strip()])
+            cmd.extend(["--sector-priority-only", "--sector-priority-top-n", "10"])
 
     proc = subprocess.run(
         cmd,
@@ -392,11 +368,9 @@ def _render_page(**kwargs):
     run_mode = str(kwargs.pop("run_mode", None) or "sector")
     portfolio_pdf_path = str(kwargs.pop("portfolio_pdf_path", None) or "")
     portfolio_holdings_text = str(kwargs.pop("portfolio_holdings_text", None) or "")
-    portfolio_max_positions = str(kwargs.pop("portfolio_max_positions", None) or "20")
     titan_scope = str(kwargs.pop("titan_scope", None) or "priority")
     if titan_scope not in ("full", "priority"):
         titan_scope = "priority"
-    priority_top_n_field = str(kwargs.pop("priority_top_n_field", None) or "")
     breeze_login_url = str(kwargs.pop("breeze_login_url", None) or "")
     return render_template_string(
         TEMPLATE,
@@ -404,11 +378,10 @@ def _render_page(**kwargs):
         selected_sector=selected_sector,
         run_mode=run_mode,
         titan_scope=titan_scope,
-        priority_top_n_field=priority_top_n_field,
         breeze_login_url=breeze_login_url,
         portfolio_pdf_path=portfolio_pdf_path,
         portfolio_holdings_text=portfolio_holdings_text,
-        portfolio_max_positions=portfolio_max_positions,
+        portfolio_max_analysis_positions=PORTFOLIO_MAX_ANALYSIS_POSITIONS,
         **kwargs,
     )
 
@@ -424,20 +397,12 @@ def run_analysis():
     load_dotenv(ROOT / ".env", override=False)
     mode = request.form.get("mode", "sector").strip()
     sector_id = request.form.get("sector_id", "defence")
-    max_symbols = request.form.get("max_symbols", "")
-    workers = request.form.get("workers", "")
-    all_sector_workers = request.form.get("all_sector_workers", "")
     titan_scope = request.form.get("titan_scope", "priority").strip()
-    priority_top_n = request.form.get("priority_top_n", "")
     try:
         code, output = _run_titan_now(
             mode,
             sector_id,
-            max_symbols,
-            workers,
-            all_sector_workers,
             titan_scope,
-            priority_top_n,
         )
         level = "ok" if code == 0 else "err"
         msg = f"Analysis finished with exit code {code}."
@@ -448,7 +413,6 @@ def run_analysis():
             run_mode=mode,
             selected_sector=sector_id,
             titan_scope=titan_scope,
-            priority_top_n_field=priority_top_n,
             breeze_login_url=_safe_breeze_login_url(),
         )
     except Exception as exc:  # noqa: BLE001
@@ -458,7 +422,6 @@ def run_analysis():
             run_mode=mode,
             selected_sector=sector_id,
             titan_scope=titan_scope,
-            priority_top_n_field=priority_top_n,
             breeze_login_url=_safe_breeze_login_url(),
         )
 
@@ -522,13 +485,7 @@ def run_portfolio_analysis():
     pdf_path = (request.form.get("portfolio_pdf_path") or "").strip()
     uploaded = request.files.get("portfolio_pdf_file")
     holdings_text = request.form.get("portfolio_holdings_text", "")
-    max_positions_raw = (request.form.get("portfolio_max_positions") or "20").strip()
-    try:
-        max_positions = int(max_positions_raw)
-    except ValueError:
-        max_positions = 20
-    max_positions = max(1, min(max_positions, 100))
-
+    max_positions = PORTFOLIO_MAX_ANALYSIS_POSITIONS
     tmp_pdf_path: str | None = None
     try:
         if uploaded and uploaded.filename:
@@ -538,7 +495,6 @@ def run_portfolio_analysis():
                     level="err",
                     portfolio_pdf_path=pdf_path,
                     portfolio_holdings_text=holdings_text,
-                    portfolio_max_positions=str(max_positions),
                 )
             with tempfile.NamedTemporaryFile(prefix="titan_portfolio_", suffix=".pdf", delete=False) as tmp:
                 uploaded.save(tmp.name)
@@ -561,7 +517,6 @@ def run_portfolio_analysis():
                 ),
                 portfolio_pdf_path=pdf_path,
                 portfolio_holdings_text=holdings_text,
-                portfolio_max_positions=str(max_positions),
             )
         result = analyze_portfolio_holdings(holdings, max_positions=max_positions)
         level = "ok" if result.get("summary", {}).get("analyzed_positions", 0) > 0 else "warn"
@@ -576,7 +531,6 @@ def run_portfolio_analysis():
             ),
             portfolio_pdf_path=pdf_path,
             portfolio_holdings_text=holdings_text,
-            portfolio_max_positions=str(max_positions),
         )
     except Exception as exc:  # noqa: BLE001
         return _render_page(
@@ -584,7 +538,6 @@ def run_portfolio_analysis():
             level="err",
             portfolio_pdf_path=pdf_path,
             portfolio_holdings_text=holdings_text,
-            portfolio_max_positions=str(max_positions),
         )
     finally:
         if tmp_pdf_path:

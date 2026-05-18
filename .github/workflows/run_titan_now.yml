@@ -45,7 +45,7 @@ on:
       portfolio_max_positions:
         description: "Max holdings to evaluate for mode=portfolio"
         required: false
-        default: "50"
+        default: "75"
       titan_scope:
         description: "full = entire sector universe | priority = top names from last weekend refresh"
         required: false

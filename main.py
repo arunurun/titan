@@ -484,7 +484,7 @@ def main() -> None:
     p.add_argument(
         "--portfolio-max-positions",
         type=int,
-        default=50,
+        default=75,
         metavar="N",
         help="Max holdings to evaluate for --portfolio-holdings-json mode.",
     )
@@ -661,14 +661,14 @@ def main() -> None:
                 holdings,
                 max_positions=max(1, int(args.portfolio_max_positions)),
             )
-            print(
-                portfolio_report_text(
-                    source="workflow_portfolio_json",
-                    limitations=[],
-                    parsed_count=len(holdings),
-                    result=result,
-                )
+            report = portfolio_report_text(
+                source="workflow_portfolio_json",
+                limitations=[],
+                parsed_count=len(holdings),
+                result=result,
             )
+            print(report)
+            send_success_post_email(report, subject_prefix="Titan V12.0 portfolio")
         except Exception as e:
             summary = str(e).strip().split("\n", 1)[0].strip()
             if len(summary) > 180:

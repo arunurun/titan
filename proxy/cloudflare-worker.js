@@ -178,7 +178,7 @@ function sanitizeRunTitanInputs(inputObj) {
     cleaned.custom_exchange = customExchange;
     cleaned.portfolio_holdings_json = sanitizePortfolioHoldingsJson(input.portfolio_holdings_json);
     if (!cleaned.portfolio_max_positions) {
-      cleaned.portfolio_max_positions = "50";
+      cleaned.portfolio_max_positions = "75";
     }
     cleaned.sector_id = "";
   } else {
@@ -290,7 +290,9 @@ export default {
       const url = new URL(request.url);
       const path = (url.pathname || "/").replace(/\/+$/, "") || "/";
 
-      if (request.method === "GET" && path === "/breeze-login") {
+      const isGetLike = request.method === "GET" || request.method === "HEAD";
+
+      if (isGetLike && path === "/breeze-login") {
         const key = env.BREEZE_API_KEY ? String(env.BREEZE_API_KEY).trim() : "";
         if (!key) {
           return json({ error: "BREEZE_API_KEY not configured on proxy" }, 501);
@@ -323,13 +325,13 @@ export default {
         return json({ ok: true, workflow, ref });
       }
 
-      if (request.method === "GET" && path === "/runs") {
+      if (isGetLike && path === "/runs") {
         const limit = Number(url.searchParams.get("limit") || "20");
         const data = await gh(env, `/actions/runs?per_page=${Math.max(1, Math.min(limit, 100))}`);
         return json(data);
       }
 
-      if (request.method === "GET" && path === "/health") {
+      if (isGetLike && path === "/health") {
         return json({
           ok: true,
           repo: `${env.REPO_OWNER || "<missing>"}/${env.REPO_NAME || "<missing>"}`,

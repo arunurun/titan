@@ -357,6 +357,8 @@ def test_portfolio_holdings_json_invokes_portfolio_analysis(monkeypatch, capsys)
     import main as main_mod
     import portfolio_analysis
 
+    mock_email = MagicMock()
+    monkeypatch.setattr(main_mod, "send_success_post_email", mock_email)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -381,6 +383,8 @@ def test_portfolio_holdings_json_invokes_portfolio_analysis(monkeypatch, capsys)
     out = capsys.readouterr().out
     assert "workflow_portfolio_json" in out
     assert '"analyzed_positions": 1' in out
+    mock_email.assert_called_once()
+    assert mock_email.call_args[1].get("subject_prefix") == "Titan V12.0 portfolio"
 
 
 def test_sector_run_takes_precedence_over_invalid_portfolio_json(monkeypatch):

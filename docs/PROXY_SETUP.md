@@ -11,7 +11,9 @@ It requires a small backend proxy that stores GitHub PAT server-side.
    - `GITHUB_PAT` (fine-grained token with repo Actions write access)
    - `REPO_OWNER` = `arunurun`
    - `REPO_NAME` = `titan`
-   - `BREEZE_API_KEY` (optional but required for **Open Breeze login**: `GET /breeze-login` redirects to ICICI using this key; without it the endpoint responds with `501` and a JSON error)
+   - `BREEZE_API_KEY` (optional but required for **Open Breeze login**: `GET`/`HEAD` `/breeze-login` redirects to ICICI using this key; without it the endpoint responds with `501` and a JSON error).  
+  Upload from a machine with Wrangler logged in and `.env` present:
+  `python scripts/emit_breeze_api_key_for_wrangler.py | npx wrangler secret put BREEZE_API_KEY`
 4. Deploy Worker.
 5. Copy Worker URL, e.g. `https://titan-dispatch.<subdomain>.workers.dev`
 6. Set that Worker URL as `PROXY_BASE` in `docs/app.js`.
@@ -20,7 +22,7 @@ It requires a small backend proxy that stores GitHub PAT server-side.
 
 ## Breeze login redirect
 
-- `GET https://<your-proxy>/breeze-login` → `302` to ICICI Breeze login (uses `BREEZE_API_KEY` secret).
+- `GET` or `HEAD` `https://<your-proxy>/breeze-login` → `302` to ICICI Breeze login (uses `BREEZE_API_KEY` secret). (`curl -I` sends `HEAD`; the worker accepts both.)
 - Trailing slashes are accepted (`/breeze-login/`).
 - Set the secret from the repo root: `npx wrangler secret put BREEZE_API_KEY` (uses root `wrangler.toml` / `titan-proxy` worker).
 

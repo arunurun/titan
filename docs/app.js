@@ -33,10 +33,13 @@ const SECTOR_OPTIONS = [
 ];
 const RUN_MODES = new Set(["sector", "all_sectors", "custom"]);
 const TITAN_SCOPES = new Set(["full", "priority"]);
+/** Dispatched priority runs always use top 10 from sector_priority_rankings (single sector and all_sectors). */
+const PRIORITY_TOP_N_FIXED = "10";
+/** Portfolio quick scan: max holdings sent and evaluated per run (matches main.py / workflow default). */
+const PORTFOLIO_MAX_POSITIONS_FIXED = 75;
 const EXCHANGE_OPTIONS = new Set(["NSE", "BSE"]);
 const CUSTOM_SYMBOL_TOKEN_RE = /^[A-Z0-9&._-]{1,25}$/;
 const MAX_CUSTOM_SYMBOLS = 120;
-const MAX_PORTFOLIO_HOLDINGS = 150;
 const COMMON_NON_SYMBOLS = new Set([
   "HOLDINGS",
   "HOLDING",
@@ -99,24 +102,14 @@ function cfg() {
 function setSectorModeUi(mode) {
   const sectorEl = el("sectorId");
   const hintEl = el("sectorHint");
-  const allSectorWorkersEl = el("allSectorWorkers");
   const customSymbolsEl = el("customSymbols");
   const customSymbolsHintEl = el("customSymbolsHint");
-  const customExchangeEl = el("customExchange");
-  const customExchangeHintEl = el("customExchangeHint");
   if (!sectorEl) return;
   const isSectorMode = mode === "sector";
-  const isAllSectorsMode = mode === "all_sectors";
   const isCustomMode = mode === "custom";
   sectorEl.disabled = !isSectorMode;
-  if (allSectorWorkersEl) {
-    allSectorWorkersEl.disabled = !isAllSectorsMode;
-  }
   if (customSymbolsEl) {
     customSymbolsEl.disabled = !isCustomMode;
-  }
-  if (customExchangeEl) {
-    customExchangeEl.disabled = !isCustomMode;
   }
   if (hintEl) {
     hintEl.textContent = isSectorMode
@@ -125,27 +118,18 @@ function setSectorModeUi(mode) {
   }
   if (customSymbolsHintEl) {
     customSymbolsHintEl.textContent = isCustomMode
-      ? "Used only when mode=custom."
-      : "Ignored for selected mode.";
-  }
-  if (customExchangeHintEl) {
-    customExchangeHintEl.textContent = isCustomMode
-      ? "Used only when mode=custom."
+      ? "Used only when mode=custom (NSE)."
       : "Ignored for selected mode.";
   }
   const titanScopeEl = el("titanScope");
-  const priorityTopNEl = el("priorityTopN");
   const titanScopeHintEl = el("titanScopeHint");
   const isSectorOrAll = mode === "sector" || mode === "all_sectors";
   if (titanScopeEl) {
     titanScopeEl.disabled = !isSectorOrAll;
   }
-  if (priorityTopNEl) {
-    priorityTopNEl.disabled = !isSectorOrAll;
-  }
   if (titanScopeHintEl) {
     titanScopeHintEl.textContent = isSectorOrAll
-      ? "Uses sector_priority_rankings; weekly refresh on Saturdays."
+      ? "Uses sector_priority_rankings; weekly refresh on Saturdays. Priority mode uses top 10."
       : "Not used for this mode.";
   }
 }
@@ -224,19 +208,6 @@ async function checkConnection({ showSuccess = false } = {}) {
 async function dispatchWorkflow(filename, inputs = {}) {
   await ghApi("/dispatch", "POST", { workflow: filename, ref: "main", inputs });
   setStatus(`Dispatched ${filename} successfully.`);
-}
-
-function normalizePositiveInt(raw, field, { min = 1, max = 500 } = {}) {
-  const value = String(raw || "").trim();
-  if (!value) return "";
-  if (!/^\d+$/.test(value)) {
-    throw new Error(`${field} must be a whole number.`);
-  }
-  const n = Number(value);
-  if (!Number.isInteger(n) || n < min || n > max) {
-    throw new Error(`${field} must be between ${min} and ${max}.`);
-  }
-  return String(n);
 }
 
 function parseCustomSymbols(raw) {
@@ -347,7 +318,7 @@ function parsePortfolioRowsFromText(rawText, defaultExchange = "NSE") {
     });
   }
   return {
-    holdings: holdings.slice(0, MAX_PORTFOLIO_HOLDINGS),
+    holdings: holdings.slice(0, PORTFOLIO_MAX_POSITIONS_FIXED),
     rejected,
   };
 }
@@ -438,22 +409,13 @@ async function extractPortfolioRowsFromPdf(file, defaultExchange = "NSE") {
     }
   }
   return {
-    holdings: holdings.slice(0, MAX_PORTFOLIO_HOLDINGS),
+    holdings: holdings.slice(0, PORTFOLIO_MAX_POSITIONS_FIXED),
     rejected,
   };
 }
 
 async function buildPortfolioSymbolsPayload() {
-  const exchange = String(el("portfolioExchange")?.value || "NSE")
-    .trim()
-    .toUpperCase();
-  if (!EXCHANGE_OPTIONS.has(exchange)) {
-    throw new Error("Portfolio exchange must be NSE or BSE.");
-  }
-  const maxPositions = normalizePositiveInt(el("portfolioMaxSymbols")?.value, "Portfolio max symbols", {
-    min: 1,
-    max: MAX_PORTFOLIO_HOLDINGS,
-  });
+  const exchange = "NSE";
   const pasted = String(el("portfolioHoldingsText")?.value || "");
   const pdfFile = el("portfolioPdfFile")?.files?.[0] || null;
   const accepted = [];
@@ -480,7 +442,7 @@ async function buildPortfolioSymbolsPayload() {
       }
     }
     for (const rec of merged.values()) {
-      if (accepted.length >= MAX_PORTFOLIO_HOLDINGS) {
+      if (accepted.length >= PORTFOLIO_MAX_POSITIONS_FIXED) {
         break;
       }
       accepted.push({
@@ -519,9 +481,7 @@ async function buildPortfolioSymbolsPayload() {
     mode: "portfolio",
     custom_exchange: exchange,
     portfolio_holdings_json: JSON.stringify(accepted),
-    portfolio_max_positions: maxPositions || String(accepted.length),
-    workers: normalizePositiveInt(el("workers")?.value, "Workers", { min: 1, max: 16 }) || "4",
-    all_sector_workers: "",
+    portfolio_max_positions: String(PORTFOLIO_MAX_POSITIONS_FIXED),
     parsed_count: accepted.length,
     parsed_symbols_preview: accepted
       .slice(0, 12)
@@ -537,24 +497,11 @@ function buildRunTitanInputs() {
   if (!RUN_MODES.has(mode)) {
     throw new Error("Mode is invalid.");
   }
-  const workers = normalizePositiveInt(el("workers")?.value, "Workers", { min: 1, max: 16 });
-  const maxSymbols = normalizePositiveInt(el("maxSymbols")?.value, "Max Symbols", {
-    min: 1,
-    max: 500,
-  });
-  const allSectorWorkers = normalizePositiveInt(
-    el("allSectorWorkers")?.value,
-    "All-sector workers",
-    { min: 1, max: 200 },
-  );
   const sectorId = (el("sectorId")?.value || "").trim();
 
   const inputs = {
     mode,
     sector_id: sectorId,
-    max_symbols: maxSymbols,
-    workers,
-    all_sector_workers: allSectorWorkers,
     titan_scope: "",
     priority_top_n: "",
   };
@@ -568,31 +515,17 @@ function buildRunTitanInputs() {
       throw new Error("Titan scope must be full or priority.");
     }
     inputs.titan_scope = ts;
-    const ptn = String(el("priorityTopN")?.value || "").trim();
-    if (ptn) {
-      if (!/^\d+$/.test(ptn)) {
-        throw new Error("Priority top N must be a whole number or blank.");
-      }
-      const n = Number(ptn);
-      if (n < 1 || n > 25) {
-        throw new Error("Priority top N must be between 1 and 25.");
-      }
+    if (ts === "priority") {
+      inputs.priority_top_n = PRIORITY_TOP_N_FIXED;
     }
-    inputs.priority_top_n = ptn;
   }
 
   if (mode === "custom") {
     const parsed = parseCustomSymbols(el("customSymbols")?.value || "");
-    const customExchange = String(el("customExchange")?.value || "NSE")
-      .trim()
-      .toUpperCase();
-    if (!EXCHANGE_OPTIONS.has(customExchange)) {
-      throw new Error("Custom exchange must be NSE or BSE.");
-    }
     const customSectorId = sectorId || "custom_ui";
     inputs.sector_id = customSectorId;
     inputs.custom_symbols = parsed.join(",");
-    inputs.custom_exchange = customExchange;
+    inputs.custom_exchange = "NSE";
   }
 
   return inputs;
@@ -715,8 +648,6 @@ function wireEvents() {
           custom_exchange: payload.custom_exchange,
           portfolio_holdings_json: payload.portfolio_holdings_json,
           portfolio_max_positions: payload.portfolio_max_positions,
-          workers: payload.workers,
-          all_sector_workers: payload.all_sector_workers,
         };
         await dispatchWorkflow(WORKFLOWS.runTitan, inputs);
         const rejectLine =

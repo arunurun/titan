@@ -143,35 +143,14 @@
           <p class="small" id="sectorHint">Used only when mode=sector.</p>
         </div>
       </div>
-      <div class="row two">
+      <div class="row">
         <div>
           <label>Titan scope</label>
           <select id="titanScope">
-            <option value="priority" selected>priority (weekend refresh list)</option>
+            <option value="priority" selected>priority (weekend refresh list, top 10)</option>
             <option value="full">full sector universe</option>
           </select>
           <p class="small" id="titanScopeHint">Ranked list in Supabase; refresh Saturdays.</p>
-        </div>
-        <div>
-          <label>Priority top N (optional)</label>
-          <input id="priorityTopN" value="" placeholder="10 single sector / 5 all sectors" />
-        </div>
-      </div>
-      <div class="row two">
-        <div>
-          <label>Max Symbols</label>
-          <input id="maxSymbols" value="" placeholder="all (no cap)" />
-        </div>
-        <div>
-          <label>Workers</label>
-          <input id="workers" value="4" />
-        </div>
-      </div>
-      <div class="row">
-        <div>
-          <label>All-sector workers</label>
-          <input id="allSectorWorkers" value="20" />
-          <p class="small">Used when mode=all_sectors (parallel sectors).</p>
         </div>
       </div>
       <div class="row">
@@ -182,17 +161,7 @@
             rows="4"
             placeholder="RELIANCE, TCS, INFY"
           ></textarea>
-          <p class="small" id="customSymbolsHint">Used only when mode=custom.</p>
-        </div>
-      </div>
-      <div class="row">
-        <div>
-          <label>Custom Exchange</label>
-          <select id="customExchange">
-            <option value="NSE" selected>NSE</option>
-            <option value="BSE">BSE</option>
-          </select>
-          <p class="small" id="customExchangeHint">Used only when mode=custom.</p>
+          <p class="small" id="customSymbolsHint">Used only when mode=custom (NSE).</p>
         </div>
       </div>
       <button type="button" id="runTitanBtn">Dispatch Run Titan Now</button>
@@ -212,21 +181,13 @@
         rows="5"
         placeholder="NSE:RELIANCE, 10, 2380.5&#10;INFY 5 1452&#10;ASTMIC31501,3,710"
       ></textarea>
-      <div class="row two">
-        <div>
-          <label>Portfolio exchange</label>
-          <select id="portfolioExchange">
-            <option value="NSE" selected>NSE</option>
-            <option value="BSE">BSE</option>
-          </select>
-        </div>
+      <div class="row">
         <div>
           <label>Portfolio sector label</label>
           <input id="portfolioSectorId" value="portfolio_pdf" />
+          <p class="small">Default exchange NSE; prefix lines with <code>BSE:</code> for BSE symbols. Up to 75 holdings analyzed per run.</p>
         </div>
       </div>
-      <label>Max holdings from portfolio</label>
-      <input id="portfolioMaxSymbols" value="40" />
       <button type="button" class="secondary" id="portfolioScanBtn">Dispatch Portfolio Quick Scan</button>
     </div>
 
@@ -249,6 +210,6 @@
     </div>
   </div>
 
-  <script defer src="./app.js?v=20260518-3"></script>
+  <script defer src="./app.js?v=20260518-8"></script>
 </body>
 </html>
