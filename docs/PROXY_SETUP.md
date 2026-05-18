@@ -15,6 +15,20 @@ It requires a small backend proxy that stores GitHub PAT server-side.
   Upload from a machine with Wrangler logged in and `.env` present:
   `python scripts/emit_breeze_api_key_for_wrangler.py | npx wrangler secret put BREEZE_API_KEY`
    - `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (optional; required for **Sector insight in app** — `GET /insights/latest?sector=…` reads `public.llm_digest_memory`. Use the **service role** key only in the Worker, never in the browser.)
+
+### Supabase secrets (Wrangler, from repo root)
+
+These attach to the **titan-proxy** worker (`wrangler.toml`):
+
+```bash
+npx wrangler secret put SUPABASE_URL
+# paste your project URL, e.g. https://abcdefgh.supabase.co
+
+npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+# paste the service_role key from Supabase → Project Settings → API
+```
+
+Then redeploy: `npx wrangler deploy`. In the UI, **Test connection** should show **Supabase insights: yes**.
 4. Deploy Worker.
 5. Copy Worker URL, e.g. `https://titan-dispatch.<subdomain>.workers.dev`
 6. Set that Worker URL as `PROXY_BASE` in `docs/app.js`.

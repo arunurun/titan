@@ -152,6 +152,9 @@ function initSectorOptions(selectId = "sectorId") {
 
 function classifyProxyError(status, responseText) {
   const body = String(responseText || "");
+  if (status === 503 && (body.includes("missing_supabase") || body.includes("SUPABASE_"))) {
+    return "Supabase not configured on the Worker. Set secrets SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY on titan-proxy (see docs/PROXY_SETUP.md).";
+  }
   if (status === 404) {
     return (
       "404 from proxy endpoint.\n" +
@@ -186,9 +189,18 @@ async function ghApi(path, method = "GET", body = null) {
   });
   if (!res.ok) {
     const txt = await res.text();
+    let bodyMsg = txt;
+    try {
+      const j = JSON.parse(txt);
+      if (j && typeof j.error === "string") {
+        bodyMsg = j.error + (j.code ? ` [${j.code}]` : "");
+      }
+    } catch (_e) {
+      /* keep raw txt */
+    }
     const hint = classifyProxyError(res.status, txt);
     const hintBlock = hint ? `\nHint: ${hint}\n` : "\n";
-    throw new Error(`${res.status} ${res.statusText}${hintBlock}${txt}`);
+    throw new Error(`${res.status} ${res.statusText}${hintBlock}${bodyMsg}`);
   }
   if (res.status === 204) return null;
   return await res.json();
@@ -569,6 +581,12 @@ function syncSectorDropdowns(sectorId) {
 }
 
 async function loadLatestSectorInsight() {
+  const health = await checkConnection();
+  if (health.has_supabase_insights !== true) {
+    throw new Error(
+      "Supabase is not configured on titan-proxy. Add Worker secrets SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (see docs/PROXY_SETUP.md).",
+    );
+  }
   const sectorId = (el("sectorId")?.value || "").trim().toLowerCase();
   if (!sectorId) {
     throw new Error("Pick a sector in the Sector ID dropdown.");
@@ -588,7 +606,7 @@ async function loadLatestSectorInsight() {
  * fetches workflow inputs and loads the matching Supabase digest into the insight textarea.
  */
 async function refreshRunsAndMaybeLoadInsight(insightTextareaId = "sectorInsightBody") {
-  await checkConnection();
+  const health = await checkConnection();
   const runs = await ghApi("/runs?limit=40");
   const workflowRuns = runs.workflow_runs || [];
   const titanFile = WORKFLOWS.runTitan;
@@ -602,6 +620,16 @@ async function refreshRunsAndMaybeLoadInsight(insightTextareaId = "sectorInsight
     (r) => `${r.status}/${r.conclusion || "-"} | ${r.name} | #${r.run_number} | ${r.html_url}`,
   );
   const insightTextarea = insightTextareaId ? el(insightTextareaId) : null;
+
+  if (health.has_supabase_insights !== true) {
+    setStatus(
+      lines.join("\n") +
+        "\n\nSupabase insights: not configured on titan-proxy. Add Worker secrets SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (Cloudflare dashboard or `npx wrangler secret put …` from repo root). See docs/PROXY_SETUP.md (Supabase secrets).",
+    );
+    if (insightTextarea) insightTextarea.value = "";
+    return;
+  }
+
   let insightNote = "";
 
   const latestTitan = titanRuns[0];
@@ -773,7 +801,6 @@ function wireEvents() {
     loadSectorInsightBtn.addEventListener("click", async () => {
       try {
         setWorking("Load sector insight");
-        await checkConnection();
         const got = await loadLatestSectorInsight();
         if (!got) {
           setStatus(

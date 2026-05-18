@@ -287,9 +287,6 @@ async function gh(env, path, method = "GET", body = null) {
 async function fetchLatestInsight(env, sector) {
   const base = String(env.SUPABASE_URL || "").trim().replace(/\/+$/, "");
   const key = String(env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
-  if (!base || !key) {
-    throw new Error("Missing worker secrets: SUPABASE_URL and/or SUPABASE_SERVICE_ROLE_KEY");
-  }
   const sev = encodeURIComponent(sector);
   const url =
     `${base}/rest/v1/llm_digest_memory?sector=eq.${sev}` +
@@ -415,6 +412,19 @@ export default {
         const sector = toStringInput(url.searchParams.get("sector")).toLowerCase();
         if (!sector || !SECTOR_ID_RE.test(sector)) {
           return json({ error: "sector query param is required ([a-z0-9_]{1,64})" }, 400);
+        }
+        const base = String(env.SUPABASE_URL || "").trim();
+        const key = String(env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
+        if (!base || !key) {
+          return json(
+            {
+              ok: false,
+              code: "missing_supabase_secrets",
+              error:
+                "Set Worker secrets SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY on titan-proxy (Dashboard → Workers → titan-proxy → Settings → Variables, or: npx wrangler secret put SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY from repo root). Then redeploy or save.",
+            },
+            503,
+          );
         }
         const data = await fetchLatestInsight(env, sector);
         return json(data);
