@@ -87,6 +87,22 @@ def _is_retryable_gemini_error(err_s: str) -> bool:
 _RETRYABLE_HTTP_CODES = frozenset({429, 500, 502, 503, 504})
 
 
+def _is_per_day_quota_exhausted(err: BaseException) -> bool:
+    """
+    True when the API reports daily free-tier (or per-day) generation caps.
+    Retrying the same day / same project does not help; avoid long backoff loops.
+    """
+    err_s = str(err)
+    if "GenerateRequestsPerDayPerProjectPerModel" in err_s:
+        return True
+    if "GenerateRequestsPerDay" in err_s and "FreeTier" in err_s:
+        return True
+    low = err_s.lower()
+    if "per day" in low and ("quota" in low or "exceeded" in low):
+        return True
+    return False
+
+
 def _is_retryable_gemini_exception(exc: BaseException) -> bool:
     """
     Detect retryable errors even when message text is odd or nested (SDK / tenacity).
@@ -144,6 +160,11 @@ def _generate(keys: list[str], model: str, user_text: str) -> str:
                         len(keys),
                     )
                     break
+                if _is_per_day_quota_exhausted(e):
+                    logger.warning(
+                        "Gemini daily quota exhausted (or per-day cap); not retrying backoff loop"
+                    )
+                    raise
                 if attempt >= 5:
                     raise
                 delay = 15.0 * (attempt + 1)
@@ -153,6 +174,49 @@ def _generate(keys: list[str], model: str, user_text: str) -> str:
                 time.sleep(min(delay, 120.0))
     assert last_err is not None
     raise last_err
+
+
+def fallback_sector_digest_narrative(
+    constituents: list[dict[str, Any]],
+    *,
+    sector_id: str,
+    reason: str,
+) -> str:
+    """
+    Plain-text sector summary when Gemini is unavailable (free-tier daily cap, outage, etc.).
+    Keeps audits/emails usable without LLM wording.
+    """
+    reason_one = (reason.strip().split("\n") or [""])[0][:420]
+    lines: list[str] = [
+        f"Titan V12.0 sector digest — {sector_id}",
+        "Narrative unavailable (LLM offline). Snapshot from live audit metrics only.",
+        f"Context: {reason_one}",
+        "",
+        "— Constituent snapshot —",
+    ]
+    for a in constituents:
+        sym = str(a.get("symbol", "?"))
+        ex = str(a.get("exchange", "?"))
+        intent = a.get(
+            "effective_intent_score",
+            a.get("intent_score", a.get("equity_technical_score")),
+        )
+        r1 = a.get("return_1d_pct")
+        z = a.get("z_score")
+        parts: list[str] = [f"{sym} ({ex})"]
+        if intent is not None:
+            parts.append(f"intent {intent}")
+        if r1 is not None:
+            parts.append(f"1d {r1}%")
+        if z is not None:
+            parts.append(f"z {z}")
+        lines.append(" · ".join(parts))
+    lines.append("")
+    lines.append(
+        "Forensic context only; not investment advice. "
+        "Raise Gemini quota (billing), switch GEMINI_MODEL, or add another API key from a different project to restore LLM narrative."
+    )
+    return "\n".join(lines)
 
 
 def generate_sector_digest_narrative(
@@ -167,6 +231,10 @@ def generate_sector_digest_narrative(
     """
     Single Gemini call for a whole sector (free-tier friendly: 1 request vs 1 per symbol).
     Pass compact per-stock metric dicts (e.g. output of equity audits without narrative).
+
+    If Gemini fails (quota, outage, policy block) and GEMINI_SECTOR_DIGEST_FAIL_OPEN is true
+    (default), returns a deterministic metrics snapshot instead of raising so the sector run
+    can still email and persist. Set GEMINI_SECTOR_DIGEST_FAIL_OPEN=false to fail hard.
     """
     compact = [
         {
@@ -203,12 +271,30 @@ def generate_sector_digest_narrative(
     }
     if comparison_context:
         audit_data["comparison_context"] = comparison_context
-    return generate_titan_narrative(
-        audit_data,
-        model_name=model_name,
-        api_key=api_key,
-        api_keys=api_keys,
-    )
+    fail_open = _env_truthy("GEMINI_SECTOR_DIGEST_FAIL_OPEN", default=True)
+    try:
+        return generate_titan_narrative(
+            audit_data,
+            model_name=model_name,
+            api_key=api_key,
+            api_keys=api_keys,
+        )
+    except (RuntimeError, ValueError) as e:
+        if not fail_open:
+            raise
+        msg = str(e)
+        if "[Gemini]" not in msg and "Policy check" not in msg:
+            raise
+        logger.warning(
+            "Sector digest LLM failed for %r; using fallback narrative (%s)",
+            sector_id,
+            msg[:200],
+        )
+        return fallback_sector_digest_narrative(
+            constituents,
+            sector_id=sector_id,
+            reason=msg,
+        )
 
 
 _PORTFOLIO_SUMMARY_USER_PREFIX = """You are summarizing a Titan portfolio-scan JSON snapshot for internal review.

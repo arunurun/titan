@@ -3,7 +3,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 from google.genai.errors import ClientError
 
-from brain import TITAN_V12_SYSTEM_INSTRUCTION, generate_portfolio_llm_summary, generate_titan_narrative
+from brain import (
+    TITAN_V12_SYSTEM_INSTRUCTION,
+    generate_portfolio_llm_summary,
+    generate_sector_digest_narrative,
+    generate_titan_narrative,
+)
 
 
 def test_system_instruction_has_protocol():
@@ -44,6 +49,22 @@ def test_generate_rotates_to_next_key_on_quota(mock_client_cls):
     assert "positioning" in out.lower() or "index" in out.lower()
     assert mock_client_cls.call_args_list[0].kwargs.get("api_key") == "k1"
     assert mock_client_cls.call_args_list[1].kwargs.get("api_key") == "k2"
+
+
+@patch("brain.time.sleep")
+@patch("brain.genai.Client")
+def test_generate_fails_fast_on_daily_free_tier_quota(mock_client_cls, mock_sleep):
+    """Daily free-tier caps are not fixed by sleeping; do not burn 6 backoff attempts."""
+    err = Exception(
+        "429 RESOURCE_EXHAUSTED GenerateRequestsPerDayPerProjectPerModel-FreeTier quotaValue"
+    )
+    instance = MagicMock()
+    instance.models.generate_content.side_effect = err
+    mock_client_cls.return_value = instance
+    with pytest.raises(RuntimeError, match=r"\[Gemini\]"):
+        generate_titan_narrative({"x": 1}, api_key="dummy")
+    assert instance.models.generate_content.call_count == 1
+    mock_sleep.assert_not_called()
 
 
 @patch("brain.time.sleep", lambda *_a, **_k: None)
@@ -98,6 +119,31 @@ def test_generate_skips_compliance_repair_when_env_disabled(monkeypatch):
         with pytest.raises(ValueError, match="GEMINI_COMPLIANCE_RETRY=false"):
             generate_titan_narrative({"x": 1}, api_key="dummy")
     assert instance.models.generate_content.call_count == 1
+
+
+def test_sector_digest_fail_open_returns_fallback_on_gemini_error(monkeypatch):
+    monkeypatch.delenv("GEMINI_SECTOR_DIGEST_FAIL_OPEN", raising=False)
+    err = RuntimeError(
+        "[Gemini] 429 RESOURCE_EXHAUSTED GenerateRequestsPerDayPerProjectPerModel-FreeTier"
+    )
+    with patch("brain.generate_titan_narrative", side_effect=err):
+        out = generate_sector_digest_narrative(
+            [{"symbol": "RELIANCE", "exchange": "NSE", "effective_intent_score": 55.0, "return_1d_pct": 0.5}],
+            sector_id="energy",
+        )
+    assert "RELIANCE" in out and "energy" in out
+    assert "LLM offline" in out or "unavailable" in out.lower()
+
+
+def test_sector_digest_fail_open_false_reraises(monkeypatch):
+    monkeypatch.setenv("GEMINI_SECTOR_DIGEST_FAIL_OPEN", "false")
+    err = RuntimeError("[Gemini] 429 RESOURCE_EXHAUSTED")
+    with patch("brain.generate_titan_narrative", side_effect=err):
+        with pytest.raises(RuntimeError, match="429"):
+            generate_sector_digest_narrative(
+                [{"symbol": "X", "exchange": "NSE"}],
+                sector_id="test",
+            )
 
 
 @patch("brain.genai.Client")

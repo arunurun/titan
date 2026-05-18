@@ -108,6 +108,13 @@ def _smtp_config() -> dict[str, object] | None:
     port = int(raw_port) if raw_port else 587
     use_tls_raw = (os.environ.get("SMTP_USE_TLS") or "true").strip()
     use_tls = use_tls_raw.lower() in ("1", "true", "yes")
+    raw_timeout = os.environ.get("SMTP_TIMEOUT_SECONDS", "").strip()
+    timeout_s = 60.0
+    if raw_timeout:
+        try:
+            timeout_s = max(5.0, float(raw_timeout))
+        except ValueError:
+            timeout_s = 60.0
     return {
         "host": host,
         "port": port,
@@ -116,6 +123,7 @@ def _smtp_config() -> dict[str, object] | None:
         "from": from_addr,
         "to": to_addrs,
         "use_tls": use_tls,
+        "timeout_seconds": timeout_s,
     }
 
 
@@ -268,15 +276,16 @@ def _send_message(msg: EmailMessage, cfg: dict[str, object]) -> bool:
     user = str(cfg["user"])
     password = str(cfg["password"])
     use_tls = bool(cfg["use_tls"])
+    timeout = float(cfg.get("timeout_seconds") or 60.0)
     try:
         if port == 465:
             context = ssl.create_default_context()
-            with smtplib.SMTP_SSL(host, port, context=context) as smtp:
+            with smtplib.SMTP_SSL(host, port, timeout=timeout, context=context) as smtp:
                 if user:
                     smtp.login(user, password)
                 smtp.send_message(msg)
         else:
-            with smtplib.SMTP(host, port) as smtp:
+            with smtplib.SMTP(host, port, timeout=timeout) as smtp:
                 smtp.ehlo()
                 if use_tls:
                     smtp.starttls(context=ssl.create_default_context())

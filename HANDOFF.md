@@ -76,3 +76,44 @@ To restore **one email per sector** instead, set:
 cd C:\Arun\Study\Cursor\Titan
 python -m pytest tests\ -q --ignore=tests\test_config_loader.py
 ```
+
+---
+
+## Work log — 2026-05-18
+
+### GitHub Actions: “Run Titan Now” looked stuck
+
+**Symptom:** Workflow **Run Titan Now** (`run_titan_now.yml`), job **`run`**, stayed **in progress** on step **Run Titan** (`python main.py …`) for a long time (e.g. 26+ minutes) with no failed-step logs until the job finished or was cancelled.
+
+**Findings:**
+
+- The **`run`** job had **no `timeout-minutes`**, so a hung or very slow step could run until the **hosted runner default** (on the order of hours), which feels stuck.
+- Likely stall points inside **`main.py`**: **Breeze** (`get_historical_data` and related SDK calls often have **no explicit socket timeout**), **Gemini**, or **SMTP** without connect/send timeout.
+- **`src/breeze_client.py`** uses a **process-wide `_HIST_CALL_LOCK`** around historical fetches plus a minimum interval between calls. All parallel sector/symbol work **queues on that lock**, so **`all_sectors`** with high **`all_sector_workers`** adds **thread contention** without speeding Breeze historical I/O.
+
+**Changes made (repo):**
+
+- **`.github/workflows/run_titan_now.yml`:** `timeout-minutes: 180` on job **`run`**; default **`all_sector_workers`** input **20 → 8**.
+- **`src/email_notify.py`:** **`SMTP(..., timeout=…)`** / **`SMTP_SSL(..., timeout=…)`** via **`SMTP_TIMEOUT_SECONDS`** (default **60**).
+- **`config/.env.example`:** documents **`SMTP_TIMEOUT_SECONDS`**.
+
+**Follow-up (if logs still implicate Breeze):** consider bounded timeouts or isolation around **`get_historical_data`** (careful with thread safety and orphaned calls).
+
+### Gemini: sector digest failed with 429 (free tier daily quota)
+
+**Symptom:** Failure email: **`[Gemini] 429 RESOURCE_EXHAUSTED`**, quota **`generativelanguage.googleapis.com/generate_content_free_tier_requests`**, **`GenerateRequestsPerDayPerProjectPerModel-FreeTier`**, **`quotaValue: 20`**, model **`gemini-2.5-flash-lite`** (example stack: `generate_sector_digest_narrative` → `generate_titan_narrative` → `_generate` in **`src/brain.py`**).
+
+**Findings:**
+
+- **Free tier** caps **requests per day per project per model** (here **20** for that model). **Retrying with backoff does not reset a daily cap**; the old loop could waste time before still failing the audit.
+- **`GEMINI_API_KEY_2`** only helps if the second key is a **different Google Cloud project** with its own quota; two keys on the **same** project share the same daily pool.
+- **`GEMINI_COMPLIANCE_RETRY=false`** saves **one** extra API call when the first draft fails the wording policy (optional for quota savings).
+
+**Changes made (repo):**
+
+- **`src/brain.py`:** **`_is_per_day_quota_exhausted()`**; **`_generate()`** **stops the backoff loop immediately** when the error indicates **per-day** quota and there is **no next key** to try.
+- **`fallback_sector_digest_narrative()`** and **`generate_sector_digest_narrative()`:** if **`GEMINI_SECTOR_DIGEST_FAIL_OPEN`** is **true** (default), **Gemini / policy failures** for the sector digest use a **deterministic metrics snapshot** so the run can still **complete and email** instead of failing the whole job. Set **`GEMINI_SECTOR_DIGEST_FAIL_OPEN=false`** to require LLM text (fail hard).
+- **`config/.env.example`:** documents **`GEMINI_SECTOR_DIGEST_FAIL_OPEN`**.
+- **`tests/test_brain.py`:** covers fast-fail on daily quota and digest fail-open behavior.
+
+**Operational mitigations (outside code):** enable **billing** / higher quota for the Gemini project, or set **`GEMINI_MODEL`** to a model with a **separate** quota line; see [Gemini rate limits](https://ai.google.dev/gemini-api/docs/rate-limits).
