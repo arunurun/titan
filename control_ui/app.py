@@ -18,6 +18,7 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
 from breeze_session_auth import parse_api_session_from_input, upsert_env_var  # noqa: E402
+from config_loader import load_config  # noqa: E402
 from portfolio_analysis import (  # noqa: E402
     analyze_portfolio_holdings,
     collect_holdings_input,
@@ -514,12 +515,14 @@ def run_portfolio_analysis():
                     limitations=limitations,
                     parsed_count=0,
                     result={"summary": {"requested_positions": 0}, "rows": []},
+                    gemini_keys=load_config().gemini_api_keys,
                 ),
                 portfolio_pdf_path=pdf_path,
                 portfolio_holdings_text=holdings_text,
             )
         result = analyze_portfolio_holdings(holdings, max_positions=max_positions)
         level = "ok" if result.get("summary", {}).get("analyzed_positions", 0) > 0 else "warn"
+        _cfg = load_config()
         return _render_page(
             message=f"Portfolio analysis completed from {source} input.",
             level=level,
@@ -528,6 +531,7 @@ def run_portfolio_analysis():
                 limitations=limitations,
                 parsed_count=len(holdings),
                 result=result,
+                gemini_keys=_cfg.gemini_api_keys,
             ),
             portfolio_pdf_path=pdf_path,
             portfolio_holdings_text=holdings_text,

@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from google.genai.errors import ClientError
 
-from brain import TITAN_V12_SYSTEM_INSTRUCTION, generate_titan_narrative
+from brain import TITAN_V12_SYSTEM_INSTRUCTION, generate_portfolio_llm_summary, generate_titan_narrative
 
 
 def test_system_instruction_has_protocol():
@@ -59,6 +59,22 @@ def test_generate_retries_on_503_then_succeeds(mock_client_cls):
     out = generate_titan_narrative({"x": 1}, api_key="dummy")
     assert "positioning" in out.lower() or "index" in out.lower()
     assert instance.models.generate_content.call_count == 2
+
+
+@patch("brain.genai.Client")
+def test_generate_portfolio_llm_summary_policy_pass(mock_client_cls):
+    instance = MagicMock()
+    mock_client_cls.return_value = instance
+    instance.models.generate_content.return_value = MagicMock(
+        text=(
+            "- Quantity-weighted next-week read sits below mid-range while intent is defensive.\n"
+            "- Several holdings carry exit_risk labels and warrant mandate sizing review.\n"
+            "- Coverage gaps remain where market data was unavailable.\n"
+        )
+    )
+    out = generate_portfolio_llm_summary({"portfolio_llm_digest_v1": True, "x": 1}, api_key="dummy")
+    assert out.strip().startswith("- ")
+    mock_client_cls.assert_called_once_with(api_key="dummy")
 
 
 @patch("brain.genai.Client")

@@ -20,6 +20,85 @@ def make_cfg() -> TitanConfig:
     )
 
 
+def test_symbol_digest_default_is_short_block(monkeypatch):
+    monkeypatch.delenv("TITAN_DIGEST_VERBOSE_SYMBOLS", raising=False)
+    from sector_audit import _format_symbol_metrics_line
+
+    audit = {
+        "effective_intent_score": 50.0,
+        "z_score": 0.8,
+        "volume_participation_ratio": 1.304,
+        "volume_participation_for_scoring": 1.81,
+        "return_1d_pct": -4.28,
+        "ema_200_distance_pct": 47.29,
+        "atr_14_pct": 3.42,
+        "next_day_score": 49.77,
+        "next_week_score": 51.84,
+        "sell_signal": "trim",
+        "sell_signal_reasons": ["nextWeek soft 51.84", "intent cooling 50.00"],
+        "fundamental_status": "unavailable",
+        "fundamental_score": float("nan"),
+        "fundamental_reasons": [],
+        "hypothesis_support": "technical_only",
+        "panic_absorption_proxy": False,
+        "trap_exit_proxy": False,
+        "cluster_guardrail_applied": True,
+        "macro_guardrail_applied": False,
+        "event_risk_soon": False,
+        "rows": 37,
+        "exchange_used": "NSE",
+        "exchange_fallback_used": False,
+        "prediction_breakdown": {
+            "week": {
+                "tech_composite_term": 0.0,
+                "ema_term": 4.3,
+                "ret1d_term": -1.93,
+                "atr_penalty": 0.54,
+            },
+            "day": {},
+            "penalties": [],
+        },
+    }
+    result = {"symbol": "WELCORP", "exchange": "NSE", "audit": audit}
+    text = _format_symbol_metrics_line(result)
+    assert "techScore" not in text
+    assert "WELCORP (NSE)" in text
+    assert "Trim" in text
+    assert "next week" in text.lower()
+    assert "Why this action" in text
+    assert "\n" in text
+
+
+def test_symbol_digest_verbose_restores_legacy_line(monkeypatch):
+    monkeypatch.setenv("TITAN_DIGEST_VERBOSE_SYMBOLS", "1")
+    from sector_audit import _format_symbol_metrics_line
+
+    audit = {
+        "effective_intent_score": 50.0,
+        "z_score": 0.8,
+        "volume_participation_ratio": 1.304,
+        "volume_participation_for_scoring": 1.81,
+        "return_1d_pct": -4.28,
+        "ema_200_distance_pct": 47.29,
+        "atr_14_pct": 3.42,
+        "next_day_score": 49.77,
+        "next_week_score": 51.84,
+        "sell_signal": "trim",
+        "sell_signal_reasons": ["nextWeek soft 51.84"],
+        "fundamental_status": "unavailable",
+        "fundamental_score": float("nan"),
+        "fundamental_reasons": [],
+        "hypothesis_support": "technical_only",
+        "rows": 37,
+        "exchange_used": "NSE",
+        "exchange_fallback_used": False,
+        "prediction_breakdown": {"week": {}, "day": {}, "penalties": []},
+    }
+    text = _format_symbol_metrics_line({"symbol": "WELCORP", "exchange": "NSE", "audit": audit})
+    assert "techScore" in text
+    assert "volPartScore" in text
+
+
 def test_build_equity_live_audit_skips_narrative(monkeypatch):
     from sector_audit import build_equity_live_audit
 

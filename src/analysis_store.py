@@ -498,21 +498,23 @@ def persist_llm_digest_memory(
     prompt_facts: dict[str, Any],
     output_text: str,
     model_name: str | None = None,
+    full_digest: str | None = None,
 ) -> dict[str, Any]:
     if not analysis_store_enabled():
         return {"enabled": False, "persisted": False}
     client = create_client(cfg.supabase_url, cfg.supabase_key)
-    row = sanitize_for_json(
-        {
-            "run_id": run_id,
-            "sector": sector,
-            "prompt_facts": prompt_facts,
-            "output_text": output_text,
-            "model_name": model_name or "",
-            "output_chars": len(output_text or ""),
-            "recorded_at": datetime.now(IST).isoformat(timespec="seconds"),
-        }
-    )
+    row_body: dict[str, Any] = {
+        "run_id": run_id,
+        "sector": sector,
+        "prompt_facts": prompt_facts,
+        "output_text": output_text,
+        "model_name": model_name or "",
+        "output_chars": len(output_text or ""),
+        "recorded_at": datetime.now(IST).isoformat(timespec="seconds"),
+    }
+    if full_digest is not None:
+        row_body["full_digest"] = full_digest
+    row = sanitize_for_json(row_body)
     try:
         client.table("llm_digest_memory").upsert(row, on_conflict="run_id").execute()
         return {"enabled": True, "persisted": True}

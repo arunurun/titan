@@ -657,6 +657,7 @@ def main() -> None:
                 default_exchange=args.custom_exchange,
             )
             logger.info("Running portfolio position analysis for %d holdings", len(holdings))
+            cfg = load_config()
             result = analyze_portfolio_holdings(
                 holdings,
                 max_positions=max(1, int(args.portfolio_max_positions)),
@@ -666,6 +667,7 @@ def main() -> None:
                 limitations=[],
                 parsed_count=len(holdings),
                 result=result,
+                gemini_keys=cfg.gemini_api_keys,
             )
             print(report)
             emailed_ok = send_success_post_email(report, subject_prefix="Titan V12.0 portfolio")

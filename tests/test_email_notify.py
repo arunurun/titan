@@ -110,11 +110,12 @@ def test_send_action_required_email_has_clickable_link(monkeypatch):
 def test_success_html_portfolio_per_symbol_uses_full_width_columns():
     body = (
         "--- Per-symbol metrics ---\n"
-        "SYMBOL | Titan action | Unrl P/L % | NextWk | Note\n"
-        "RELIANCE | HOLD | +10.5% | 72.0 | ok\n"
+        "Legends: Book % = share\n"
+        "SYMBOL | Titan | Curr ₹ | Book % | Unrl % | Tape | Intent | NextWk | Risk | Drivers\n"
+        "RELIANCE | HOLD | ₹1.20 L | 10.0% | +10.5% | 1d +0.2% · z +0.10 | 55.0 | 72.0 | 4.5 | nextWeek soft\n"
         "* rollup footnote\n"
     )
     html = _render_success_html(body, subject="Titan test")
-    assert html.count("<th ") == 5
-    assert "RELIANCE" in html and "72.0" in html
+    assert html.count("<th ") == 10
+    assert "RELIANCE" in html and "72.0" in html and "Tape" in html
     assert "rollup footnote" in html

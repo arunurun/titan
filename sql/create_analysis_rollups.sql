@@ -78,6 +78,7 @@ create table if not exists public.llm_digest_memory (
     sector text not null,
     prompt_facts jsonb not null default '{}'::jsonb,
     output_text text not null,
+    full_digest text,
     model_name text not null default '',
     output_chars integer not null default 0,
     recorded_at timestamptz not null default now()

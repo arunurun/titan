@@ -6,6 +6,8 @@
  * - REPO_OWNER (e.g., arunurun)
  * - REPO_NAME (e.g., titan)
  * - BREEZE_API_KEY (optional: enables GET /breeze-login redirect to ICICI login)
+ * - SUPABASE_URL (optional: enables GET /insights/latest for TWA / mobile UI)
+ * - SUPABASE_SERVICE_ROLE_KEY (optional: same; service role — never expose to browser)
  */
 
 const ALLOWED_WORKFLOWS = new Set([
@@ -282,6 +284,51 @@ async function gh(env, path, method = "GET", body = null) {
   return JSON.parse(txt);
 }
 
+async function fetchLatestInsight(env, sector) {
+  const base = String(env.SUPABASE_URL || "").trim().replace(/\/+$/, "");
+  const key = String(env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
+  if (!base || !key) {
+    throw new Error("Missing worker secrets: SUPABASE_URL and/or SUPABASE_SERVICE_ROLE_KEY");
+  }
+  const sev = encodeURIComponent(sector);
+  const url =
+    `${base}/rest/v1/llm_digest_memory?sector=eq.${sev}` +
+    "&select=run_id,sector,output_text,full_digest,recorded_at&order=recorded_at.desc&limit=1";
+  const res = await fetch(url, {
+    headers: {
+      apikey: key,
+      Authorization: `Bearer ${key}`,
+      Accept: "application/json",
+    },
+  });
+  const txt = await res.text();
+  if (!res.ok) {
+    throw new Error(`Supabase REST ${res.status}: ${txt.slice(0, 500)}`);
+  }
+  let rows;
+  try {
+    rows = txt ? JSON.parse(txt) : [];
+  } catch (_e) {
+    throw new Error("Supabase REST returned non-JSON");
+  }
+  if (!Array.isArray(rows) || !rows.length) {
+    return { ok: true, insight: null };
+  }
+  const row = rows[0];
+  const full = row.full_digest != null && String(row.full_digest).trim() ? String(row.full_digest) : "";
+  const short = row.output_text != null && String(row.output_text).trim() ? String(row.output_text) : "";
+  const text = full || short;
+  return {
+    ok: true,
+    insight: {
+      run_id: row.run_id || null,
+      sector: row.sector || sector,
+      recorded_at: row.recorded_at || null,
+      text,
+    },
+  };
+}
+
 export default {
   async fetch(request, env) {
     if (request.method === "OPTIONS") return json({ ok: true }, 204);
@@ -332,12 +379,24 @@ export default {
       }
 
       if (isGetLike && path === "/health") {
+        const supabaseUrl = Boolean(String(env.SUPABASE_URL || "").trim());
+        const supabaseKey = Boolean(String(env.SUPABASE_SERVICE_ROLE_KEY || "").trim());
         return json({
           ok: true,
           repo: `${env.REPO_OWNER || "<missing>"}/${env.REPO_NAME || "<missing>"}`,
           has_pat: Boolean(env.GITHUB_PAT),
           allowed_workflows: Array.from(ALLOWED_WORKFLOWS),
+          has_supabase_insights: supabaseUrl && supabaseKey,
         });
+      }
+
+      if (isGetLike && path === "/insights/latest") {
+        const sector = toStringInput(url.searchParams.get("sector")).toLowerCase();
+        if (!sector || !SECTOR_ID_RE.test(sector)) {
+          return json({ error: "sector query param is required ([a-z0-9_]{1,64})" }, 400);
+        }
+        const data = await fetchLatestInsight(env, sector);
+        return json(data);
       }
 
       return json({ error: "not found" }, 404);

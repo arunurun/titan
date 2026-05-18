@@ -109,7 +109,158 @@ def _equity_technical_label(score: Any) -> str:
     return "high defensive bias"
 
 
-def _format_symbol_metrics_line(result: dict[str, Any]) -> str:
+def _digest_verbose_symbol_lines_enabled() -> bool:
+    """Long single-line payload for power users / debugging (default: short blocks)."""
+    return (os.environ.get("TITAN_DIGEST_VERBOSE_SYMBOLS") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _sell_signal_plain_english(signal: str) -> str:
+    s = str(signal or "").strip().lower().replace("_", "-")
+    return {
+        "trim": "Trim (reduce / take profits)",
+        "hold": "Hold",
+        "exit-risk": "Cut risk (exit or size down)",
+    }.get(s, signal or "Review")
+
+
+def _digest_flags_simple(audit: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    if audit.get("panic_absorption_proxy"):
+        out.append("heavy volume on a down day")
+    if audit.get("trap_exit_proxy"):
+        out.append("trap-exit style move")
+    if audit.get("cluster_guardrail_applied"):
+        out.append("sector breadth weakness")
+    if audit.get("macro_guardrail_applied"):
+        out.append("macro risk throttle")
+    if audit.get("event_risk_soon"):
+        out.append("event risk within ~3 sessions")
+    return out
+
+
+def _prediction_brief_line(audit: dict[str, Any]) -> str:
+    """One readable line instead of raw factor vectors."""
+    breakdown = audit.get("prediction_breakdown")
+    if not isinstance(breakdown, dict):
+        return ""
+    week = breakdown.get("week", {}) if isinstance(breakdown.get("week"), dict) else {}
+    penalties = breakdown.get("penalties") if isinstance(breakdown.get("penalties"), list) else []
+    next_week = _safe_float(audit.get("next_week_score"))
+    if math.isnan(next_week):
+        confidence = "unknown"
+    elif next_week >= 70:
+        confidence = "high"
+    elif next_week >= 55:
+        confidence = "medium"
+    else:
+        confidence = "low"
+    if penalties and confidence == "high":
+        confidence = "medium"
+    elif penalties and confidence == "medium":
+        confidence = "low"
+
+    contributors = [
+        ("structure", _safe_float(week.get("tech_composite_term"))),
+        ("trend", _safe_float(week.get("ema_term"))),
+        ("momentum", _safe_float(week.get("ret1d_term"))),
+        ("volatility", -_safe_float(week.get("atr_penalty"))),
+    ]
+    drivers = [name for name, val in contributors if not math.isnan(val) and val >= 1.0]
+    drags = [name for name, val in contributors if not math.isnan(val) and val <= -1.0]
+    atr_pen = _safe_float(week.get("atr_penalty"))
+    if not math.isnan(atr_pen) and atr_pen >= 1.0:
+        drags.append("volatility")
+    drv = drivers[0] if drivers else None
+    drag = drags[0] if drags else None
+
+    parts = [f"Model read: {confidence} confidence"]
+    if drv:
+        parts.append(f"{drv} supportive")
+    if drag:
+        parts.append(f"{drag} weighing on the score")
+    if penalties:
+        parts.append(f"flags: {'; '.join(str(p) for p in penalties[:2])}")
+    return " · ".join(parts)
+
+
+def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
+    symbol = result["symbol"]
+    exchange = result["exchange"]
+    audit = result["audit"]
+    z = audit.get("z_score")
+    intent = audit.get("effective_intent_score", audit.get("intent_score"))
+    vpr = audit.get("volume_participation_ratio", audit.get("absorption_ratio"))
+    ret1d = audit.get("return_1d_pct")
+    atr_pct = audit.get("atr_14_pct")
+    next_week = audit.get("next_week_score")
+    ema_dist = audit.get("ema_200_distance_pct")
+    fundamental_status = str(audit.get("fundamental_status", "unavailable") or "unavailable")
+    fundamental_score = audit.get("fundamental_score")
+    fundamental_reasons = audit.get("fundamental_reasons") if isinstance(audit.get("fundamental_reasons"), list) else []
+    support_tag = audit.get("hypothesis_support", "technical_only")
+    sell_signal = audit.get("sell_signal", "unknown")
+    sell_reasons = audit.get("sell_signal_reasons") if isinstance(audit.get("sell_signal_reasons"), list) else []
+    exchange_used = str(audit.get("exchange_used", exchange))
+    fallback_used = bool(audit.get("exchange_fallback_used", False))
+    nf = audit.get("next_day_score")
+
+    lines_out: list[str] = []
+    lines_out.append(f"{symbol} ({exchange}) — {_sell_signal_plain_english(str(sell_signal))}")
+    lines_out.append(
+        "Scores · "
+        f"next week {_fmt_metric(next_week)} · "
+        f"intent {_fmt_metric(intent)} ({_equity_technical_label(intent)}) · "
+        f"1d {_fmt_metric(ret1d)}%"
+    )
+
+    tape_bits = [
+        f"z {_fmt_metric(z)} ({_z_label(z)})",
+        f"volume {_volume_participation_label(vpr)}",
+        f"ATR {_fmt_metric(atr_pct)}%",
+    ]
+    if not math.isnan(_safe_float(ema_dist)):
+        tape_bits.insert(2, f"vs 200-day avg {_fmt_metric(ema_dist)}%")
+    lines_out.append("Tape · " + " · ".join(tape_bits))
+
+    if not math.isnan(_safe_float(nf)):
+        lines_out.append(f"Very short horizon: tomorrow ~{_fmt_metric(nf)}")
+
+    if sell_reasons:
+        sr = "; ".join(str(x) for x in sell_reasons[:3])
+        lines_out.append(f"Why this action: {sr}")
+
+    pred = _prediction_brief_line(audit)
+    if pred:
+        lines_out.append(pred)
+
+    flag_simple = _digest_flags_simple(audit)
+    if flag_simple:
+        lines_out.append("Context: " + "; ".join(flag_simple))
+
+    if support_tag != "technical_only":
+        lines_out.append(f"Evidence mix: {support_tag.replace('_', ' ')}")
+
+    if fundamental_status.lower() not in ("unavailable", "na", "n/a", "") and not str(fundamental_status).startswith(
+        "unavailable",
+    ):
+        fr = "; ".join(str(x) for x in fundamental_reasons[:2]) if fundamental_reasons else ""
+        lines_out.append(
+            f"Fundamentals: {fundamental_status} ({_fmt_metric(fundamental_score)})"
+            + (f" — {fr}" if fr else ""),
+        )
+
+    if fallback_used and exchange_used.upper() != str(exchange).upper():
+        lines_out.append(f"Price feed: pulled from {exchange_used} (alternate to {exchange}).")
+
+    return "\n".join(lines_out)
+
+
+def _format_symbol_metrics_line_verbose(result: dict[str, Any]) -> str:
     symbol = result["symbol"]
     exchange = result["exchange"]
     audit = result["audit"]
@@ -179,6 +330,12 @@ def _format_symbol_metrics_line(result: dict[str, Any]) -> str:
         f"{base} | support={support_tag} | fundamentals={fundamental_text} "
         f"| sellReason={sell_signal}{sell_reason_text} | {_prediction_reason_text(audit)}"
     )
+
+
+def _format_symbol_metrics_line(result: dict[str, Any]) -> str:
+    if _digest_verbose_symbol_lines_enabled():
+        return _format_symbol_metrics_line_verbose(result)
+    return _format_symbol_metrics_line_simple(result)
 
 
 def _safe_float(x: Any) -> float:
@@ -1255,16 +1412,6 @@ def run_sector_live(
         for r in ok_results:
             save_audit_log({"audit": r["audit"], "post": post}, cfg)
 
-        if persist_meta.get("persisted") and persist_meta.get("run_id"):
-            persist_llm_digest_memory(
-                cfg,
-                run_id=str(persist_meta["run_id"]),
-                sector=sector_id,
-                prompt_facts=comparison if comparison.get("enabled") else {"enabled": False},
-                output_text=post,
-                model_name=None,
-            )
-
         by_bucket: dict[str, list[dict[str, Any]]] = {
             "high-conviction-momentum": [],
             "constructive-watchlist": [],
@@ -1394,6 +1541,16 @@ def run_sector_live(
             lines.append(f"--- {r['symbol']} ({r['exchange']}) FAILED ---")
             lines.append(r.get("error", "") or "")
         digest_text = "\n".join(lines).strip()
+        if persist_meta.get("persisted") and persist_meta.get("run_id"):
+            persist_llm_digest_memory(
+                cfg,
+                run_id=str(persist_meta["run_id"]),
+                sector=sector_id,
+                prompt_facts=comparison if comparison.get("enabled") else {"enabled": False},
+                output_text=post,
+                model_name=None,
+                full_digest=digest_text,
+            )
         if send_email:
             send_success_post_email(digest_text, subject_prefix=f"Titan V12.0 sector {sector_id}")
         print(digest_text)
