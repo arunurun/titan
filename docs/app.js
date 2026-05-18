@@ -571,7 +571,7 @@ function wireEvents() {
   if (testConnBtn) {
     testConnBtn.addEventListener("click", async () => {
       try {
-        setWorking("Test Connection");
+        setWorking("Test connection");
         await checkConnection({ showSuccess: true });
       } catch (e) {
         setStatus(`Connection test failed:\n${e.message}`);
@@ -599,7 +599,7 @@ function wireEvents() {
   if (validateBtn) {
     validateBtn.addEventListener("click", async () => {
       try {
-        setWorking("Dispatch Validate Token");
+        setWorking("Validate token");
         await checkConnection();
         await dispatchWorkflow(WORKFLOWS.validate);
       } catch (e) {
@@ -627,7 +627,7 @@ function wireEvents() {
   if (refreshBtn) {
     refreshBtn.addEventListener("click", async () => {
       try {
-        setWorking("Refresh Status");
+        setWorking("Refresh status");
         await loadLatestRuns();
       } catch (e) {
         setStatus(`Refresh failed:\n${e.message}`);
@@ -681,7 +681,7 @@ function initStorage() {
 try {
   wireEvents();
   initStorage();
-  setStatus("UI ready. Enter token and tap an action button.");
+  setStatus("UI ready.");
 } catch (e) {
   setStatus(`UI init failed:\n${e.message}`);
 }

@@ -63,6 +63,45 @@
     }
     button.secondary { background: var(--g-green); }
     button.warning { background: var(--g-yellow); color: #202124; }
+    /* Compact toolbar buttons (quick actions, refresh) */
+    button.btn-sm {
+      width: auto;
+      margin-top: 0;
+      padding: 8px 10px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      border-radius: 8px;
+    }
+    .btn-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .btn-toolbar button.btn-sm {
+      flex: 1 1 calc(50% - 4px);
+      min-width: 120px;
+    }
+    .btn-toolbar--3 button.btn-sm {
+      flex: 1 1 calc(33.333% - 6px);
+      min-width: 100px;
+    }
+    @media (max-width: 400px) {
+      .btn-toolbar--3 button.btn-sm { flex: 1 1 calc(50% - 4px); }
+    }
+    .proxy-line {
+      margin-top: 10px;
+      font-size: 0.78rem;
+      color: var(--muted);
+      word-break: break-all;
+    }
+    .proxy-line code { font-size: 0.78rem; }
+    .runs-footer {
+      margin-top: 10px;
+      display: flex;
+      justify-content: flex-end;
+    }
+    .runs-footer button.btn-sm { width: auto; margin-top: 0; }
     .status {
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -83,22 +122,17 @@
   <div class="container">
     <h1>Titan Mobile Control</h1>
     <div class="header-line"></div>
-    <p class="muted">GitHub-hosted control page for mobile use. Buttons dispatch workflows and show latest run status.</p>
+    <p class="muted">Dispatch workflows via the proxy below. No GitHub token in the browser.</p>
 
     <div class="card">
-      <h3>Breeze login (new session token)</h3>
-      <p class="small">Opens ICICI Breeze in a new tab (API key is held only in the proxy secret). After login, copy <code>API_Session</code> from the redirect URL and paste it under Persist Token.</p>
-      <button type="button" class="secondary" id="breezeLoginBtn">Open Breeze login</button>
-    </div>
-
-    <div class="card">
-      <h3>Connection</h3>
-      <p class="small">
-        This page is tokenless by design. It talks to a secure backend proxy that stores GitHub credentials server-side.
-      </p>
-      <p class="small">Dispatch proxy is configured in code:</p>
-      <code id="proxyBase">loading...</code>
-      <button type="button" id="testConnBtn">Test Connection</button>
+      <h3>Session &amp; connection</h3>
+      <p class="small">After Breeze login, copy <code>API_Session</code> from the redirect URL, then paste under Persist Token.</p>
+      <div class="btn-toolbar btn-toolbar--3" role="group" aria-label="Quick actions">
+        <button type="button" class="secondary btn-sm" id="breezeLoginBtn">Breeze login</button>
+        <button type="button" class="secondary btn-sm" id="validateBtn">Validate token</button>
+        <button type="button" class="btn-sm" id="testConnBtn">Test connection</button>
+      </div>
+      <p class="proxy-line">Proxy: <code id="proxyBase">loading…</code></p>
     </div>
 
     <div class="card">
@@ -170,8 +204,8 @@
     <div class="card">
       <h3>Portfolio PDF Quick Scan</h3>
       <p class="small">
-        Upload a portfolio PDF (or paste holdings text). Holdings are extracted on-device as
-        <code>symbol, quantity, avg buy price</code> and dispatched for position-aware buy/hold/sell analysis.
+        Upload a portfolio PDF (or paste holdings text). Parsed on-device as <code>symbol, quantity, avg buy price</code>.
+        Default <strong>NSE</strong>; use a <code>BSE:</code> prefix per line if needed. Up to <strong>75</strong> holdings per run.
       </p>
       <label>Upload portfolio PDF (optional)</label>
       <input id="portfolioPdfFile" type="file" accept=".pdf,application/pdf" />
@@ -181,19 +215,7 @@
         rows="5"
         placeholder="NSE:RELIANCE, 10, 2380.5&#10;INFY 5 1452&#10;ASTMIC31501,3,710"
       ></textarea>
-      <div class="row">
-        <div>
-          <label>Portfolio sector label</label>
-          <input id="portfolioSectorId" value="portfolio_pdf" />
-          <p class="small">Default exchange NSE; prefix lines with <code>BSE:</code> for BSE symbols. Up to 75 holdings analyzed per run.</p>
-        </div>
-      </div>
       <button type="button" class="secondary" id="portfolioScanBtn">Dispatch Portfolio Quick Scan</button>
-    </div>
-
-    <div class="card">
-      <h3>Validate Breeze Token</h3>
-      <button type="button" class="secondary" id="validateBtn">Dispatch Validate Token</button>
     </div>
 
     <div class="card">
@@ -204,12 +226,14 @@
     </div>
 
     <div class="card">
-      <h3>Latest Workflow Runs</h3>
-      <button type="button" id="refreshBtn">Refresh Status</button>
+      <h3>Latest workflow runs</h3>
       <div id="status" class="status">Loading UI…</div>
+      <div class="runs-footer">
+        <button type="button" class="btn-sm" id="refreshBtn">Refresh status</button>
+      </div>
     </div>
   </div>
 
-  <script defer src="./app.js?v=20260518-8"></script>
+  <script defer src="./app.js?v=20260518-10"></script>
 </body>
 </html>
