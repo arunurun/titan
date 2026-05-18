@@ -46,6 +46,6 @@ jobs:
           BREEZE_SESSION_TOKEN: ${{ secrets.BREEZE_SESSION_TOKEN }}
           BREEZE_HIST_CALL_INTERVAL_SECONDS: "0.35"
         run: |
-          TOPN="${{ inputs.top_n }}"
+          TOPN="${{ github.event.inputs.top_n || '10' }}"
           if [ -z "$TOPN" ]; then TOPN=10; fi
           python scripts/refresh_all_sector_rankings.py --top-n "$TOPN" --exclude-sectors unknown,non_equity

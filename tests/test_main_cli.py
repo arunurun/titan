@@ -221,6 +221,40 @@ def test_protocol_run_invokes_window_runner(monkeypatch):
     )
 
 
+def test_all_sectors_priority_invokes_runner(monkeypatch):
+    import main as main_mod
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prog",
+            "--all-sectors",
+            "--sector-priority-only",
+            "--sector-priority-top-n",
+            "5",
+            "--sector-workers",
+            "2",
+        ],
+    )
+    mock_runner = MagicMock()
+    monkeypatch.setattr(main_mod, "run_all_sectors", mock_runner)
+
+    main_mod.main()
+
+    mock_runner.assert_called_once_with(
+        max_workers=2,
+        all_sector_workers=None,
+        max_symbols=None,
+        digest=True,
+        exclude_sectors=("unknown", "non_equity"),
+        macro_snapshot=None,
+        event_snapshot=None,
+        priority_only=True,
+        priority_top_n=5,
+    )
+
+
 def test_all_sectors_invokes_parallel_runner(monkeypatch):
     import main as main_mod
 

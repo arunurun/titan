@@ -203,6 +203,9 @@ TEMPLATE = """
 
     <div class="card">
       <h3>Persist New Breeze Token to Supabase</h3>
+      {% if breeze_login_url %}
+      <p class="hint"><a href="{{ breeze_login_url }}" target="_blank" rel="noopener noreferrer">Open Breeze login</a> to copy a fresh <code>API_Session</code>.</p>
+      {% endif %}
       <p class="hint">Paste API_Session token OR full redirect URL containing <code>API_Session</code>. We validate before persisting.</p>
       <form method="post" action="/persist-token">
         <textarea name="token_input" rows="4" placeholder="Paste API_Session or redirect URL here..."></textarea>

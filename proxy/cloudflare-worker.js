@@ -5,6 +5,7 @@
  * - GITHUB_PAT
  * - REPO_OWNER (e.g., arunurun)
  * - REPO_NAME (e.g., titan)
+ * - BREEZE_API_KEY (optional: enables GET /breeze-login redirect to ICICI login)
  */
 
 const ALLOWED_WORKFLOWS = new Set([
