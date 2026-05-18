@@ -16,14 +16,16 @@ on:
       - "android/twa/**"
       - ".github/workflows/android-twa-apk.yml"
 
+# Do not cancel in-progress runs: a second push was aborting Gradle mid-build
+# with "The operation was canceled." New runs queue until the current one finishes.
 concurrency:
   group: android-twa-apk-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
