@@ -116,12 +116,17 @@ jobs:
             fi
             python main.py $ARGS
           else
-            ARGS="--sector ${{ inputs.sector_id }} --sector-digest"
-            if [ -n "${{ inputs.max_symbols }}" ]; then
-              ARGS="$ARGS --sector-max-symbols ${{ inputs.max_symbols }}"
+            if [ "${{ inputs.sector_id }}" = "ai" ]; then
+              # Keep manual AI runs constrained to top-ranked AI names.
+              python main.py --sector ai --sector-priority-only --sector-priority-top-n 10 --sector-workers 1
+            else
+              ARGS="--sector ${{ inputs.sector_id }} --sector-digest"
+              if [ -n "${{ inputs.max_symbols }}" ]; then
+                ARGS="$ARGS --sector-max-symbols ${{ inputs.max_symbols }}"
+              fi
+              if [ -n "${{ inputs.workers }}" ]; then
+                ARGS="$ARGS --sector-workers ${{ inputs.workers }}"
+              fi
+              python main.py $ARGS
             fi
-            if [ -n "${{ inputs.workers }}" ]; then
-              ARGS="$ARGS --sector-workers ${{ inputs.workers }}"
-            fi
-            python main.py $ARGS
           fi
