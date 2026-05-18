@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import smtplib
 import ssl
 from urllib.parse import quote
@@ -14,6 +15,66 @@ from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
+
+# Sector digest simple format: "SYMBOL (NSE) — action" headline (Unicode em dash or ASCII hyphen).
+_SYMBOL_DIGEST_HEADLINE_RE = re.compile(
+    r"^[A-Z0-9&][A-Z0-9&.\-]{0,22}\s*\((?:NSE|BSE)\)\s*[—\-]\s*.+",
+)
+
+
+def _split_sector_per_symbol_digest_blocks(lines: list[str]) -> tuple[list[str], list[list[str]]]:
+    """Group multi-line sector digest metrics under each SYMBOL (EXCH) headline."""
+    preamble: list[str] = []
+    blocks: list[list[str]] = []
+    current: list[str] | None = None
+    for item in lines:
+        if _SYMBOL_DIGEST_HEADLINE_RE.match(item):
+            if current:
+                blocks.append(current)
+            current = [item]
+        else:
+            if current is not None:
+                current.append(item)
+            else:
+                preamble.append(item)
+    if current:
+        blocks.append(current)
+    return preamble, blocks
+
+
+def _html_per_symbol_sector_cards(other_lines: list[str]) -> str:
+    """Readable Gmail layout: one bordered card per symbol block."""
+    preamble, sym_blocks = _split_sector_per_symbol_digest_blocks(other_lines)
+    if not sym_blocks:
+        return "".join(
+            f'<p style="margin:10px 0 0;color:#3c4043;font-size:12px;line-height:1.45;">{escape(note)}</p>'
+            for note in other_lines
+        )
+    parts: list[str] = []
+    for line in preamble:
+        parts.append(
+            f'<p style="margin:0 0 10px;color:#5f6368;font-size:12px;line-height:1.45;">{escape(line)}</p>',
+        )
+    card_style = (
+        "border:1px solid #dadce0;border-radius:10px;padding:12px 14px;margin:0 0 14px;"
+        "background:#fafafa;box-shadow:0 1px 2px rgba(60,64,67,0.08);"
+    )
+    for block in sym_blocks:
+        head = escape(block[0])
+        body = block[1:]
+        inner = (
+            f'<div style="{card_style}">'
+            f'<div style="font-size:14px;font-weight:700;color:#202124;line-height:1.35;margin:0;">{head}</div>'
+        )
+        if body:
+            rows = "".join(
+                f'<div style="margin:6px 0 0;font-size:12px;line-height:1.55;color:#3c4043;">{escape(b)}</div>'
+                for b in body
+            )
+            inner += f'<div style="margin-top:4px;">{rows}</div>'
+        inner += "</div>"
+        parts.append(inner)
+    return "".join(parts)
 
 
 def _smtp_config() -> dict[str, object] | None:
@@ -159,10 +220,8 @@ def _render_success_html(post_text: str, *, subject: str) -> str:
                         "</tr></thead>"
                         f"<tbody>{''.join(legacy_rows)}</tbody></table>"
                     )
-            for note in other_lines:
-                parts.append(
-                    f'<p style="margin:12px 0 0;color:#5f6368;font-size:12px;line-height:1.4;">{escape(note)}</p>'
-                )
+            if other_lines:
+                parts.append(_html_per_symbol_sector_cards(other_lines))
             blocks.append(card(name, "".join(parts) if parts else "<p>No data.</p>", color=color))
             continue
         if all(":" in item for item in items):

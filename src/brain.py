@@ -277,6 +277,80 @@ def generate_portfolio_llm_summary(
     raise ValueError("[Gemini] Portfolio brief failed compliance after retry.")
 
 
+def resolve_equity_disambiguation_pick(
+    user_hint: str,
+    candidates: Sequence[tuple[str, str]],
+    *,
+    api_key: str | None = None,
+    api_keys: Sequence[str] | None = None,
+) -> tuple[int, float] | None:
+    """
+    Choose one candidate index matching free-form user_hint (research / mapping helper).
+    Returns (index_into_candidates, model_confidence) or None when the model rejects all.
+    """
+    if not str(user_hint or "").strip() or not candidates:
+        return None
+    keys = _resolve_gemini_keys(api_keys, api_key)
+    if not keys:
+        return None
+    resolved_model = (os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash-lite").strip()
+    cata = [{"i": i, "symbol": c[0], "exchange": c[1]} for i, c in enumerate(tuple(candidates)[:54])]
+
+    compact = _env_truthy("GEMINI_COMPACT_PROMPT", default=True)
+    cat_json = json.dumps(cata, separators=(",", ":"), ensure_ascii=False) if compact else json.dumps(cata)
+    prompt = (
+        "Task: Match the user's search text to at most ONE listed equity entry from the catalog array.\n"
+        "Respond with ONLY valid JSON: {\"pick\":null} or {\"pick\":<integer index i>,\"confidence\":number 0..1}.\n"
+        "Prefer obvious company/symbol/name alignment; reject weak matches with {\"pick\":null}.\n"
+        "Do not advise trading; indexing only.\n\n"
+        f'User hint: {user_hint.strip()}\n\nCatalog:\n{cat_json}\n'
+    )
+
+    try:
+        text = _generate(keys, resolved_model, prompt)
+    except Exception:
+        logger.warning("Gemini equity disambiguation call failed")
+        return None
+    stripped = text.strip()
+    lower = stripped.lower()
+    fence = "```"
+    if lower.startswith(fence):
+        stripped = stripped.split("\n", 1)[1] if "\n" in stripped else ""
+        stripped = stripped.rsplit(fence, 1)[0].strip()
+
+    idx: int | None = None
+    conf_val = 0.75
+    try:
+        blob = json.loads(stripped)
+    except json.JSONDecodeError:
+        logger.warning("Gemini equity pick returned non-JSON; ignored")
+        return None
+    if not isinstance(blob, dict):
+        return None
+    if blob.get("pick") is None:
+        return None
+    pi = blob.get("pick")
+    if isinstance(pi, bool):
+        return None
+    try:
+        idx = int(pi)
+    except (TypeError, ValueError):
+        return None
+    if idx < 0 or idx >= len(cata):
+        return None
+    raw_conf = blob.get("confidence")
+    if isinstance(raw_conf, bool):
+        raw_conf = None
+    try:
+        if raw_conf is not None:
+            conf_val = max(0.0, min(1.0, float(raw_conf)))
+    except (TypeError, ValueError):
+        conf_val = 0.75
+    if conf_val < 0.52:
+        return None
+    return idx, conf_val
+
+
 def generate_titan_narrative(
     audit_data: dict[str, Any],
     *,

@@ -257,7 +257,9 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     if fallback_used and exchange_used.upper() != str(exchange).upper():
         lines_out.append(f"Price feed: pulled from {exchange_used} (alternate to {exchange}).")
 
-    return "\n".join(lines_out)
+    head = lines_out[0]
+    tail = ["  " + ln for ln in lines_out[1:]]
+    return "\n".join([head, *tail])
 
 
 def _format_symbol_metrics_line_verbose(result: dict[str, Any]) -> str:
@@ -1531,8 +1533,10 @@ def run_sector_live(
             ),
             reverse=True,
         )
-        for r in ranked:
+        for i, r in enumerate(ranked):
             lines.append(_format_symbol_metrics_line(r))
+            if i < len(ranked) - 1:
+                lines.append("")
         for r in sorted(
             (x for x in results if (not x.get("ok")) and not _is_skipped_no_data_error(x.get("error"))),
             key=lambda x: (x["symbol"], x["exchange"]),

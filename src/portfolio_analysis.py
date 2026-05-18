@@ -49,6 +49,9 @@ _SYMBOL_ALIAS_HINTS = {
     "ASTMIC": "ASTRAMICRO",
     "DATPAT": "DATAPATTNS",
     "JYORES": "JYOTIRES",
+    # Common typos toward Data Patterns Technologies (listed as DATAPATTNS on NSE).
+    "DATAPATTERNS": "DATAPATTNS",
+    "DATAPATTERN": "DATAPATTNS",
     # PDF / contract codes (ICICI Breeze stock_code ≠ NSE display symbol).
     # BHAELE is BEL (Bharat Electronics); do not confuse with BHEL (Bharat Heavy Electricals).
     "BHAELE": "BEL",

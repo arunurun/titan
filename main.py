@@ -55,7 +55,6 @@ from titan_engine import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("titan.main")
-CUSTOM_SYMBOL_RE = re.compile(r"^[A-Z0-9&._-]{1,25}$")
 
 
 def build_dummy_audit() -> dict:
@@ -371,25 +370,6 @@ def run_live() -> None:
     print(format_social_post(post))
 
 
-def _parse_custom_symbols(raw: str) -> list[str]:
-    tokens = [tok.strip().upper() for tok in re.split(r"[\s,;\n\r\t]+", raw or "") if tok.strip()]
-    if not tokens:
-        raise ValueError("custom symbol list is empty")
-    out: list[str] = []
-    seen: set[str] = set()
-    for symbol in tokens:
-        if not CUSTOM_SYMBOL_RE.fullmatch(symbol):
-            raise ValueError(
-                f"invalid custom symbol {symbol!r}; use A-Z, 0-9, &, ., _, - (max 25 chars)"
-            )
-        if symbol not in seen:
-            seen.add(symbol)
-            out.append(symbol)
-    if len(out) > 120:
-        raise ValueError("custom symbol list exceeds max size (120)")
-    return out
-
-
 def main() -> None:
     p = argparse.ArgumentParser(description="Titan V12.0")
     p.add_argument("--dry-run", action="store_true", help="Simulate with dummy data")
@@ -461,7 +441,10 @@ def main() -> None:
         type=str,
         default="",
         metavar="CSV",
-        help="Run sector audit on explicit symbols (comma/space/newline separated).",
+        help=(
+            "Comma/semicolon/newline-separated equity hints: exact symbols (RELIANCE,INFY) "
+            "or messy search text / company names; mapped via Titan universe + optional Gemini."
+        ),
     )
     p.add_argument(
         "--custom-exchange",
@@ -601,7 +584,6 @@ def main() -> None:
 
     if args.sector.strip() or custom_symbols_raw:
         from sector_audit import run_sector_live
-        from sector_registry import SectorInstrument
 
         # --sector-digest kept for backward compatibility (no-op; digest is default).
         sector_digest = not args.sector_per_symbol_narrative
@@ -616,13 +598,26 @@ def main() -> None:
                 run_kwargs["priority_top_n"] = max(1, int(args.sector_priority_top_n))
         sector_id = args.sector.strip() or "custom_ui"
         if custom_symbols_raw:
-            symbols = _parse_custom_symbols(custom_symbols_raw)
-            run_kwargs["instruments_override"] = [
-                SectorInstrument(symbol=symbol, exchange=args.custom_exchange) for symbol in symbols
-            ]
+            from custom_equity_resolution import resolve_custom_equity_field_to_sector_instruments
+
+            cfg = load_config()
+            instruments, hint_map = resolve_custom_equity_field_to_sector_instruments(
+                custom_symbols_raw,
+                preferred_exchange=args.custom_exchange,
+                cfg=cfg,
+            )
+            for row in hint_map:
+                logger.info(
+                    "Custom equity mapping: hint=%r → %s (%s) via %s",
+                    row["hint"],
+                    row["symbol"],
+                    row["exchange"],
+                    row["via"],
+                )
+            run_kwargs["instruments_override"] = instruments
             logger.info(
-                "Running custom symbol analysis for %d symbols on %s (sector label=%s)",
-                len(symbols),
+                "Running custom equity analysis for %d resolved instrument(s) on %s (sector label=%s)",
+                len(instruments),
                 args.custom_exchange,
                 sector_id,
             )
