@@ -1,0 +1,21 @@
+{
+  "sector_key": "it",
+  "policy": "sector_strict_allowlist_v1",
+  "symbols": [
+    "TCS",
+    "INFY",
+    "WIPRO",
+    "HCLTECH",
+    "TECHM",
+    "MPHASIS",
+    "COFORGE",
+    "LTTS",
+    "PERSISTENT",
+    "LTIM",
+    "OFSS",
+    "SONATSOFTW",
+    "ZENSART",
+    "NEWGEN",
+    "BSOFT"
+  ]
+}

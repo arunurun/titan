@@ -1,0 +1,21 @@
+{
+  "sector_key": "auto_ancillary",
+  "policy": "sector_strict_allowlist_v1",
+  "symbols": [
+    "BHARATFORG",
+    "MOTHERSON",
+    "SONACOMS",
+    "UNOMINDA",
+    "ENDURANCE",
+    "BOSCHLTD",
+    "RKFORGE",
+    "SCHAEFFLER",
+    "TIMKEN",
+    "EXIDEIND",
+    "AMARAJABAT",
+    "APOLLOTYRE",
+    "CEATLTD",
+    "JKTYRE",
+    "MRF"
+  ]
+}

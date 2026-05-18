@@ -1,0 +1,21 @@
+{
+  "sector_key": "defence",
+  "policy": "sector_strict_allowlist_v1",
+  "symbols": [
+    "HAL",
+    "BEL",
+    "BDL",
+    "MAZDOCK",
+    "GRSE",
+    "COCHINSHIP",
+    "DATAPATTNS",
+    "PARAS",
+    "ASTRAMICRO",
+    "MTARTECH",
+    "DYNAMATECH",
+    "MIDHANI",
+    "BEML",
+    "IDEAFORGE",
+    "ZENTEC"
+  ]
+}

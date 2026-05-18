@@ -16,8 +16,9 @@ from threading import Lock
 from dotenv import dotenv_values, load_dotenv
 
 ROOT = Path(__file__).resolve().parent
-# override=True: if OS has GEMINI_API_KEY="" it would otherwise block .env.
-load_dotenv(ROOT / ".env", override=True)
+# Prefer existing OS env (e.g. BREEZE_SESSION_TOKEN from Supabase inject) over .env stale values.
+# Gemini empty-env edge case is handled by _gemini_api_keys_for_dry_run().
+load_dotenv(ROOT / ".env", override=False)
 
 
 def _gemini_api_keys_for_dry_run() -> tuple[str, ...]:

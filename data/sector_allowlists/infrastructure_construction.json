@@ -1,0 +1,21 @@
+{
+  "sector_key": "infrastructure_construction",
+  "policy": "sector_strict_allowlist_v1",
+  "symbols": [
+    "LT",
+    "NCC",
+    "RVNL",
+    "IRCON",
+    "RITES",
+    "HGINFRA",
+    "PNCINFRA",
+    "GMRAIRPORT",
+    "KNRCON",
+    "GRINFRA",
+    "KEC",
+    "KPIL",
+    "JWL",
+    "IRB",
+    "ENGINERSIN"
+  ]
+}

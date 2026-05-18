@@ -1,0 +1,21 @@
+{
+  "sector_key": "metals_mining",
+  "policy": "sector_strict_allowlist_v1",
+  "symbols": [
+    "TATASTEEL",
+    "JSWSTEEL",
+    "HINDALCO",
+    "VEDL",
+    "NATIONALUM",
+    "HINDZINC",
+    "SAIL",
+    "JINDALSTEL",
+    "NMDC",
+    "MOIL",
+    "APLAPOLLO",
+    "RATNAMANI",
+    "WELCORP",
+    "HINDCOPPER",
+    "JSL"
+  ]
+}

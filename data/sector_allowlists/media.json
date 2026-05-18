@@ -1,0 +1,21 @@
+{
+  "sector_key": "media",
+  "policy": "sector_strict_allowlist_v1",
+  "symbols": [
+    "SUNTV",
+    "ZEEL",
+    "NETWORK18",
+    "DISHTV",
+    "BALAJITELE",
+    "SAREGAMA",
+    "NDTV",
+    "HTMEDIA",
+    "JAGRAN",
+    "PVRINOX",
+    "INOXLEISUR",
+    "DEN",
+    "TIPS",
+    "TCNSBRANDS",
+    "NAM-INDIA"
+  ]
+}

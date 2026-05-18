@@ -1,0 +1,16 @@
+{
+  "sector_key": "insurance",
+  "policy": "sector_strict_allowlist_v1",
+  "symbols": [
+    "LICI",
+    "ICICIGI",
+    "SBILIFE",
+    "HDFCLIFE",
+    "MAXHEALTH",
+    "STARHEALTH",
+    "ICICIPRULI",
+    "NEWINDIA",
+    "GICRE",
+    "NIACL"
+  ]
+}

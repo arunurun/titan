@@ -1,0 +1,21 @@
+{
+  "sector_key": "fmcg_staples",
+  "policy": "sector_strict_allowlist_v1",
+  "symbols": [
+    "HINDUNILVR",
+    "ITC",
+    "NESTLEIND",
+    "BRITANNIA",
+    "DABUR",
+    "MARICO",
+    "COLPAL",
+    "GODREJCP",
+    "VBL",
+    "TATACONSUM",
+    "EMAMILTD",
+    "RADICO",
+    "UNITEDSPI",
+    "PGHH",
+    "BLISSGVS"
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "sector_key": "chemicals",
+  "policy": "sector_strict_allowlist_v1",
+  "symbols": [
+    "UPL",
+    "TATACHEM",
+    "PIIND",
+    "PIDILITIND",
+    "AARTIIND",
+    "SRF",
+    "DEEPAKNTR",
+    "VINATIORGA",
+    "ALKYLAMINE",
+    "NOCIL",
+    "GHCL",
+    "NAVINFLUOR",
+    "BALAMINES",
+    "FINEORG",
+    "LXCHEM"
+  ]
+}

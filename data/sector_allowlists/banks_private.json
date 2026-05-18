@@ -1,0 +1,21 @@
+{
+  "sector_key": "banks_private",
+  "policy": "sector_strict_allowlist_v1",
+  "symbols": [
+    "HDFCBANK",
+    "ICICIBANK",
+    "KOTAKBANK",
+    "AXISBANK",
+    "INDUSINDBK",
+    "IDFCFIRSTB",
+    "FEDERALBNK",
+    "BANDHANBNK",
+    "YESBANK",
+    "RBLBANK",
+    "CSBBANK",
+    "CUB",
+    "KARURVYSYA",
+    "TMB",
+    "SOUTHBANK"
+  ]
+}

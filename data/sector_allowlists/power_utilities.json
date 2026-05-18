@@ -1,0 +1,21 @@
+{
+  "sector_key": "power_utilities",
+  "policy": "sector_strict_allowlist_v1",
+  "symbols": [
+    "NTPC",
+    "POWERGRID",
+    "TATAPOWER",
+    "ADANIGREEN",
+    "ADANIPOWER",
+    "TORNTPOWER",
+    "JSWENERGY",
+    "NHPC",
+    "SJVN",
+    "CESC",
+    "ATGL",
+    "IGL",
+    "MGL",
+    "GSPL",
+    "PETRONET"
+  ]
+}

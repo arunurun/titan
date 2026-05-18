@@ -1,0 +1,21 @@
+{
+  "sector_key": "nbfc_financial_services",
+  "policy": "sector_strict_allowlist_v1",
+  "symbols": [
+    "BAJFINANCE",
+    "BAJAJFINSV",
+    "CHOLAFIN",
+    "SHRIRAMFIN",
+    "LTF",
+    "MUTHOOTFIN",
+    "MANAPPURAM",
+    "PNBHOUSING",
+    "LICHSGFIN",
+    "CANFINHOME",
+    "AAVAS",
+    "UGROCAP",
+    "FIVESTAR",
+    "SBFC",
+    "ANGELONE"
+  ]
+}

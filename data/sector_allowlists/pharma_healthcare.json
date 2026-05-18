@@ -1,0 +1,21 @@
+{
+  "sector_key": "pharma_healthcare",
+  "policy": "sector_strict_allowlist_v1",
+  "symbols": [
+    "SUNPHARMA",
+    "DRREDDY",
+    "CIPLA",
+    "LUPIN",
+    "BIOCON",
+    "DIVISLAB",
+    "AUROPHARMA",
+    "ALKEM",
+    "TORNTPHARM",
+    "IPCALAB",
+    "LAURUSLABS",
+    "SYNGENE",
+    "GRANULES",
+    "NATCOPHARM",
+    "ZYDUSLIFE"
+  ]
+}

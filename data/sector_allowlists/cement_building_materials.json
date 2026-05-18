@@ -1,0 +1,21 @@
+{
+  "sector_key": "cement_building_materials",
+  "policy": "sector_strict_allowlist_v1",
+  "symbols": [
+    "ULTRACEMCO",
+    "SHREECEM",
+    "AMBUJACEM",
+    "ACC",
+    "DALBHARAT",
+    "RAMCOCEM",
+    "JKCEMENT",
+    "ORIENTCEM",
+    "HEIDELBERG",
+    "PRSMJOHNSN",
+    "NCLIND",
+    "SANGHIIND",
+    "DECCANCE",
+    "BIRLACORPN",
+    "INDIACEM"
+  ]
+}

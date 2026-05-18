@@ -1,0 +1,21 @@
+{
+  "sector_key": "realty_reits",
+  "policy": "sector_strict_allowlist_v1",
+  "symbols": [
+    "DLF",
+    "GODREJPROP",
+    "OBEROIRLTY",
+    "PRESTIGE",
+    "BRIGADE",
+    "SOBHA",
+    "MAHLIFE",
+    "PHOENIXLTD",
+    "ANANTRAJ",
+    "LODHA",
+    "SIGNATURE",
+    "SWANCORP",
+    "SUNTECK",
+    "PARSVNATH",
+    "NESCO"
+  ]
+}

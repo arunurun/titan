@@ -1,0 +1,21 @@
+{
+  "sector_key": "capital_goods_industrials",
+  "policy": "sector_strict_allowlist_v1",
+  "symbols": [
+    "LT",
+    "SIEMENS",
+    "ABB",
+    "BHEL",
+    "THERMAX",
+    "VOLTAS",
+    "KIRLOSENG",
+    "GREAVESCOT",
+    "SKFINDIA",
+    "ELECON",
+    "ELGIEQUIP",
+    "TIMKEN",
+    "HONAUT",
+    "TRF",
+    "WABAG"
+  ]
+}

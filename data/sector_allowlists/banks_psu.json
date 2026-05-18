@@ -1,0 +1,19 @@
+{
+  "sector_key": "banks_psu",
+  "policy": "sector_strict_allowlist_v1",
+  "symbols": [
+    "SBIN",
+    "BANKBARODA",
+    "PNB",
+    "CANBK",
+    "UNIONBANK",
+    "INDIANB",
+    "CENTRALBK",
+    "BANKINDIA",
+    "UCOBANK",
+    "IOB",
+    "MAHABANK",
+    "PSB",
+    "JKBANK"
+  ]
+}

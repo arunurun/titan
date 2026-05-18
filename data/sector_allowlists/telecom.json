@@ -1,0 +1,21 @@
+{
+  "sector_key": "telecom",
+  "policy": "sector_strict_allowlist_v1",
+  "symbols": [
+    "BHARTIARTL",
+    "IDEA",
+    "INDUSTOWER",
+    "TATACOMM",
+    "ONMOBILE",
+    "RAILTEL",
+    "MTNL",
+    "HFCL",
+    "ITI",
+    "NELCO",
+    "ROUTE",
+    "TEJASNET",
+    "STLTECH",
+    "GTPL",
+    "TTML"
+  ]
+}

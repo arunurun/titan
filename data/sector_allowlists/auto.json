@@ -1,0 +1,21 @@
+{
+  "sector_key": "auto",
+  "policy": "sector_strict_allowlist_v1",
+  "symbols": [
+    "MARUTI",
+    "TATAMTRDVR",
+    "M&M",
+    "EICHERMOT",
+    "BAJAJ-AUTO",
+    "HEROMOTOCO",
+    "TVSMOTOR",
+    "ASHOKLEY",
+    "OLECTRA",
+    "FORCEMOT",
+    "TIINDIA",
+    "ESCORTS",
+    "VSTTILLERS",
+    "HYUNDAI",
+    "MAHSCOOTER"
+  ]
+}

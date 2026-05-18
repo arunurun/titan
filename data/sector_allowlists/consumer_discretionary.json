@@ -1,0 +1,21 @@
+{
+  "sector_key": "consumer_discretionary",
+  "policy": "sector_strict_allowlist_v1",
+  "symbols": [
+    "TRENT",
+    "TITAN",
+    "INDIGO",
+    "JUBLFOOD",
+    "DEVYANI",
+    "WESTLIFE",
+    "BATAINDIA",
+    "RELAXO",
+    "PAGEIND",
+    "VIPIND",
+    "DOMS",
+    "ZOMATO",
+    "BECTORFOOD",
+    "CERA",
+    "KAJARIACER"
+  ]
+}

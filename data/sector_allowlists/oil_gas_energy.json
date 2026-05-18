@@ -1,0 +1,21 @@
+{
+  "sector_key": "oil_gas_energy",
+  "policy": "sector_strict_allowlist_v1",
+  "symbols": [
+    "RELIANCE",
+    "ONGC",
+    "OIL",
+    "BPCL",
+    "HINDPETRO",
+    "IOC",
+    "GAIL",
+    "PETRONET",
+    "MRPL",
+    "CHENNPETRO",
+    "ATGL",
+    "GSPL",
+    "CASTROLIND",
+    "IGL",
+    "MGL"
+  ]
+}

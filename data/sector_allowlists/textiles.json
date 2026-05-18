@@ -1,0 +1,21 @@
+{
+  "sector_key": "textiles",
+  "policy": "sector_strict_allowlist_v1",
+  "symbols": [
+    "ARVIND",
+    "WELSPUNIND",
+    "TRIDENT",
+    "RAYMOND",
+    "VARDHACRLC",
+    "KPRMILL",
+    "PAGEIND",
+    "NITINSPIN",
+    "GARFIBRES",
+    "RSWM",
+    "VTL",
+    "SNL",
+    "RUPA",
+    "ORIENTLTD",
+    "GOKEX"
+  ]
+}

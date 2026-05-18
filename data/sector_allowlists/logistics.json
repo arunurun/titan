@@ -1,0 +1,17 @@
+{
+  "sector_key": "logistics",
+  "policy": "sector_strict_allowlist_v1",
+  "symbols": [
+    "CONCOR",
+    "DELHIVERY",
+    "MAHLOG",
+    "TCIEXP",
+    "NAVKARCORP",
+    "ALLCARGO",
+    "BLUEDART",
+    "VRLLOG",
+    "AEGISLOG",
+    "RITCO",
+    "SNOWMAN"
+  ]
+}
