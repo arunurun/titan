@@ -44,6 +44,16 @@ _SYMBOL_ALIAS_HINTS = {
     "ASTMIC": "ASTRAMICRO",
     "DATPAT": "DATAPATTNS",
     "JYORES": "JYOTIRES",
+    # PDF / contract codes (ICICI Breeze stock_code ≠ NSE display symbol).
+    # BHAELE is BEL (Bharat Electronics); do not confuse with BHEL (Bharat Heavy Electricals).
+    "BHAELE": "BEL",
+    "BHAEL": "BEL",
+    # Statement contract codes (vary by broker naming).
+    "HBLPOW": "HBLENGINE",
+    "DSPGOL": "GOLDETFADD",
+    "SBIGOL": "SETFGOLD",
+    "SBISIL": "SBISILVER",
+    "SOLIN": "SOLARINDS",
 }
 
 
@@ -197,8 +207,22 @@ def _resolve_symbol(
         if hint_key in other_map:
             return other_map[hint_key], other_ex, "alias_hint_cross_exchange", 0.9
 
-    # 4) Prefix match in same exchange.
-    candidates = [k for k in same_map.keys() if k.startswith(key_trim) or key_trim.startswith(k)]
+    # 4) Prefix match in same exchange (avoid SOLIN/PARDEF collapsing to a tiny key like "S").
+    candidates = [
+        k
+        for k in same_map.keys()
+        if k.startswith(key_trim)
+        or (
+            len(k) >= 3
+            and key_trim.startswith(k)
+            and len(key_trim) <= len(k) + 2
+        )
+    ]
+    if candidates:
+        if len(key_trim) >= 5:
+            candidates = [c for c in candidates if len(c) >= 4]
+        elif len(key_trim) >= 4:
+            candidates = [c for c in candidates if len(c) >= 3]
     if candidates:
         best = min(candidates, key=lambda x: abs(len(x) - len(key_trim)))
         return same_map[best], ex, "prefix_match", 0.86
@@ -253,6 +277,80 @@ def _rollup_includes_position(invested: float | None, current: float | None) -> 
     if cur > max(500_000.0, inv * 5_000.0):
         return False
     return True
+
+
+def _cost_basis_unreliable(
+    *,
+    avg_buy: float | None,
+    current_price: float | None,
+    pnl_pct: float | None,
+) -> bool:
+    """
+    Heuristic for PDF column swaps (qty mistaken for average buy) or mis-scaled averages.
+    Such rows are excluded from headline portfolio totals; digest shows n/a instead of absurd %.
+    """
+    if isinstance(pnl_pct, (int, float)) and not math.isnan(float(pnl_pct)) and abs(float(pnl_pct)) > 380:
+        return True
+    if not isinstance(avg_buy, (int, float)) or not isinstance(current_price, (int, float)):
+        return False
+    ab = float(avg_buy)
+    cp = float(current_price)
+    if ab <= 0 or cp <= 0 or math.isnan(ab) or math.isnan(cp):
+        return False
+    ratio = cp / ab
+    if cp > 40 and ab < cp * 0.06:
+        return True
+    if ratio > 92:
+        return True
+    if ab < 3.0 and cp > 250:
+        return True
+    return False
+
+
+def _merge_holdings_resolving_same_ticker(
+    holdings: list[PortfolioHolding],
+    *,
+    by_exchange: dict[str, dict[str, str]],
+) -> list[PortfolioHolding]:
+    """Collapse multiple input codes that resolve to one listed symbol (VWAP average buy)."""
+    from collections import OrderedDict
+
+    statement_rows = [h for h in holdings if _holding_is_statement_line(h)]
+    trade_like = [h for h in holdings if not _holding_is_statement_line(h)]
+    bucket: OrderedDict[tuple[Any, ...], dict[str, Any]] = OrderedDict()
+
+    def _consume(h: PortfolioHolding) -> None:
+        rs, rex, reason, _ = _resolve_symbol(h.symbol, h.exchange, by_exchange=by_exchange)
+        if reason == "unresolved":
+            key: tuple[Any, ...] = ("__unresolved__", h.symbol.upper(), h.exchange.upper())
+        else:
+            key = ("__resolved__", rex.upper(), rs.upper())
+        if key not in bucket:
+            bucket[key] = {"qty": 0.0, "cost": 0.0, "qty_cost": 0.0, "rep": h}
+        b = bucket[key]
+        q = float(h.quantity)
+        b["qty"] += q
+        if isinstance(h.avg_buy_price, (int, float)) and float(h.avg_buy_price) > 0:
+            qa = abs(q)
+            b["cost"] += qa * float(h.avg_buy_price)
+            b["qty_cost"] += qa
+
+    for h in trade_like:
+        _consume(h)
+
+    merged_trades = [
+        PortfolioHolding(
+            symbol=bucket[k]["rep"].symbol,
+            exchange=bucket[k]["rep"].exchange,
+            quantity=round(bucket[k]["qty"], 4),
+            avg_buy_price=(
+                round(bucket[k]["cost"] / bucket[k]["qty_cost"], 4) if bucket[k]["qty_cost"] > 0 else None
+            ),
+            source_line=bucket[k]["rep"].source_line,
+        )
+        for k in bucket
+    ]
+    return statement_rows + merged_trades
 
 
 def _parse_symbol_with_exchange(token: str) -> tuple[str, str] | None:
@@ -476,7 +574,6 @@ def analyze_portfolio_holdings(
     *,
     max_positions: int = 20,
 ) -> dict[str, Any]:
-    capped = holdings[: max(1, int(max_positions))]
     cfg = load_config()
 
     session_token = cfg.breeze_session_token
@@ -493,6 +590,9 @@ def analyze_portfolio_holdings(
 
     breeze = create_breeze_session(_BreezeCreds())
     symbol_universe = _load_active_symbol_universe(cfg)
+    max_n = max(1, int(max_positions))
+    capped = _merge_holdings_resolving_same_ticker(holdings[:max_n], by_exchange=symbol_universe)
+    capped = capped[:max_n]
     rows: list[dict[str, Any]] = []
     total_weight = 0.0
     weighted_next_week = 0.0
@@ -581,9 +681,26 @@ def analyze_portfolio_holdings(
                 if isinstance(pnl_abs, (int, float)) and isinstance(invested_value, (int, float)) and invested_value != 0
                 else None
             )
+            cp_f = (
+                float(current_price)
+                if isinstance(current_price, (int, float)) and not math.isnan(float(current_price))
+                else None
+            )
+            pnl_pct_f = float(pnl_pct) if isinstance(pnl_pct, (int, float)) else None
+            basis_unreliable = _cost_basis_unreliable(
+                avg_buy=avg_buy,
+                current_price=cp_f,
+                pnl_pct=pnl_pct_f,
+            )
+            pnl_pct_display = (
+                None
+                if basis_unreliable
+                else (round(float(pnl_pct_f), 2) if pnl_pct_f is not None else None)
+            )
             if isinstance(invested_value, (int, float)) and isinstance(current_value, (int, float)):
                 basis_rows += 1
-                if _rollup_includes_position(invested_value, current_value):
+                shape_ok = _rollup_includes_position(invested_value, current_value)
+                if shape_ok and not basis_unreliable:
                     total_invested += float(invested_value)
                     total_current += float(current_value)
                     rollup_positions += 1
@@ -603,16 +720,21 @@ def analyze_portfolio_holdings(
             elif sell_signal == "trim":
                 action_tag = "trim"
                 action_reasons.append("sell_signal=trim")
-            elif isinstance(pnl_pct, (int, float)) and pnl_pct <= -8:
+            elif (
+                not basis_unreliable
+                and isinstance(pnl_pct_f, (int, float))
+                and pnl_pct_f <= -8
+            ):
                 action_tag = "exit_risk"
                 action_reasons.append("drawdown <= -8%")
             elif (
-                sell_signal == "hold"
+                not basis_unreliable
+                and sell_signal == "hold"
                 and isinstance(next_week, (int, float))
                 and isinstance(intent, (int, float))
                 and float(next_week) >= 70.0
                 and float(intent) >= 65.0
-                and (pnl_pct is None or float(pnl_pct) <= 20.0)
+                and (pnl_pct_f is None or float(pnl_pct_f) <= 20.0)
             ):
                 action_tag = "buy_more"
                 action_reasons.append("trend persistence + intent support")
@@ -624,6 +746,7 @@ def analyze_portfolio_holdings(
                 isinstance(invested_value, (int, float))
                 and isinstance(current_value, (int, float))
                 and _rollup_includes_position(invested_value, current_value)
+                and not basis_unreliable
             )
             rows.append(
                 {
@@ -647,7 +770,8 @@ def analyze_portfolio_holdings(
                     "invested_value": invested_value,
                     "current_value": current_value,
                     "unrealized_pnl_value": pnl_abs,
-                    "unrealized_pnl_pct": round(float(pnl_pct), 2) if isinstance(pnl_pct, (int, float)) else None,
+                    "unrealized_pnl_pct": pnl_pct_display,
+                    "cost_basis_unreliable": basis_unreliable,
                     "sell_signal": sell_signal,
                     "sell_signal_risk_score": sell_signal_risk,
                     "sell_signal_reasons": sell_signal_reasons,
@@ -763,7 +887,9 @@ def portfolio_email_digest_plaintext(
         return ["", f"--- {title} ---", ""]
 
     out: list[str] = []
-    out.append(f"Titan portfolio digest ({source}). Lines submitted: {parsed_count}.")
+
+    out.extend(sec("Overview"))
+    out.append(f"Titan portfolio digest ({source}). Holdings lines submitted: {parsed_count}.")
 
     out.extend(sec("Coverage"))
     out.append(f"Analyzed: {summary.get('analyzed_positions')}")
@@ -833,7 +959,10 @@ def portfolio_email_digest_plaintext(
         tag = str(r.get("action_tag") or "hold")
         label = _ACTION_DIGEST_LABEL.get(tag, tag)
         pnl_pct = r.get("unrealized_pnl_pct")
-        pls = f"{float(pnl_pct):+.1f}%" if isinstance(pnl_pct, (int, float)) else "n/a"
+        if r.get("cost_basis_unreliable"):
+            pls = "n/a (verify avg buy)"
+        else:
+            pls = f"{float(pnl_pct):+.1f}%" if isinstance(pnl_pct, (int, float)) else "n/a"
         nws = r.get("next_week_score")
         nwx = f"{float(nws):.1f}" if isinstance(nws, (int, float)) else "—"
         ss = r.get("sell_signal_reasons")
@@ -846,14 +975,21 @@ def portfolio_email_digest_plaintext(
                 reason = str(ar[0])
         reason = (reason or "")[:96]
         rollup_flag = ""
-        if isinstance(r.get("included_in_headline_rollup"), bool) and not r.get("included_in_headline_rollup"):
+        if r.get("cost_basis_unreliable"):
+            rollup_flag = " ‡"
+        elif isinstance(r.get("included_in_headline_rollup"), bool) and not r.get("included_in_headline_rollup"):
             if isinstance(pnl_pct, (int, float)) or r.get("invested_value") is not None:
                 rollup_flag = " *"
         out.append(f"{sym} | {label} | {pls} | {nwx} | {reason}{rollup_flag}")
     if len(ordered) > max_rows:
         out.append(f"... ({len(ordered) - max_rows} more rows in full JSON export if needed)")
-    if any(r.get("included_in_headline_rollup") is False for r in ordered[:max_rows]):
-        out.append("* excluded from headline P/L rollup (check qty / average buy)")
+    if any(r.get("included_in_headline_rollup") is False for r in ordered[:max_rows]) or any(
+        r.get("cost_basis_unreliable") for r in ordered[:max_rows]
+    ):
+        out.append(
+            "* = excluded from headline P/L (outlier qty/avg). "
+            "‡ = average buy looks wrong vs last price — check your contract note.",
+        )
 
     skipped = [r for r in result.get("rows") or [] if r.get("status") in ("skipped_no_data", "invalid_symbol_from_pdf")]
     if skipped[:12]:
