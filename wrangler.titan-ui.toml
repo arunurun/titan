@@ -1,0 +1,10 @@
+# Deploy: npx wrangler deploy -c wrangler.titan-ui.toml
+# Serves docs/ at https://titan-ui.<account-subdomain>.workers.dev
+name = "titan-ui"
+main = "proxy/titan_ui_worker.js"
+compatibility_date = "2026-05-16"
+workers_dev = true
+
+[assets]
+directory = "docs"
+binding = "ASSETS"
