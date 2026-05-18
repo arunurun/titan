@@ -499,6 +499,7 @@ def persist_llm_digest_memory(
     output_text: str,
     model_name: str | None = None,
     full_digest: str | None = None,
+    github_run_id: str | None = None,
 ) -> dict[str, Any]:
     if not analysis_store_enabled():
         return {"enabled": False, "persisted": False}
@@ -512,6 +513,9 @@ def persist_llm_digest_memory(
         "output_chars": len(output_text or ""),
         "recorded_at": datetime.now(IST).isoformat(timespec="seconds"),
     }
+    gh = (github_run_id or "").strip()
+    if gh:
+        row_body["github_run_id"] = gh
     if full_digest is not None:
         row_body["full_digest"] = full_digest
     row = sanitize_for_json(row_body)

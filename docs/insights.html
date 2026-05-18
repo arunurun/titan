@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Titan — Sector insights</title>
+  <title>Titan — Past runs &amp; insights</title>
   <style>
     :root {
       --g-blue: #4285f4;
@@ -84,17 +84,19 @@
       background: #f8f9fa;
       padding: 10px;
       white-space: pre-wrap;
-      max-height: 200px;
+      max-height: 220px;
       overflow: auto;
       font-size: 0.88rem;
     }
     textarea.digest {
-      min-height: 55vh;
+      min-height: 50vh;
       max-height: 70vh;
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 0.8rem;
       line-height: 1.35;
     }
+    .small { font-size: 0.82rem; color: var(--muted); }
+    .hidden { display: none !important; }
   </style>
 </head>
 <body data-page="insights">
@@ -102,11 +104,10 @@
     <div class="nav-row">
       <a href="./index.html">← Control panel</a>
     </div>
-    <h1>Sector insights</h1>
+    <h1>Past runs &amp; insights</h1>
     <div class="header-line"></div>
     <p class="muted">
-      When the latest <strong>Run Titan Now</strong> job has finished successfully, <strong>Refresh runs &amp; insight</strong>
-      loads workflow inputs and pulls the latest digest from Supabase for the matching sector (or the sector you select for <code>all_sectors</code>).
+      Choose one of the <strong>last five Run Titan Now</strong> jobs, then load the digest stored in Supabase for that GitHub run (needs <code>github_run_id</code> on new runs — see status hints if a row is missing).
     </p>
 
     <div class="card">
@@ -115,16 +116,29 @@
     </div>
 
     <div class="card">
-      <h3>Sector &amp; refresh</h3>
-      <label for="insightSectorId">Sector ID</label>
+      <h3>Recent Run Titan jobs</h3>
+      <p class="small">Newest first from GitHub Actions.</p>
+      <label for="insightRecentRun">Run</label>
+      <select id="insightRecentRun"></select>
+      <button type="button" class="secondary" id="insightRunListRefreshBtn">Refresh run list</button>
+    </div>
+
+    <div class="card hidden" id="insightAllSectorsSectorCard">
+      <h3>Sector for this run</h3>
+      <p class="small">This job used <strong>all_sectors</strong>. Choose which sector’s digest to load.</p>
+      <label for="insightSectorId">Sector</label>
       <select id="insightSectorId"></select>
-      <button type="button" class="secondary" id="insightPageRefreshBtn">Refresh runs &amp; insight</button>
+    </div>
+
+    <div class="card">
+      <button type="button" id="insightLoadByRunBtn">Load digest for selected run</button>
+      <button type="button" class="secondary" id="insightControlStyleRefreshBtn">Refresh workflow runs (status list)</button>
     </div>
 
     <div class="card">
       <h3>Digest</h3>
-      <label for="insightDigestBody">Latest saved digest</label>
-      <textarea id="insightDigestBody" class="digest" rows="20" readonly placeholder="Tap Refresh runs &amp; insight…"></textarea>
+      <label for="insightDigestBody">Saved digest text</label>
+      <textarea id="insightDigestBody" class="digest" rows="18" readonly placeholder="Choose a run, then tap “Load digest for selected run”…"></textarea>
     </div>
 
     <div class="card">
@@ -133,6 +147,6 @@
     </div>
   </div>
 
-  <script defer src="./app.js?v=20260518-14"></script>
+  <script defer src="./app.js?v=20260518-20"></script>
 </body>
 </html>

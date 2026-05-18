@@ -1543,6 +1543,7 @@ def run_sector_live(
             lines.append(r.get("error", "") or "")
         digest_text = "\n".join(lines).strip()
         if persist_meta.get("persisted") and persist_meta.get("run_id"):
+            gh_rid = (os.environ.get("GITHUB_RUN_ID") or "").strip() or None
             persist_llm_digest_memory(
                 cfg,
                 run_id=str(persist_meta["run_id"]),
@@ -1551,6 +1552,7 @@ def run_sector_live(
                 output_text=post,
                 model_name=None,
                 full_digest=digest_text,
+                github_run_id=gh_rid,
             )
         if send_email:
             send_success_post_email(digest_text, subject_prefix=f"Titan V12.0 sector {sector_id}")

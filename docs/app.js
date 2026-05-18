@@ -86,8 +86,11 @@ function normalizeProxyBase(raw = PROXY_BASE) {
   parsed.search = "";
   parsed.hash = "";
   const parts = parsed.pathname.split("/").filter(Boolean);
-  const knownApiSuffixes = new Set(["health", "runs", "dispatch", "insights", "latest", "workflow-run"]);
+  const knownApiSuffixes = new Set(["health", "runs", "dispatch", "insights", "latest", "workflow-run", "github-run"]);
   while (parts.length && knownApiSuffixes.has(parts[parts.length - 1].toLowerCase())) {
+    parts.pop();
+  }
+  while (parts.length && /^\d{1,20}$/.test(parts[parts.length - 1])) {
     parts.pop();
   }
   parsed.pathname = parts.length ? `/${parts.join("/")}` : "";
@@ -155,7 +158,7 @@ function classifyProxyError(status, responseText) {
   if (status === 404) {
     return (
       "404 from proxy endpoint.\n" +
-      "This URL does not expose Titan API routes (/health, /dispatch, /runs, /workflow-run/{id}, /insights/latest).\n" +
+      "This URL does not expose Titan API routes (/health, /dispatch, /runs, /workflow-run/{id}, /insights/latest, /insights/github-run/{id}).\n" +
       "Use the backend Worker URL, not the UI page URL."
     );
   }
@@ -550,11 +553,47 @@ async function fetchInsightTextForSector(sectorId) {
   return insight;
 }
 
-function applyInsightToTextarea(textareaEl, insight, sectorLabel) {
+function applyInsightToTextarea(textareaEl, insight, sectorLabel, runMeta = {}) {
   if (!textareaEl || !insight) return;
+  let head = "";
+  if (runMeta.github_run_number != null) {
+    head += `GitHub Run Titan #${runMeta.github_run_number} (workflow run id ${runMeta.github_run_id ?? "?"})\n`;
+  }
+  if (runMeta.workflow_mode) {
+    head += `Workflow mode: ${runMeta.workflow_mode}\n`;
+  }
+  if (head) head += "\n";
   const when = insight.recorded_at ? `Recorded: ${insight.recorded_at}\n` : "";
   const lab = sectorLabel || insight.sector || "";
-  textareaEl.value = `${when}Sector: ${lab}\nRun: ${insight.run_id || "n/a"}\n\n${insight.text}`;
+  textareaEl.value = `${head}${when}Sector: ${lab}\nDigest run_id: ${insight.run_id || "n/a"}\n\n${insight.text}`;
+}
+
+async function fetchInsightForGithubRun(ghRunId, sectorQuery) {
+  let path = `/insights/github-run/${encodeURIComponent(String(ghRunId))}`;
+  const s = String(sectorQuery || "").trim().toLowerCase();
+  if (s) path += `?sector=${encodeURIComponent(s)}`;
+  return ghApi(path);
+}
+
+async function fillRecentTitanRunsSelect(selectEl, { maxRuns = 5 } = {}) {
+  if (!selectEl) return;
+  const runs = await ghApi("/runs?limit=40");
+  const workflowRuns = runs.workflow_runs || [];
+  const titanFile = WORKFLOWS.runTitan;
+  const titanRuns = workflowRuns.filter((r) => (r.path || "").split("/").pop() === titanFile);
+  const pick = titanRuns.slice(0, maxRuns);
+  selectEl.innerHTML = "";
+  const opt0 = document.createElement("option");
+  opt0.value = "";
+  opt0.textContent = pick.length ? "— Choose a run —" : "— No Run Titan Now runs in the last page —";
+  selectEl.appendChild(opt0);
+  for (const r of pick) {
+    const o = document.createElement("option");
+    o.value = String(r.id);
+    const title = (r.display_title || r.name || "").trim().replace(/\s+/g, " ");
+    o.textContent = `#${r.run_number} ${r.status}/${r.conclusion || "-"}${title ? ` — ${title.slice(0, 72)}` : ""}`;
+    selectEl.appendChild(o);
+  }
 }
 
 function syncSectorDropdowns(sectorId) {
@@ -568,26 +607,11 @@ function syncSectorDropdowns(sectorId) {
   }
 }
 
-async function loadLatestSectorInsight() {
-  const sectorId = (el("sectorId")?.value || "").trim().toLowerCase();
-  if (!sectorId) {
-    throw new Error("Pick a sector in the Sector ID dropdown.");
-  }
-  const outEl = el("sectorInsightBody");
-  const ins = await fetchInsightTextForSector(sectorId);
-  if (!ins) {
-    if (outEl) outEl.value = "";
-    return null;
-  }
-  applyInsightToTextarea(outEl, ins, sectorId);
-  return { ...ins, sector: sectorId };
-}
-
 /**
  * Lists recent workflow runs; if the latest Run Titan Now job completed successfully,
- * fetches workflow inputs and loads the matching Supabase digest into the insight textarea.
+ * fetches workflow inputs and loads the matching Supabase digest into the insight textarea (when present).
  */
-async function refreshRunsAndMaybeLoadInsight(insightTextareaId = "sectorInsightBody") {
+async function refreshRunsAndMaybeLoadInsight(insightTextareaId = null) {
   await checkConnection();
   const runs = await ghApi("/runs?limit=40");
   const workflowRuns = runs.workflow_runs || [];
@@ -655,20 +679,152 @@ function initProxyLine() {
 }
 
 function initInsightsPage() {
+  let lastWorkflowDetail = null;
   initProxyLine();
   initSectorOptions("insightSectorId");
-  const rb = el("insightPageRefreshBtn");
-  if (rb) {
-    rb.addEventListener("click", async () => {
+  const params = new URLSearchParams(window.location.search || "");
+  const qsSector = String(params.get("sector") || "").trim().toLowerCase();
+  if (qsSector && SECTOR_INPUT_RE.test(qsSector)) {
+    syncSectorDropdowns(qsSector);
+  }
+
+  const runSel = el("insightRecentRun");
+  const sectorCard = el("insightAllSectorsSectorCard");
+  const digestTa = el("insightDigestBody");
+
+  async function refreshRunList() {
+    setWorking("Refresh run list");
+    await checkConnection();
+    await fillRecentTitanRunsSelect(runSel, { maxRuns: 5 });
+    lastWorkflowDetail = null;
+    if (sectorCard) sectorCard.classList.add("hidden");
+    if (digestTa) digestTa.value = "";
+    setStatus("Pick a Run Titan job, then tap “Load digest for selected run”.");
+  }
+
+  async function onRunSelectionChanged() {
+    const rid = String(runSel?.value || "").trim();
+    if (!rid) {
+      lastWorkflowDetail = null;
+      if (sectorCard) sectorCard.classList.add("hidden");
+      return;
+    }
+    try {
+      setWorking("Load run metadata");
+      lastWorkflowDetail = await ghApi(`/workflow-run/${encodeURIComponent(rid)}`);
+      const mode = String(lastWorkflowDetail.inputs?.mode || "").trim().toLowerCase();
+      if (mode === "all_sectors") {
+        if (sectorCard) sectorCard.classList.remove("hidden");
+        setStatus(
+          `Run #${lastWorkflowDetail.run_number}: all_sectors — pick a sector below, then load digest.`,
+        );
+      } else {
+        if (sectorCard) sectorCard.classList.add("hidden");
+        const sid = String(lastWorkflowDetail.inputs?.sector_id || "").trim().toLowerCase();
+        if (sid && SECTOR_INPUT_RE.test(sid)) syncSectorDropdowns(sid);
+        setStatus(
+          `Run #${lastWorkflowDetail.run_number}: mode=${mode || "?"}. Tap “Load digest for selected run”.`,
+        );
+      }
+    } catch (e) {
+      lastWorkflowDetail = null;
+      if (sectorCard) sectorCard.classList.add("hidden");
+      setStatus(`Could not load run details:\n${e.message}`);
+    }
+  }
+
+  const listBtn = el("insightRunListRefreshBtn");
+  if (listBtn) {
+    listBtn.addEventListener("click", async () => {
       try {
-        setWorking("Refresh runs & insight");
-        await refreshRunsAndMaybeLoadInsight("insightDigestBody");
+        await refreshRunList();
+      } catch (e) {
+        setStatus(`Refresh run list failed:\n${e.message}`);
+      }
+    });
+  }
+
+  if (runSel) {
+    runSel.addEventListener("change", () => {
+      void onRunSelectionChanged();
+    });
+  }
+
+  const loadByRunBtn = el("insightLoadByRunBtn");
+  if (loadByRunBtn) {
+    loadByRunBtn.addEventListener("click", async () => {
+      try {
+        const health = await checkConnection();
+        if (health.has_supabase_insights !== true) {
+          setStatus(
+            "Supabase insights are not configured on the proxy. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY on titan-proxy.",
+          );
+          return;
+        }
+        const rid = String(runSel?.value || "").trim();
+        if (!rid) {
+          setStatus("Choose one of the last five Run Titan runs first.");
+          return;
+        }
+        if (!lastWorkflowDetail || String(lastWorkflowDetail.id) !== rid) {
+          setWorking("Load run metadata");
+          lastWorkflowDetail = await ghApi(`/workflow-run/${encodeURIComponent(rid)}`);
+        }
+        const mode = String(lastWorkflowDetail.inputs?.mode || "").trim().toLowerCase();
+        let sectorQ = "";
+        if (mode === "all_sectors") {
+          sectorQ = String(el("insightSectorId")?.value || "").trim().toLowerCase();
+          if (!sectorQ || !SECTOR_INPUT_RE.test(sectorQ)) {
+            setStatus("For all_sectors runs, pick a sector in the sector list.");
+            return;
+          }
+        }
+        setWorking("Load digest from Supabase");
+        const data = await fetchInsightForGithubRun(rid, sectorQ);
+        const ins = data.insight;
+        const meta = {
+          github_run_number: data.github_run_number,
+          github_run_id: data.github_run_id,
+          workflow_mode: data.workflow_mode,
+        };
+        if (!ins || !String(ins.text || "").trim()) {
+          if (digestTa) digestTa.value = "";
+          setStatus(
+            (data.note ||
+              "No digest text for this run and sector (or row missing).") +
+              (data.workflow_mode === "portfolio" || data.workflow_mode === "live"
+                ? ""
+                : "\n\nTip: new runs need sql/alter_llm_digest_memory_add_github_run_id.sql applied in Supabase, and workflow env GITHUB_RUN_ID (already in run_titan_now.yml)."),
+          );
+          return;
+        }
+        const sectorLabel = data.sector || ins.sector || sectorQ;
+        applyInsightToTextarea(digestTa, ins, sectorLabel, meta);
+        setStatus(
+          `Digest loaded for GitHub run #${data.github_run_number ?? "?"} (${data.workflow_mode || "?"})${data.note ? `\n\n${data.note}` : ""}`,
+        );
+      } catch (e) {
+        if (digestTa) digestTa.value = "";
+        setStatus(`Load digest failed:\n${e.message}`);
+      }
+    });
+  }
+
+  const ctrlRefresh = el("insightControlStyleRefreshBtn");
+  if (ctrlRefresh) {
+    ctrlRefresh.addEventListener("click", async () => {
+      try {
+        setWorking("Refresh workflow runs (status only)");
+        await refreshRunsAndMaybeLoadInsight(null);
       } catch (e) {
         setStatus(`Refresh failed:\n${e.message}`);
       }
     });
   }
-  setStatus("Insights page ready. Pick a sector if needed, then Refresh runs & insight.");
+
+  refreshRunList().catch((e) => {
+    setStatus(`Could not load run list:\n${e.message}`);
+  });
 }
 
 function wireEvents() {
@@ -714,12 +870,12 @@ function wireEvents() {
         await checkConnection();
         let suffix = "";
         if (inputs.mode === "sector") {
-          suffix = `When the GitHub Action completes, tap **Refresh runs & insight** below to load the digest for “${inputs.sector_id}”.`;
+          suffix = `When the GitHub Action completes, open **Past runs & insights** and load that run’s digest.`;
         } else if (inputs.mode === "custom") {
-          suffix = `When the run completes, tap **Refresh runs & insight** to load the digest for label “${inputs.sector_id}”.`;
+          suffix = `When the run completes, open **Past runs & insights** and load that run’s digest.`;
         } else if (inputs.mode === "all_sectors") {
           suffix =
-            "When the job completes, choose a sector and tap **Refresh runs & insight** to load that sector’s latest digest from Supabase.";
+            "When the job completes, open **Past runs & insights**, pick the run, choose a sector, then load digest.";
         }
         await dispatchWorkflow(WORKFLOWS.runTitan, inputs, suffix);
       } catch (e) {
@@ -761,31 +917,17 @@ function wireEvents() {
     refreshBtn.addEventListener("click", async () => {
       try {
         setWorking("Refresh runs & insight");
-        await refreshRunsAndMaybeLoadInsight("sectorInsightBody");
+        await refreshRunsAndMaybeLoadInsight(null);
       } catch (e) {
         setStatus(`Refresh failed:\n${e.message}`);
       }
     });
   }
 
-  const loadSectorInsightBtn = el("loadSectorInsightBtn");
-  if (loadSectorInsightBtn) {
-    loadSectorInsightBtn.addEventListener("click", async () => {
-      try {
-        setWorking("Load sector insight");
-        await checkConnection();
-        const got = await loadLatestSectorInsight();
-        if (!got) {
-          setStatus(
-            `No saved insight yet for sector “${(el("sectorId")?.value || "").trim()}”.\n` +
-              "Wait for the workflow to finish and ensure Supabase has `llm_digest_memory.full_digest` (run sql/alter_llm_digest_memory_add_full_digest.sql if needed).",
-          );
-        } else {
-          setStatus(`Loaded insight for “${got.sector || el("sectorId")?.value}”. Scroll the Sector insight box above.`);
-        }
-      } catch (e) {
-        setStatus(`Load sector insight failed:\n${e.message}`);
-      }
+  const openInsightsByRunBtn = el("openInsightsByRunBtn");
+  if (openInsightsByRunBtn) {
+    openInsightsByRunBtn.addEventListener("click", () => {
+      window.open("./insights.html", "_blank", "noopener,noreferrer");
     });
   }
 

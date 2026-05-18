@@ -8,6 +8,7 @@
  * - BREEZE_API_KEY (optional: enables GET /breeze-login redirect to ICICI login)
  * - SUPABASE_URL (optional: enables GET /insights/latest for TWA / mobile UI)
  * - SUPABASE_SERVICE_ROLE_KEY (optional: same; service role — never expose to browser)
+ * - GET /insights/github-run/:id — digest for a specific GitHub Actions run (+ sector)
  */
 
 const ALLOWED_WORKFLOWS = new Set([
@@ -284,6 +285,18 @@ async function gh(env, path, method = "GET", body = null) {
   return JSON.parse(txt);
 }
 
+function buildInsightFromDigestRow(row, sectorFallback) {
+  const full = row.full_digest != null && String(row.full_digest).trim() ? String(row.full_digest) : "";
+  const short = row.output_text != null && String(row.output_text).trim() ? String(row.output_text) : "";
+  const text = full || short;
+  return {
+    run_id: row.run_id || null,
+    sector: row.sector || sectorFallback,
+    recorded_at: row.recorded_at || null,
+    text,
+  };
+}
+
 async function fetchLatestInsight(env, sector) {
   const base = String(env.SUPABASE_URL || "").trim().replace(/\/+$/, "");
   const key = String(env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
@@ -315,18 +328,112 @@ async function fetchLatestInsight(env, sector) {
     return { ok: true, insight: null };
   }
   const row = rows[0];
-  const full = row.full_digest != null && String(row.full_digest).trim() ? String(row.full_digest) : "";
-  const short = row.output_text != null && String(row.output_text).trim() ? String(row.output_text) : "";
-  const text = full || short;
-  return {
-    ok: true,
-    insight: {
-      run_id: row.run_id || null,
-      sector: row.sector || sector,
-      recorded_at: row.recorded_at || null,
-      text,
+  const insight = buildInsightFromDigestRow(row, sector);
+  return { ok: true, insight };
+}
+
+async function supabaseSelectDigestRows(base, key, queryPath) {
+  const url = `${base}/rest/v1/llm_digest_memory${queryPath}`;
+  const res = await fetch(url, {
+    headers: {
+      apikey: key,
+      Authorization: `Bearer ${key}`,
+      Accept: "application/json",
     },
+  });
+  const txt = await res.text();
+  if (!res.ok) {
+    throw new Error(`Supabase REST ${res.status}: ${txt.slice(0, 500)}`);
+  }
+  try {
+    return txt ? JSON.parse(txt) : [];
+  } catch (_e) {
+    throw new Error("Supabase REST returned non-JSON");
+  }
+}
+
+/**
+ * Latest digest row for a GitHub Actions run id + sector (github_run_id set by CI after upgrade).
+ */
+async function fetchInsightByGithubRun(env, ghRunId, sectorParam) {
+  const base = String(env.SUPABASE_URL || "").trim().replace(/\/+$/, "");
+  const key = String(env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
+  if (!base || !key) {
+    throw new Error("Missing worker secrets: SUPABASE_URL and/or SUPABASE_SERVICE_ROLE_KEY");
+  }
+  const run = await gh(env, `/actions/runs/${ghRunId}`);
+  const wf = (run.path || "").split("/").pop() || "";
+  if (wf !== "run_titan_now.yml") {
+    throw new Error("That GitHub run is not “Run Titan Now”.");
+  }
+  const inputs = run.inputs && typeof run.inputs === "object" ? run.inputs : {};
+  const mode = String(inputs.mode || "").trim().toLowerCase();
+  const meta = {
+    github_run_id: ghRunId,
+    github_run_number: run.run_number ?? null,
+    workflow_mode: mode,
+    workflow_status: run.status || null,
+    workflow_conclusion: run.conclusion || null,
   };
+
+  if (mode === "portfolio" || mode === "live") {
+    return {
+      ok: true,
+      insight: null,
+      ...meta,
+      note: "This workflow mode does not store a sector digest in llm_digest_memory.",
+    };
+  }
+
+  let sector = String(sectorParam || "").trim().toLowerCase();
+  if (!sector && (mode === "sector" || mode === "custom")) {
+    sector = String(inputs.sector_id || "").trim().toLowerCase();
+  }
+  if (mode === "all_sectors" && (!sector || !SECTOR_ID_RE.test(sector))) {
+    return {
+      ok: false,
+      code: "sector_required",
+      error: "This run is all_sectors mode. Pass sector= query param (sector to show).",
+      ...meta,
+    };
+  }
+  if (!sector || !SECTOR_ID_RE.test(sector)) {
+    return {
+      ok: false,
+      code: "bad_sector",
+      error: "Could not determine a valid sector for this run.",
+      ...meta,
+    };
+  }
+
+  const gid = encodeURIComponent(String(ghRunId));
+  const sev = encodeURIComponent(sector);
+  const queryPath =
+    `?github_run_id=eq.${gid}&sector=eq.${sev}` +
+    "&select=run_id,sector,output_text,full_digest,recorded_at,github_run_id&order=recorded_at.desc&limit=1";
+  const rows = await supabaseSelectDigestRows(base, key, queryPath);
+  if (!Array.isArray(rows) || !rows.length) {
+    return {
+      ok: true,
+      insight: null,
+      ...meta,
+      sector,
+      note:
+        "No digest row for this GitHub run and sector. If this is an older run, it may pre-date github_run_id linking—run sql/alter_llm_digest_memory_add_github_run_id.sql and a fresh Titan job.",
+    };
+  }
+  const row = rows[0];
+  const insight = buildInsightFromDigestRow(row, sector);
+  if (!String(insight.text || "").trim()) {
+    return {
+      ok: true,
+      insight: null,
+      ...meta,
+      sector,
+      note: "A digest row exists for this run but full_digest/output_text are empty.",
+    };
+  }
+  return { ok: true, insight, ...meta, sector };
 }
 
 export default {
@@ -409,6 +516,17 @@ export default {
           allowed_workflows: Array.from(ALLOWED_WORKFLOWS),
           has_supabase_insights: supabaseUrl && supabaseKey,
         });
+      }
+
+      const ghRunInsightMatch = path.match(/^\/insights\/github-run\/(\d{1,20})$/);
+      if (isGetLike && ghRunInsightMatch) {
+        const ghRunNumericId = ghRunInsightMatch[1];
+        const sectorQ = toStringInput(url.searchParams.get("sector")).toLowerCase();
+        const data = await fetchInsightByGithubRun(env, ghRunNumericId, sectorQ);
+        if (data && data.ok === false) {
+          return json(data, 400);
+        }
+        return json(data);
       }
 
       if (isGetLike && path === "/insights/latest") {

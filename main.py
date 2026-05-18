@@ -358,6 +358,7 @@ def run_live() -> None:
 
     post = generate_titan_narrative(audit, api_keys=cfg.gemini_api_keys)
     if persist_meta.get("persisted") and persist_meta.get("run_id"):
+        gh_rid = (os.environ.get("GITHUB_RUN_ID") or "").strip() or None
         persist_llm_digest_memory(
             cfg,
             run_id=str(persist_meta["run_id"]),
@@ -365,6 +366,7 @@ def run_live() -> None:
             prompt_facts=comparison if comparison.get("enabled") else {"enabled": False},
             output_text=post,
             model_name=None,
+            github_run_id=gh_rid,
         )
     save_audit_log({"audit": audit, "post": post}, cfg)
     send_success_post_email(post)

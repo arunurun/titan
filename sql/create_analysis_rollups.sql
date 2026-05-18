@@ -76,6 +76,7 @@ create table if not exists public.sector_period_rollup (
 create table if not exists public.llm_digest_memory (
     run_id text primary key,
     sector text not null,
+    github_run_id text null,
     prompt_facts jsonb not null default '{}'::jsonb,
     output_text text not null,
     full_digest text,
@@ -98,3 +99,7 @@ create index if not exists idx_sector_period_rollup_sector_period
 
 create index if not exists idx_llm_digest_memory_sector_recorded
     on public.llm_digest_memory (sector, recorded_at desc);
+
+create index if not exists idx_llm_digest_memory_github_sector
+    on public.llm_digest_memory (github_run_id, sector)
+    where github_run_id is not null;

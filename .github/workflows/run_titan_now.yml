@@ -29,7 +29,7 @@ on:
       all_sector_workers:
         description: "Optional sector-parallel workers (used when mode=all_sectors)"
         required: false
-        default: "20"
+        default: "8"
       custom_symbols:
         description: "Custom symbols list (comma/space/newline separated, used when mode=custom)"
         required: false
@@ -65,6 +65,8 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
+    # Without this, a hung Breeze/SMTP/Gemini call can sit until the hosted runner default (~6h).
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
 
@@ -83,6 +85,8 @@ jobs:
 
       - name: Run Titan
         env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           BREEZE_API_KEY: ${{ secrets.BREEZE_API_KEY }}
