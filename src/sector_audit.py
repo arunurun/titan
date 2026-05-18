@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -129,8 +130,17 @@ def _format_symbol_metrics_line(result: dict[str, Any]) -> str:
     sell_reasons = audit.get("sell_signal_reasons") if isinstance(audit.get("sell_signal_reasons"), list) else []
     calibration = audit.get("volume_participation_calibration", audit.get("absorption_calibration"))
     calibration = calibration if isinstance(calibration, dict) else {}
-    cap = calibration.get("cap")
-    cap_method = calibration.get("method", "n/a")
+    verbose_vpr = (os.environ.get("TITAN_DIGEST_VERBOSE_VPR") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    vpr_cap_suffix = ""
+    if verbose_vpr and calibration:
+        cap = calibration.get("cap")
+        cap_method = calibration.get("method", "n/a")
+        vpr_cap_suffix = f" | volPartCap {_fmt_metric(cap, 2)} ({cap_method})"
     rows = audit.get("rows")
     exchange_used = str(audit.get("exchange_used", exchange))
     fallback_used = bool(audit.get("exchange_fallback_used", False))
@@ -153,8 +163,8 @@ def _format_symbol_metrics_line(result: dict[str, Any]) -> str:
     base = (
         f"{symbol} ({exchange}) | techScore {_fmt_metric(intent)} [{_equity_technical_label(intent)}] "
         f"| z {_fmt_metric(z)} [{_z_label(z)}] | volPart {_fmt_metric(vpr, 3)} "
-        f"[{_volume_participation_label(vpr)}] | volPartScore {_fmt_metric(vpr_score, 2)} "
-        f"| volPartCap {_fmt_metric(cap, 2)} ({cap_method}) "
+        f"[{_volume_participation_label(vpr)}] | volPartScore {_fmt_metric(vpr_score, 2)}"
+        f"{vpr_cap_suffix} "
         f"| ret1d {_fmt_metric(ret1d)}% "
         f"| ema200_delta {_fmt_metric(ema_dist)}% | atr14 {_fmt_metric(atr_pct)}% "
         f"| nextDay {_fmt_metric(next_day)} | nextWeek {_fmt_metric(next_week)} "
