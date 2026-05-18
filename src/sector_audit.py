@@ -122,9 +122,10 @@ def _digest_verbose_symbol_lines_enabled() -> bool:
 def _sell_signal_plain_english(signal: str) -> str:
     s = str(signal or "").strip().lower().replace("_", "-")
     return {
-        "trim": "Trim (reduce / take profits)",
-        "hold": "Hold",
-        "exit-risk": "Cut risk (exit or size down)",
+        # Risk score bands from _derive_sell_signal: trim 4–6.99, exit-risk ≥7
+        "trim": "TRIM — risk score 4–6: lighten / take profits (below hard-exit bar)",
+        "hold": "HOLD — risk score <4: no strong defensive trigger",
+        "exit-risk": "EXIT RISK — risk score ≥7: hard exit bar — cut exposure sharply or exit",
     }.get(s, signal or "Review")
 
 

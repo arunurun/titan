@@ -175,9 +175,9 @@ def run_all_sectors(
         sector_parallelism,
         ", ".join(sectors),
     )
-    single_digest = _env_truthy("TITAN_ALL_SECTORS_SINGLE_DIGEST", default=False)
+    single_digest = _env_truthy("TITAN_ALL_SECTORS_SINGLE_DIGEST", default=True)
     if single_digest:
-        logger.info("All-sector email mode: single consolidated digest.")
+        logger.info("All-sector email mode: single consolidated digest (set TITAN_ALL_SECTORS_SINGLE_DIGEST=0 for one email per sector).")
     failed: list[str] = []
     successful_posts: dict[str, str] = {}
     successful_posts_lock = Lock()

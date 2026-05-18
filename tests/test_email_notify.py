@@ -119,3 +119,18 @@ def test_success_html_portfolio_per_symbol_uses_full_width_columns():
     assert html.count("<th ") == 10
     assert "RELIANCE" in html and "72.0" in html and "Tape" in html
     assert "rollup footnote" in html
+
+
+def test_success_html_sector_per_symbol_metrics_use_cards():
+    body = (
+        "--- Per-symbol metrics ---\n"
+        "MTARTECH (NSE) — EXIT RISK — risk score ≥7: hard exit bar — cut exposure sharply or exit\n"
+        "Scores · next week 54.0 · intent 50.0 (balanced / neutral) · 1d -1.0%\n"
+        "Tape · z 0.0 (near mean) · volume thin participation · ATR 2.0%\n"
+        "IDEAFORGE (NSE) — Hold\n"
+        "Scores · next week 60.0 · intent 55.0 (moderate long bias) · 1d +0.1%\n"
+    )
+    html = _render_success_html(body, subject="Titan sector")
+    assert html.count("border-radius:10px;padding:12px 14px") == 2
+    assert "MTARTECH (NSE)" in html and "IDEAFORGE (NSE)" in html
+    assert "Scores ·" in html

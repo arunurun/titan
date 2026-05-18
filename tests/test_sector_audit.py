@@ -63,7 +63,7 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
     text = _format_symbol_metrics_line(result)
     assert "techScore" not in text
     assert "WELCORP (NSE)" in text
-    assert "Trim" in text
+    assert "TRIM" in text or "trim" in text.lower()
     assert "next week" in text.lower()
     assert "Why this action" in text
     assert "\n" in text

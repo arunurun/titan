@@ -64,11 +64,11 @@ Set `SMTP_HOST`, `SMTP_PORT` (default 587), `SMTP_USER`, `SMTP_PASSWORD`, `EMAIL
 
 ## Optional: all-sector consolidated email
 
-Default `--all-sectors` behavior stays the same: Titan sends one success email per sector run.
+Default `--all-sectors` behavior: Titan sends **one** consolidated success email after every sector finishes (same digest content as before, concatenated under `=== Sector: … ===` headers).
 
-To switch to one combined email for the whole all-sector execution, set:
+To restore **one email per sector** instead, set:
 
-- `TITAN_ALL_SECTORS_SINGLE_DIGEST=1`
+- `TITAN_ALL_SECTORS_SINGLE_DIGEST=0`
 
 ## Verify
 
