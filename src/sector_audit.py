@@ -122,9 +122,10 @@ def _digest_verbose_symbol_lines_enabled() -> bool:
 def _sell_signal_plain_english(signal: str) -> str:
     s = str(signal or "").strip().lower().replace("_", "-")
     return {
-        "trim": "Trim (reduce / take profits)",
-        "hold": "Hold",
-        "exit-risk": "Cut risk (exit or size down)",
+        # Risk score bands from _derive_sell_signal: trim 4–6.99, exit-risk ≥7
+        "trim": "TRIM — risk score 4–6: lighten / take profits (below hard-exit bar)",
+        "hold": "HOLD — risk score <4: no strong defensive trigger",
+        "exit-risk": "EXIT RISK — risk score ≥7: hard exit bar — cut exposure sharply or exit",
     }.get(s, signal or "Review")
 
 
@@ -1546,6 +1547,7 @@ def run_sector_live(
             lines.append(r.get("error", "") or "")
         digest_text = "\n".join(lines).strip()
         if persist_meta.get("persisted") and persist_meta.get("run_id"):
+            gh_rid = (os.environ.get("GITHUB_RUN_ID") or "").strip() or None
             persist_llm_digest_memory(
                 cfg,
                 run_id=str(persist_meta["run_id"]),
@@ -1554,6 +1556,7 @@ def run_sector_live(
                 output_text=post,
                 model_name=None,
                 full_digest=digest_text,
+                github_run_id=gh_rid,
             )
         if send_email:
             send_success_post_email(digest_text, subject_prefix=f"Titan V12.0 sector {sector_id}")

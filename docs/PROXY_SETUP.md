@@ -14,7 +14,7 @@ It requires a small backend proxy that stores GitHub PAT server-side.
    - `BREEZE_API_KEY` (optional but required for **Open Breeze login**: `GET`/`HEAD` `/breeze-login` redirects to ICICI using this key; without it the endpoint responds with `501` and a JSON error).  
   Upload from a machine with Wrangler logged in and `.env` present:
   `python scripts/emit_breeze_api_key_for_wrangler.py | npx wrangler secret put BREEZE_API_KEY`
-   - `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (optional; required for **Sector insight in app** — `GET /insights/latest?sector=…` reads `public.llm_digest_memory`. Use the **service role** key only in the Worker, never in the browser.)
+   - `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (optional; required for **Past runs & insights** — Worker reads `public.llm_digest_memory`. Use the **service role** key only in the Worker, never in the browser.)
 
 ### Supabase secrets (Wrangler, from repo root)
 
@@ -35,11 +35,14 @@ Then redeploy: `npx wrangler deploy`. In the UI, **Test connection** should show
 7. Deploy/update the UI static site.
 8. Tap **Test Connection** in the UI. It should return `Connection OK` with repo/workflow details and **`Supabase insights: yes`** once `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are set on the Worker.
 
-## Sector insight (TWA / mobile UI)
+## Past runs & insights (TWA / mobile UI)
 
 - After a **sector** or **custom** digest run completes in GitHub Actions, Titan writes the full digest into Supabase `llm_digest_memory.full_digest` (and the short LLM narrative in `output_text`).
 - Run `sql/alter_llm_digest_memory_add_full_digest.sql` once if your project created `llm_digest_memory` before that column existed.
-- The Worker exposes **`GET /insights/latest?sector=<sector_id>`** (same `sector_id` pattern as dispatch). The static UI loads it into **Sector insight in app**.
+- Run `sql/alter_llm_digest_memory_add_github_run_id.sql` once so each row can be tied to a GitHub Actions run (`GITHUB_RUN_ID` is passed from `run_titan_now.yml` into `main.py` / `sector_audit.py`).
+- The Worker exposes:
+  - **`GET /insights/latest?sector=<sector_id>`** — latest digest for that sector (no GitHub run filter).
+  - **`GET /insights/github-run/<github_run_id>?sector=<sector_id>`** — digest for that workflow run and sector (`sector` required for `all_sectors` jobs).
 
 ## Breeze login redirect
 
@@ -51,7 +54,7 @@ Then redeploy: `npx wrangler deploy`. In the UI, **Test connection** should show
 
 - `404 Not Found`
   - Cause: `PROXY_BASE` points to a URL that is not the backend Worker API.
-  - Fix: set `PROXY_BASE` to the Worker base URL that exposes `/health`, `/dispatch`, `/runs`, `/workflow-run/{id}`, `/insights/latest`, then redeploy UI.
+  - Fix: set `PROXY_BASE` to the Worker base URL that exposes `/health`, `/dispatch`, `/runs`, `/workflow-run/{id}`, `/insights/latest`, `/insights/github-run/{id}`, then redeploy UI.
 - `401 Auth/permission error from GitHub`
   - Cause: invalid/expired `GITHUB_PAT` in Worker secrets.
   - Fix: rotate `GITHUB_PAT` in Cloudflare Worker secrets.
@@ -75,6 +78,9 @@ The UI uses a hardcoded `PROXY_BASE` constant and no longer requires manual prox
 - `GET /insights/latest?sector=<id>`
   - returns `{ "ok": true, "insight": null }` or `{ "ok": true, "insight": { "run_id", "sector", "recorded_at", "text" } }`
   - requires Worker secrets `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`
+- `GET /insights/github-run/<numeric_github_run_id>?sector=<id>` (optional `sector` when workflow inputs already define it)
+  - returns the same `insight` shape plus `github_run_number`, `workflow_mode`, and optional `note`
+  - `400` with `code: "sector_required"` when the run is `all_sectors` and `sector` was not provided
 
 ## Security notes
 

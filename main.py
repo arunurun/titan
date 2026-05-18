@@ -174,9 +174,9 @@ def run_all_sectors(
         sector_parallelism,
         ", ".join(sectors),
     )
-    single_digest = _env_truthy("TITAN_ALL_SECTORS_SINGLE_DIGEST", default=False)
+    single_digest = _env_truthy("TITAN_ALL_SECTORS_SINGLE_DIGEST", default=True)
     if single_digest:
-        logger.info("All-sector email mode: single consolidated digest.")
+        logger.info("All-sector email mode: single consolidated digest (set TITAN_ALL_SECTORS_SINGLE_DIGEST=0 for one email per sector).")
     failed: list[str] = []
     successful_posts: dict[str, str] = {}
     successful_posts_lock = Lock()
@@ -357,6 +357,7 @@ def run_live() -> None:
 
     post = generate_titan_narrative(audit, api_keys=cfg.gemini_api_keys)
     if persist_meta.get("persisted") and persist_meta.get("run_id"):
+        gh_rid = (os.environ.get("GITHUB_RUN_ID") or "").strip() or None
         persist_llm_digest_memory(
             cfg,
             run_id=str(persist_meta["run_id"]),
@@ -364,6 +365,7 @@ def run_live() -> None:
             prompt_facts=comparison if comparison.get("enabled") else {"enabled": False},
             output_text=post,
             model_name=None,
+            github_run_id=gh_rid,
         )
     save_audit_log({"audit": audit, "post": post}, cfg)
     send_success_post_email(post)

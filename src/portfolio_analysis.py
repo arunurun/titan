@@ -854,9 +854,9 @@ def analyze_portfolio_holdings(
 
 _ACTION_DIGEST_LABEL = {
     "buy_more": "ADD — buy more",
-    "hold": "HOLD",
-    "trim": "TRIM — take profits",
-    "exit_risk": "EXIT RISK — cut exposure",
+    "hold": "HOLD — risk <4 (no strong defensive trigger)",
+    "trim": "TRIM — risk 4–6: lighten / take profits (below hard-exit bar)",
+    "exit_risk": "EXIT RISK — risk ≥7: hard bar — cut sharply or exit",
 }
 
 

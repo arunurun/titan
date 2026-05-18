@@ -290,12 +290,12 @@ def test_all_sectors_invokes_parallel_runner(monkeypatch):
     )
 
 
-def test_run_all_sectors_default_sends_per_sector_email(monkeypatch):
+def test_run_all_sectors_per_sector_email_when_single_digest_disabled(monkeypatch):
     import main as main_mod
     import sector_audit
     import sector_registry
 
-    monkeypatch.delenv("TITAN_ALL_SECTORS_SINGLE_DIGEST", raising=False)
+    monkeypatch.setenv("TITAN_ALL_SECTORS_SINGLE_DIGEST", "0")
     monkeypatch.setattr(main_mod, "send_success_post_email", MagicMock())
     monkeypatch.setattr(sector_registry, "list_active_sector_ids", lambda include_unknown=False: ["defence", "energy"])
 
@@ -319,12 +319,12 @@ def test_run_all_sectors_default_sends_per_sector_email(monkeypatch):
     main_mod.send_success_post_email.assert_not_called()
 
 
-def test_run_all_sectors_single_digest_env(monkeypatch):
+def test_run_all_sectors_single_digest_is_default(monkeypatch):
     import main as main_mod
     import sector_audit
     import sector_registry
 
-    monkeypatch.setenv("TITAN_ALL_SECTORS_SINGLE_DIGEST", "1")
+    monkeypatch.delenv("TITAN_ALL_SECTORS_SINGLE_DIGEST", raising=False)
     mock_email = MagicMock()
     monkeypatch.setattr(main_mod, "send_success_post_email", mock_email)
     monkeypatch.setattr(sector_registry, "list_active_sector_ids", lambda include_unknown=False: ["defence", "energy"])

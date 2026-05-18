@@ -124,7 +124,7 @@ def test_success_html_portfolio_per_symbol_uses_full_width_columns():
 def test_success_html_sector_per_symbol_metrics_use_cards():
     body = (
         "--- Per-symbol metrics ---\n"
-        "MTARTECH (NSE) — Cut risk (exit or size down)\n"
+        "MTARTECH (NSE) — EXIT RISK — risk score ≥7: hard exit bar — cut exposure sharply or exit\n"
         "Scores · next week 54.0 · intent 50.0 (balanced / neutral) · 1d -1.0%\n"
         "Tape · z 0.0 (near mean) · volume thin participation · ATR 2.0%\n"
         "IDEAFORGE (NSE) — Hold\n"

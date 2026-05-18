@@ -219,17 +219,8 @@
     </div>
 
     <div class="card">
-      <h3>Sector insight in app (TWA)</h3>
-      <p class="small">
-        Same digest text as email, read from Supabase after each successful sector/custom digest run.
-        <strong>Refresh runs &amp; insight</strong> (below) reloads GitHub and, when the latest Run Titan job succeeded, fills this box automatically.
-        <a href="./insights.html">Open full-screen insights page</a>.
-        Configure the Worker with <code>SUPABASE_URL</code> + <code>SUPABASE_SERVICE_ROLE_KEY</code>, add column
-        <code>full_digest</code> if needed (<code>sql/alter_llm_digest_memory_add_full_digest.sql</code>), then deploy proxy + UI.
-      </p>
-      <label for="sectorInsightBody">Latest saved digest for selected Sector ID</label>
-      <textarea id="sectorInsightBody" class="insight-pre" rows="14" readonly placeholder="Use Refresh runs &amp; insight or Load sector insight…"></textarea>
-      <button type="button" class="secondary" id="loadSectorInsightBtn">Load sector insight</button>
+      <h3>Past runs &amp; insights</h3>
+      <button type="button" class="secondary" id="openInsightsByRunBtn">Open insights (pick a recent run)</button>
     </div>
 
     <div class="card">
@@ -258,6 +249,6 @@
     </div>
   </div>
 
-  <script defer src="./app.js?v=20260518-15"></script>
+  <script defer src="./app.js?v=20260518-21"></script>
 </body>
 </html>
