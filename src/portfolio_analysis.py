@@ -337,10 +337,15 @@ def parse_holdings_text(text: str) -> list[PortfolioHolding]:
 
 
 def parse_portfolio_holdings_json(raw: str, *, default_exchange: str = "NSE") -> list[PortfolioHolding]:
+    raw_stripped = (raw or "").strip()
     try:
-        payload = json.loads(raw or "[]")
+        payload = json.loads(raw_stripped or "[]")
     except json.JSONDecodeError as exc:
-        raise ValueError("portfolio holdings JSON is invalid") from exc
+        preview = raw_stripped[:200].replace("\n", "\\n")
+        raise ValueError(
+            "portfolio holdings JSON is invalid (must be a JSON array). "
+            f"Parse error at column {exc.colno}: {exc.msg}. Preview: {preview!r}"
+        ) from exc
     if not isinstance(payload, list):
         raise ValueError("portfolio holdings JSON must be an array")
     if len(payload) > 300:

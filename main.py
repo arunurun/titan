@@ -555,30 +555,41 @@ def main() -> None:
 
     custom_symbols_raw = args.custom_symbols.strip()
     portfolio_holdings_raw = args.portfolio_holdings_json.strip()
-    if portfolio_holdings_raw:
-        from portfolio_analysis import (
-            analyze_portfolio_holdings,
-            parse_portfolio_holdings_json,
-            portfolio_report_text,
+    if portfolio_holdings_raw and (
+        args.sector.strip()
+        or custom_symbols_raw
+        or args.all_sectors
+        or args.live
+    ):
+        logger.warning(
+            "Ignoring --portfolio-holdings-json (%d chars) because sector/all_sectors/live/custom mode takes precedence",
+            len(portfolio_holdings_raw),
         )
+        portfolio_holdings_raw = ""
 
+    if args.live:
         try:
-            holdings = parse_portfolio_holdings_json(
-                portfolio_holdings_raw,
-                default_exchange=args.custom_exchange,
-            )
-            logger.info("Running portfolio position analysis for %d holdings", len(holdings))
-            result = analyze_portfolio_holdings(
-                holdings,
-                max_positions=max(1, int(args.portfolio_max_positions)),
-            )
-            print(
-                portfolio_report_text(
-                    source="workflow_portfolio_json",
-                    limitations=[],
-                    parsed_count=len(holdings),
-                    result=result,
-                )
+            run_live()
+        except Exception as e:
+            summary = str(e).strip().split("\n", 1)[0].strip()
+            if len(summary) > 180:
+                summary = summary[:177] + "..."
+            send_failure_email(summary, detail=traceback.format_exc())
+            raise
+        return
+
+    if args.all_sectors:
+        try:
+            run_all_sectors(
+                max_workers=args.sector_workers,
+                all_sector_workers=args.all_sector_workers,
+                max_symbols=args.sector_max_symbols,
+                digest=not args.sector_per_symbol_narrative,
+                exclude_sectors=exclude_sectors,
+                macro_snapshot=macro_snapshot,
+                event_snapshot=event_snapshot,
+                priority_only=args.sector_priority_only,
+                priority_top_n=args.sector_priority_top_n,
             )
         except Exception as e:
             summary = str(e).strip().split("\n", 1)[0].strip()
@@ -633,18 +644,30 @@ def main() -> None:
             raise
         return
 
-    if args.all_sectors:
+    if portfolio_holdings_raw:
+        from portfolio_analysis import (
+            analyze_portfolio_holdings,
+            parse_portfolio_holdings_json,
+            portfolio_report_text,
+        )
+
         try:
-            run_all_sectors(
-                max_workers=args.sector_workers,
-                all_sector_workers=args.all_sector_workers,
-                max_symbols=args.sector_max_symbols,
-                digest=not args.sector_per_symbol_narrative,
-                exclude_sectors=exclude_sectors,
-                macro_snapshot=macro_snapshot,
-                event_snapshot=event_snapshot,
-                priority_only=args.sector_priority_only,
-                priority_top_n=args.sector_priority_top_n,
+            holdings = parse_portfolio_holdings_json(
+                portfolio_holdings_raw,
+                default_exchange=args.custom_exchange,
+            )
+            logger.info("Running portfolio position analysis for %d holdings", len(holdings))
+            result = analyze_portfolio_holdings(
+                holdings,
+                max_positions=max(1, int(args.portfolio_max_positions)),
+            )
+            print(
+                portfolio_report_text(
+                    source="workflow_portfolio_json",
+                    limitations=[],
+                    parsed_count=len(holdings),
+                    result=result,
+                )
             )
         except Exception as e:
             summary = str(e).strip().split("\n", 1)[0].strip()
@@ -654,17 +677,7 @@ def main() -> None:
             raise
         return
 
-    if args.live:
-        try:
-            run_live()
-        except Exception as e:
-            summary = str(e).strip().split("\n", 1)[0].strip()
-            if len(summary) > 180:
-                summary = summary[:177] + "..."
-            send_failure_email(summary, detail=traceback.format_exc())
-            raise
-    else:
-        run_dry_run()
+    run_dry_run()
 
 
 if __name__ == "__main__":

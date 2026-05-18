@@ -97,6 +97,7 @@ jobs:
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           SMTP_USE_TLS: ${{ secrets.SMTP_USE_TLS }}
+          GH_INPUT_PORTFOLIO_JSON: ${{ inputs.portfolio_holdings_json }}
         run: |
           SCOPE="${{ inputs.titan_scope }}"
           if [ -z "$SCOPE" ]; then SCOPE="priority"; fi
@@ -108,7 +109,7 @@ jobs:
             if [ -n "${{ inputs.portfolio_max_positions }}" ]; then
               ARGS="$ARGS --portfolio-max-positions ${{ inputs.portfolio_max_positions }}"
             fi
-            python main.py $ARGS --portfolio-holdings-json "${{ inputs.portfolio_holdings_json }}"
+            python main.py $ARGS --portfolio-holdings-json "$GH_INPUT_PORTFOLIO_JSON"
           elif [ "${{ inputs.mode }}" = "custom" ]; then
             ARGS="--sector ${{ inputs.sector_id }} --custom-exchange ${{ inputs.custom_exchange }} --sector-digest"
             if [ -n "${{ inputs.max_symbols }}" ]; then

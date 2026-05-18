@@ -381,3 +381,26 @@ def test_portfolio_holdings_json_invokes_portfolio_analysis(monkeypatch, capsys)
     out = capsys.readouterr().out
     assert "workflow_portfolio_json" in out
     assert '"analyzed_positions": 1' in out
+
+
+def test_sector_run_takes_precedence_over_invalid_portfolio_json(monkeypatch):
+    """portfolio_holdings_json was checked first; stray/non-JSON must not block sector runs."""
+    import main as main_mod
+    import sector_audit
+
+    mock_sector = MagicMock(return_value="sector ok")
+    monkeypatch.setattr(sector_audit, "run_sector_live", mock_sector)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prog",
+            "--sector",
+            "defence",
+            "--sector-digest",
+            "--portfolio-holdings-json",
+            "{invalid json",  # would fail if portfolio path ran first
+        ],
+    )
+    main_mod.main()
+    mock_sector.assert_called_once()
