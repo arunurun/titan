@@ -10,6 +10,7 @@ from breeze_client import (
     fetch_nifty_option_metrics,
     fetch_nifty_option_metrics_with_expiry_fallback,
     volume_absorption_ratio,
+    volume_participation_ratio,
 )
 from config_loader import TitanConfig
 
@@ -193,7 +194,11 @@ def test_fetch_equity_data_rate_limited_then_success_retries(mock_breeze_cls, mo
     assert api.get_historical_data.call_count == 2
 
 
-def test_volume_absorption_ratio_trailing_avg():
+def test_volume_participation_ratio_matches_legacy_alias():
+    df = pd.DataFrame({"volume": [100.0, 100.0, 200.0]})
+    assert volume_participation_ratio(df) == volume_absorption_ratio(df)
+
+
     df = pd.DataFrame(
         {
             "volume": [100.0, 100.0, 100.0, 100.0, 100.0, 150.0],

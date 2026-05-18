@@ -39,7 +39,7 @@ def test_build_symbol_daily_feature_basic():
     )
     assert row["symbol"] == "HAL"
     assert row["rows_count"] == 38
-    assert "panic-absorption" in row["flags"]
+    assert "panic-vol-down-day" in row["flags"]
 
 
 def test_build_sector_daily_rollup_shapes_metrics():

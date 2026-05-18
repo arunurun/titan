@@ -88,7 +88,13 @@ def find_oi_walls(option_chain_df: pd.DataFrame) -> dict[str, Any]:
 
 
 def calculate_intent_score(pcr: float, z_score: float, absorption: float) -> float:
-    """Map technicals to 0-100 via weighted normalized blend."""
+    """
+    Map index-style technicals to 0-100: PCR + z-score + participation input.
+
+    Intended for **NIFTY / index live** where PCR is meaningful. For single-stock
+    cash equities without options context, use ``calculate_equity_technical_score``
+    instead (z + volume participation only).
+    """
     def clamp01(x: float) -> float:
         return max(0.0, min(1.0, x))
 
@@ -112,4 +118,32 @@ def calculate_intent_score(pcr: float, z_score: float, absorption: float) -> flo
 
     w_pcr, w_z, w_a = 0.35, 0.35, 0.30
     blended = w_pcr * norm_pcr(pcr) + w_z * norm_z(z_score) + w_a * norm_abs(absorption)
+    return round(100.0 * blended, 2)
+
+
+def calculate_equity_technical_score(z_score: float, participation_for_scoring: float) -> float:
+    """
+    0-100 equity **cash-market** score: z-score + volume participation only.
+
+    ``participation_for_scoring`` is the calibrated, score-ready volume participation
+    input (same scale as passed to sector audits: typically post cap + log compress,
+    comparable to the old ``absorption_for_scoring`` field).
+    """
+    def clamp01(x: float) -> float:
+        return max(0.0, min(1.0, x))
+
+    def norm_z(z: float) -> float:
+        if math.isnan(z):
+            return 0.5
+        return clamp01(0.5 + 0.5 * math.tanh(z / 3.0))
+
+    def norm_participation(p: float) -> float:
+        if math.isnan(p):
+            return 0.5
+        if math.isinf(p) and p > 0:
+            return 1.0
+        return clamp01(p / 3.0)
+
+    w_z, w_p = 0.52, 0.48
+    blended = w_z * norm_z(z_score) + w_p * norm_participation(participation_for_scoring)
     return round(100.0 * blended, 2)

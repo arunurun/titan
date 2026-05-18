@@ -25,15 +25,21 @@ MAX_WORKERS = 4
 _GEMINI_SECTOR_LOCK = threading.Lock()
 _FUNDAMENTAL_CACHE_LOCK = threading.Lock()
 _FUNDAMENTAL_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
-_ABSORPTION_CALIBRATION_LOCK = threading.Lock()
-_ABSORPTION_CALIBRATION_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+_PARTICIPATION_CALIBRATION_LOCK = threading.Lock()
+_PARTICIPATION_CALIBRATION_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 _THREAD_LOCAL = threading.local()
 IST = ZoneInfo("Asia/Kolkata")
-ABSORPTION_CAP_DEFAULT = 2.5
-ABSORPTION_CAP_MIN_HISTORY = 8
-ABSORPTION_CAP_LOOKBACK = 45
-ABSORPTION_CAP_PERCENTILE = 90.0
-ABSORPTION_CAP_MAX = 5.0
+# Volume participation ratio caps (historical column in DB may still be named absorption_ratio).
+PARTICIPATION_CAP_DEFAULT = 2.5
+PARTICIPATION_CAP_MIN_HISTORY = 8
+PARTICIPATION_CAP_LOOKBACK = 45
+PARTICIPATION_CAP_PERCENTILE = 90.0
+PARTICIPATION_CAP_MAX = 5.0
+ABSORPTION_CAP_DEFAULT = PARTICIPATION_CAP_DEFAULT
+ABSORPTION_CAP_MIN_HISTORY = PARTICIPATION_CAP_MIN_HISTORY
+ABSORPTION_CAP_LOOKBACK = PARTICIPATION_CAP_LOOKBACK
+ABSORPTION_CAP_PERCENTILE = PARTICIPATION_CAP_PERCENTILE
+ABSORPTION_CAP_MAX = PARTICIPATION_CAP_MAX
 
 
 def _fmt_metric(x: Any, digits: int = 2) -> str:
@@ -66,9 +72,9 @@ def _z_label(z: Any) -> str:
     return "near mean"
 
 
-def _absorption_label(absorption: Any) -> str:
+def _volume_participation_label(vpr: Any) -> str:
     try:
-        v = float(absorption)
+        v = float(vpr)
     except (TypeError, ValueError):
         return "unknown"
     if math.isnan(v):
@@ -84,9 +90,9 @@ def _absorption_label(absorption: Any) -> str:
     return "thin participation"
 
 
-def _intent_label(intent: Any) -> str:
+def _equity_technical_label(score: Any) -> str:
     try:
-        v = float(intent)
+        v = float(score)
     except (TypeError, ValueError):
         return "unknown"
     if math.isnan(v):
@@ -108,8 +114,8 @@ def _format_symbol_metrics_line(result: dict[str, Any]) -> str:
     audit = result["audit"]
     z = audit.get("z_score")
     intent = audit.get("effective_intent_score", audit.get("intent_score"))
-    absorption = audit.get("absorption_ratio")
-    absorption_score = audit.get("absorption_for_scoring")
+    vpr = audit.get("volume_participation_ratio", audit.get("absorption_ratio"))
+    vpr_score = audit.get("volume_participation_for_scoring", audit.get("absorption_for_scoring"))
     ret1d = audit.get("return_1d_pct")
     ema_dist = audit.get("ema_200_distance_pct")
     atr_pct = audit.get("atr_14_pct")
@@ -121,7 +127,8 @@ def _format_symbol_metrics_line(result: dict[str, Any]) -> str:
     support_tag = audit.get("hypothesis_support", "technical_only")
     sell_signal = audit.get("sell_signal", "unknown")
     sell_reasons = audit.get("sell_signal_reasons") if isinstance(audit.get("sell_signal_reasons"), list) else []
-    calibration = audit.get("absorption_calibration") if isinstance(audit.get("absorption_calibration"), dict) else {}
+    calibration = audit.get("volume_participation_calibration", audit.get("absorption_calibration"))
+    calibration = calibration if isinstance(calibration, dict) else {}
     cap = calibration.get("cap")
     cap_method = calibration.get("method", "n/a")
     rows = audit.get("rows")
@@ -129,7 +136,7 @@ def _format_symbol_metrics_line(result: dict[str, Any]) -> str:
     fallback_used = bool(audit.get("exchange_fallback_used", False))
     flags: list[str] = []
     if audit.get("panic_absorption_proxy"):
-        flags.append("panic-absorption")
+        flags.append("panic-volume-on-down-day")
     if audit.get("trap_exit_proxy"):
         flags.append("up-move-trap")
     if audit.get("cluster_guardrail_applied"):
@@ -144,10 +151,10 @@ def _format_symbol_metrics_line(result: dict[str, Any]) -> str:
         + (f" ({'; '.join(str(x) for x in fundamental_reasons[:2])})" if fundamental_reasons else "")
     )
     base = (
-        f"{symbol} ({exchange}) | intent {_fmt_metric(intent)} [{_intent_label(intent)}] "
-        f"| z {_fmt_metric(z)} [{_z_label(z)}] | absorption {_fmt_metric(absorption, 3)} "
-        f"[{_absorption_label(absorption)}] | absScore {_fmt_metric(absorption_score, 2)} "
-        f"| absCap {_fmt_metric(cap, 2)} ({cap_method}) "
+        f"{symbol} ({exchange}) | techScore {_fmt_metric(intent)} [{_equity_technical_label(intent)}] "
+        f"| z {_fmt_metric(z)} [{_z_label(z)}] | volPart {_fmt_metric(vpr, 3)} "
+        f"[{_volume_participation_label(vpr)}] | volPartScore {_fmt_metric(vpr_score, 2)} "
+        f"| volPartCap {_fmt_metric(cap, 2)} ({cap_method}) "
         f"| ret1d {_fmt_metric(ret1d)}% "
         f"| ema200_delta {_fmt_metric(ema_dist)}% | atr14 {_fmt_metric(atr_pct)}% "
         f"| nextDay {_fmt_metric(next_day)} | nextWeek {_fmt_metric(next_week)} "
@@ -186,7 +193,8 @@ def _percentile(values: list[float], pct: float) -> float:
     return xs[lo] + ((xs[hi] - xs[lo]) * frac)
 
 
-def _recent_absorption_samples(cfg: TitanConfig, inst: SectorInstrument) -> list[float]:
+def _recent_volume_participation_samples(cfg: TitanConfig, inst: SectorInstrument) -> list[float]:
+    """Historical VPR samples from Supabase (column may still be named absorption_ratio)."""
     client = create_client(cfg.supabase_url, cfg.supabase_key)
     try:
         res = (
@@ -195,7 +203,7 @@ def _recent_absorption_samples(cfg: TitanConfig, inst: SectorInstrument) -> list
             .eq("symbol", inst.symbol)
             .eq("exchange", inst.exchange)
             .order("trade_date", desc=True)
-            .limit(ABSORPTION_CAP_LOOKBACK)
+            .limit(PARTICIPATION_CAP_LOOKBACK)
             .execute()
         )
     except Exception:
@@ -212,30 +220,37 @@ def _recent_absorption_samples(cfg: TitanConfig, inst: SectorInstrument) -> list
     return out
 
 
-def _resolve_absorption_cap(cfg: TitanConfig, inst: SectorInstrument) -> dict[str, Any]:
+def _resolve_participation_cap(cfg: TitanConfig, inst: SectorInstrument) -> dict[str, Any]:
     key = (inst.symbol, inst.exchange)
-    with _ABSORPTION_CALIBRATION_LOCK:
-        cached = _ABSORPTION_CALIBRATION_CACHE.get(key)
+    with _PARTICIPATION_CALIBRATION_LOCK:
+        cached = _PARTICIPATION_CALIBRATION_CACHE.get(key)
     if cached is not None:
         return dict(cached)
 
     samples = _recent_absorption_samples(cfg, inst)
+    pct_label = int(PARTICIPATION_CAP_PERCENTILE)
     method = "fallback_default"
-    cap = ABSORPTION_CAP_DEFAULT
-    if len(samples) >= ABSORPTION_CAP_MIN_HISTORY:
-        pctl = _percentile(samples, ABSORPTION_CAP_PERCENTILE)
+    cap = PARTICIPATION_CAP_DEFAULT
+    if len(samples) >= PARTICIPATION_CAP_MIN_HISTORY:
+        pctl = _percentile(samples, PARTICIPATION_CAP_PERCENTILE)
         if not math.isnan(pctl):
-            cap = max(1.0, min(ABSORPTION_CAP_MAX, pctl))
-            method = "symbol_daily_features_p90"
+            cap = max(1.0, min(PARTICIPATION_CAP_MAX, pctl))
+            method = f"symbol_daily_features_p{pct_label}"
     out = {
         "method": method,
         "cap": round(cap, 4),
         "sample_count": len(samples),
-        "lookback": ABSORPTION_CAP_LOOKBACK,
+        "lookback": PARTICIPATION_CAP_LOOKBACK,
+        "percentile": pct_label,
     }
-    with _ABSORPTION_CALIBRATION_LOCK:
-        _ABSORPTION_CALIBRATION_CACHE[key] = dict(out)
+    with _PARTICIPATION_CALIBRATION_LOCK:
+        _PARTICIPATION_CALIBRATION_CACHE[key] = dict(out)
     return out
+
+
+# Back-compat names for tests and older call sites
+_recent_absorption_samples = _recent_volume_participation_samples
+_resolve_absorption_cap = _resolve_participation_cap
 
 
 def _is_skipped_no_data_error(error: Any) -> bool:
@@ -254,32 +269,37 @@ def _classify_error_code(error: Any) -> str:
     return "runtime_error"
 
 
-def _normalize_absorption_for_scoring(absorption_raw: float) -> float:
+def _normalize_participation_for_scoring(participation_raw: float) -> float:
     """
-    Keep raw absorption for reporting, but compress extreme outliers for scoring.
-    This avoids thin/illiquid names getting unrealistically huge score boosts.
+    Compress extreme volume-participation outliers for scoring (single smooth map).
+
+    Raw VPR is unbounded ratio; this maps to a bounded score input (~0..3) so
+    one illiquid spike cannot dominate ``calculate_equity_technical_score`` and
+    predictive outputs.
     """
-    v = _safe_float(absorption_raw)
+    v = _safe_float(participation_raw)
     if math.isnan(v):
         return float("nan")
     if math.isinf(v) and v > 0:
         return 3.0
     if v <= 0.0:
         return 0.0
-    # log scale with soft cap around 3x participation
     return min(3.0, (math.log1p(v) / math.log(4.0)) * 3.0)
 
 
-def _calibrate_absorption_v2(
+_normalize_absorption_for_scoring = _normalize_participation_for_scoring
+
+
+def _calibrate_volume_participation_v2(
     cfg: TitanConfig,
     inst: SectorInstrument,
-    absorption_raw: float,
+    vpr_raw: float,
 ) -> tuple[float, float, dict[str, Any]]:
-    meta = _resolve_absorption_cap(cfg, inst)
-    raw = _safe_float(absorption_raw)
+    meta = _resolve_participation_cap(cfg, inst)
+    raw = _safe_float(vpr_raw)
     cap = _safe_float(meta.get("cap"))
     if math.isnan(cap) or cap <= 0.0:
-        cap = ABSORPTION_CAP_DEFAULT
+        cap = PARTICIPATION_CAP_DEFAULT
         meta = {**meta, "method": "fallback_default", "cap": cap}
 
     if math.isnan(raw):
@@ -290,12 +310,15 @@ def _calibrate_absorption_v2(
         calibrated_raw = cap
     else:
         calibrated_raw = min(raw, cap)
-    calibrated_for_scoring = _normalize_absorption_for_scoring(calibrated_raw)
+    calibrated_for_scoring = _normalize_participation_for_scoring(calibrated_raw)
     return calibrated_raw, calibrated_for_scoring, {
         **meta,
         "raw": raw,
         "calibrated_raw": calibrated_raw,
     }
+
+
+_calibrate_absorption_v2 = _calibrate_volume_participation_v2
 
 
 def _thread_breeze_session(cfg: TitanConfig) -> Any:
@@ -314,31 +337,42 @@ def _clamp_score(x: float) -> float:
     return max(0.0, min(100.0, round(x, 2)))
 
 
+def _ema_history_confidence(rows: Any) -> float:
+    """Down-weight EMA200 distance when we do not have ~200 sessions yet (Phase B)."""
+    try:
+        n = int(rows)
+    except (TypeError, ValueError):
+        return 1.0
+    if n < 30:
+        return 0.35
+    return min(1.0, max(0.35, n / 200.0))
+
+
 def _predictive_scores(audit: dict[str, Any]) -> tuple[float, float, dict[str, Any]]:
     """
-    Heuristic lead scores for short-term momentum capture.
+    Heuristic lead scores (0-100).
 
-    - next_day_score favors immediate thrust (z, absorption, 1d return).
-    - next_week_score favors persistence (trend distance and lower noise).
+    Uses a **single** cash-market composite (``effective_intent_score`` = z + volume
+    participation via ``calculate_equity_technical_score``) plus **orthogonal**
+    horizon features (1d return, EMA200 distance with history confidence, ATR).
+    Avoids double-counting z/participation alongside that composite.
     """
-    z = _safe_float(audit.get("z_score"))
-    absorption = _safe_float(audit.get("absorption_for_scoring", audit.get("absorption_ratio")))
+    tech = _safe_float(audit.get("effective_intent_score", audit.get("intent_score")))
     ret1d = _safe_float(audit.get("return_1d_pct"))
     ema_dist = _safe_float(audit.get("ema_200_distance_pct"))
     atr_pct = _safe_float(audit.get("atr_14_pct"))
-    intent = _safe_float(audit.get("effective_intent_score", audit.get("intent_score")))
+    ema_conf = _ema_history_confidence(audit.get("rows"))
 
-    z_term = 0.0 if math.isnan(z) else (z * 8.0)
-    absorption_term = 0.0 if math.isnan(absorption) else ((absorption - 1.0) * 12.0)
-    ret_term = 0.0 if math.isnan(ret1d) else (ret1d * 0.7)
-    ema_term = 0.0 if math.isnan(ema_dist) else (ema_dist * 0.35)
-    atr_penalty = 0.0 if math.isnan(atr_pct) else (atr_pct * 0.5)
-    intent_term = 0.0 if math.isnan(intent) else ((intent - 50.0) * 0.35)
+    tech_day = 0.0 if math.isnan(tech) else ((tech - 50.0) * 0.52)
+    tech_week = 0.0 if math.isnan(tech) else ((tech - 50.0) * 0.62)
+    ret_term = 0.0 if math.isnan(ret1d) else (ret1d * 0.55)
+    ema_base = 0.0 if math.isnan(ema_dist) else (ema_dist * 0.26 * ema_conf)
+    ema_day = ema_base * 0.85
+    ema_week = ema_base * 1.0
+    atr_penalty = 0.0 if math.isnan(atr_pct) else (atr_pct * 0.45)
 
-    day_score = 50.0 + z_term + absorption_term + ret_term + (ema_term * 0.6) + intent_term - atr_penalty
-    week_score = 50.0 + (z_term * 0.7) + (absorption_term * 0.5) + (ret_term * 0.5) + ema_term + intent_term - (
-        atr_penalty * 0.4
-    )
+    day_score = 50.0 + tech_day + ret_term + ema_day - atr_penalty
+    week_score = 50.0 + tech_week + (ret_term * 0.82) + ema_week - (atr_penalty * 0.35)
 
     penalties: list[str] = []
     if audit.get("trap_exit_proxy"):
@@ -348,7 +382,7 @@ def _predictive_scores(audit: dict[str, Any]) -> tuple[float, float, dict[str, A
     if audit.get("panic_absorption_proxy"):
         day_score -= 6.0
         week_score -= 4.0
-        penalties.append("panic_absorption_proxy")
+        penalties.append("panic_volume_participation_proxy")
     if audit.get("event_risk_soon"):
         day_score -= 4.0
         week_score -= 6.0
@@ -357,20 +391,18 @@ def _predictive_scores(audit: dict[str, Any]) -> tuple[float, float, dict[str, A
     breakdown = {
         "baseline": 50.0,
         "day": {
-            "z_term": round(z_term, 2),
-            "absorption_term": round(absorption_term, 2),
+            "tech_composite_term": round(tech_day, 2),
             "ret1d_term": round(ret_term, 2),
-            "ema_term": round(ema_term * 0.6, 2),
-            "intent_term": round(intent_term, 2),
+            "ema_term": round(ema_day, 2),
+            "ema_history_confidence": round(ema_conf, 2),
             "atr_penalty": round(atr_penalty, 2),
         },
         "week": {
-            "z_term": round(z_term * 0.7, 2),
-            "absorption_term": round(absorption_term * 0.5, 2),
-            "ret1d_term": round(ret_term * 0.5, 2),
-            "ema_term": round(ema_term, 2),
-            "intent_term": round(intent_term, 2),
-            "atr_penalty": round(atr_penalty * 0.4, 2),
+            "tech_composite_term": round(tech_week, 2),
+            "ret1d_term": round(ret_term * 0.82, 2),
+            "ema_term": round(ema_week, 2),
+            "ema_history_confidence": round(ema_conf, 2),
+            "atr_penalty": round(atr_penalty * 0.35, 2),
         },
         "penalties": penalties,
     }
@@ -380,7 +412,7 @@ def _predictive_scores(audit: dict[str, Any]) -> tuple[float, float, dict[str, A
 def _bucket_name(audit: dict[str, Any]) -> str:
     eff = _safe_float(audit.get("effective_intent_score", audit.get("intent_score")))
     z = _safe_float(audit.get("z_score"))
-    ab = _safe_float(audit.get("absorption_ratio"))
+    ab = _safe_float(audit.get("volume_participation_ratio", audit.get("absorption_ratio")))
     if audit.get("trap_exit_proxy"):
         return "trap-risk"
     if (not math.isnan(eff) and eff >= 65.0) and (not math.isnan(z) and z >= 2.0) and (
@@ -394,12 +426,12 @@ def _bucket_name(audit: dict[str, Any]) -> str:
 
 def _short_reason(audit: dict[str, Any]) -> str:
     z = _safe_float(audit.get("z_score"))
-    ab = _safe_float(audit.get("absorption_ratio"))
+    ab = _safe_float(audit.get("volume_participation_ratio", audit.get("absorption_ratio")))
     bits: list[str] = []
     if not math.isnan(z):
         bits.append(f"z={z:.2f}")
     if not math.isnan(ab):
-        bits.append(f"abs={ab:.2f}")
+        bits.append(f"vpr={ab:.2f}")
     if audit.get("trap_exit_proxy"):
         bits.append("trap-flag")
     if audit.get("macro_guardrail_applied"):
@@ -431,17 +463,16 @@ def _prediction_reason_text(audit: dict[str, Any]) -> str:
         confidence = "low"
 
     contributors = [
-        ("participation", _safe_float(week.get("absorption_term"))),
+        ("techComposite", _safe_float(week.get("tech_composite_term"))),
         ("trend", _safe_float(week.get("ema_term"))),
         ("momentum", _safe_float(week.get("ret1d_term"))),
-        ("intent", _safe_float(week.get("intent_term"))),
-        ("z-score", _safe_float(week.get("z_term"))),
+        ("volatility", -_safe_float(week.get("atr_penalty"))),
     ]
     drivers = [name for name, val in contributors if not math.isnan(val) and val >= 1.0]
     drags = [name for name, val in contributors if not math.isnan(val) and val <= -1.0]
     atr_pen = _safe_float(week.get("atr_penalty"))
     if not math.isnan(atr_pen) and atr_pen >= 1.0:
-        drags.append("volatility")
+        drags.append("atr-drag")
     if not drivers:
         drivers = ["none"]
     if not drags:
@@ -449,12 +480,12 @@ def _prediction_reason_text(audit: dict[str, Any]) -> str:
 
     return (
         f"confidence={confidence} | drivers={','.join(drivers[:3])} | drags={','.join(drags[:3])} | penalties={pen} "
-        f"| factors day[z {_fmt_metric(day.get('z_term'))}, abs {_fmt_metric(day.get('absorption_term'))}, "
+        f"| factors day[tech {_fmt_metric(day.get('tech_composite_term'))}, "
         f"ret {_fmt_metric(day.get('ret1d_term'))}, ema {_fmt_metric(day.get('ema_term'))}, "
-        f"intent {_fmt_metric(day.get('intent_term'))}, atr-pen {_fmt_metric(day.get('atr_penalty'))}] "
-        f"week[z {_fmt_metric(week.get('z_term'))}, abs {_fmt_metric(week.get('absorption_term'))}, "
+        f"emaConf {_fmt_metric(day.get('ema_history_confidence'))}, atr-pen {_fmt_metric(day.get('atr_penalty'))}] "
+        f"week[tech {_fmt_metric(week.get('tech_composite_term'))}, "
         f"ret {_fmt_metric(week.get('ret1d_term'))}, ema {_fmt_metric(week.get('ema_term'))}, "
-        f"intent {_fmt_metric(week.get('intent_term'))}, atr-pen {_fmt_metric(week.get('atr_penalty'))}]"
+        f"emaConf {_fmt_metric(week.get('ema_history_confidence'))}, atr-pen {_fmt_metric(week.get('atr_penalty'))}]"
     )
 
 
@@ -508,7 +539,7 @@ def _derive_sell_signal(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
     if audit.get("trap_exit_proxy"):
         add(2.0, "trap-exit proxy")
     if audit.get("panic_absorption_proxy"):
-        add(1.0, "panic-absorption proxy")
+        add(1.0, "panic volume-participation proxy")
     if audit.get("cluster_guardrail_applied"):
         add(1.0, "cluster guardrail")
     if audit.get("macro_guardrail_applied"):
@@ -788,16 +819,25 @@ def build_equity_live_audit(
     event_snapshot: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], str]:
     """
-    Cash-market metrics only (z-score, volume absorption, intent blend).
-    Option chain / PCR are skipped for sector equities (expiry rules differ per name); flagged in audit.
+    Cash-market metrics: z-score, **volume participation ratio** (VPR), equity technical
+    score (z + VPR, no dummy PCR), ATR/EMA context. Option chain / PCR are skipped for
+    sector equities (``option_chain_unavailable``).
+
+    FII/DII **institutional** buy/sell by stock is not available from Breeze cash OHLC;
+    see ``institutional_flow`` on the audit payload for ingestion status.
 
     With default ``strict_data=False``, empty Breeze history returns ``skipped_no_data`` instead of
     raising (sector runs skip that symbol). Pass ``strict_data=True`` to fail hard on no rows.
     """
     import pandas as pd
 
-    from breeze_client import fetch_equity_data, volume_absorption_ratio
-    from titan_engine import calculate_atr, calculate_ema, calculate_intent_score, calculate_z_score
+    from breeze_client import fetch_equity_data, volume_participation_ratio
+    from titan_engine import (
+        calculate_atr,
+        calculate_ema,
+        calculate_equity_technical_score,
+        calculate_z_score,
+    )
 
     df = fetch_equity_data(
         cfg,
@@ -819,10 +859,11 @@ def build_equity_live_audit(
             "sector": sector_id,
             "symbol": inst.symbol,
             "exchange": inst.exchange,
-        "exchange_used": exchange_used or inst.exchange,
-        "exchange_fallback_used": fallback_used,
+            "exchange_used": exchange_used or inst.exchange,
+            "exchange_fallback_used": fallback_used,
             "skipped_no_data": True,
             "z_score": float("nan"),
+            "volume_participation_ratio": float("nan"),
             "absorption_ratio": float("nan"),
             "pcr": float("nan"),
             "put_oi": 0.0,
@@ -845,11 +886,11 @@ def build_equity_live_audit(
         else float("nan")
     )
     z = calculate_z_score(series, window=20)
-    absorption_raw = volume_absorption_ratio(df)
-    absorption_calibrated_raw, absorption_for_scoring, absorption_calibration = _calibrate_absorption_v2(
+    vpr_raw = volume_participation_ratio(df)
+    vpr_calibrated_raw, vpr_for_scoring, vpr_calibration = _calibrate_volume_participation_v2(
         cfg,
         inst,
-        absorption_raw,
+        vpr_raw,
     )
     ema_200 = calculate_ema(series, span=200)
     ema_distance_pct = (
@@ -874,12 +915,12 @@ def build_equity_live_audit(
         else float("nan")
     )
     pcr = float("nan")
-    intent = calculate_intent_score(pcr, z, absorption_for_scoring)
+    intent = calculate_equity_technical_score(z, vpr_for_scoring)
     panic_absorption_proxy = (
-        not math.isnan(ret1d) and ret1d < 0.0 and not math.isnan(absorption_raw) and absorption_raw >= 1.5
+        not math.isnan(ret1d) and ret1d < 0.0 and not math.isnan(vpr_raw) and vpr_raw >= 1.5
     )
     trap_exit_proxy = (
-        not math.isnan(ret1d) and ret1d > 0.0 and not math.isnan(absorption_raw) and absorption_raw <= 0.5
+        not math.isnan(ret1d) and ret1d > 0.0 and not math.isnan(vpr_raw) and vpr_raw <= 0.5
     )
     event_info = _event_flags_for_symbol(inst.symbol, event_snapshot)
     audit: dict[str, Any] = {
@@ -891,10 +932,14 @@ def build_equity_live_audit(
         "exchange_used": exchange_used or inst.exchange,
         "exchange_fallback_used": fallback_used,
         "z_score": z,
-        "absorption_ratio": absorption_raw,
-        "absorption_calibrated_ratio": absorption_calibrated_raw,
-        "absorption_for_scoring": absorption_for_scoring,
-        "absorption_calibration": absorption_calibration,
+        "volume_participation_ratio": vpr_raw,
+        "volume_participation_calibrated_ratio": vpr_calibrated_raw,
+        "volume_participation_for_scoring": vpr_for_scoring,
+        "volume_participation_calibration": vpr_calibration,
+        "absorption_ratio": vpr_raw,
+        "absorption_calibrated_ratio": vpr_calibrated_raw,
+        "absorption_for_scoring": vpr_for_scoring,
+        "absorption_calibration": vpr_calibration,
         "close_last": close_last,
         "return_1d_pct": ret1d,
         "ema_200": ema_200,
@@ -916,8 +961,17 @@ def build_equity_live_audit(
         "option_expiry": None,
         "intent_score": intent,
         "effective_intent_score": intent,
+        "equity_technical_score": intent,
         "rows": len(df),
         "option_chain_unavailable": True,
+        "institutional_flow": {
+            "available": False,
+            "source": None,
+            "note": (
+                "FII/DII (and true delivery 'absorption') are not in Breeze daily cash bars. "
+                "Wire NSE/BSE institutional + delivery feeds by symbol/date to populate this object."
+            ),
+        },
     }
     fundamental = _assess_fundamental_strength(cfg, inst)
     audit["fundamental_status"] = fundamental.get("status", "unavailable")
@@ -1233,7 +1287,7 @@ def run_sector_live(
             f"(vs 7d {_fmt_metric(dlt.get('avg_effective_intent_vs_7d') if isinstance(dlt, dict) else None)}, "
             f"vs 30d {_fmt_metric(dlt.get('avg_effective_intent_vs_30d') if isinstance(dlt, dict) else None)})",
             f"Breadth above EMA200: {_fmt_metric(today.get('breadth_above_ema200_pct') if isinstance(today, dict) else None)}%",
-            f"Participation breadth (absorption>1): {_fmt_metric(today.get('pct_absorption_gt_1') if isinstance(today, dict) else None)}%",
+            f"Volume participation breadth (VPR>1): {_fmt_metric(today.get('pct_absorption_gt_1') if isinstance(today, dict) else None)}%",
             "",
             "--- Movement summary ---",
         ]

@@ -298,19 +298,17 @@ def test_prediction_reason_text_is_human_readable():
         "next_week_score": 62.0,
         "prediction_breakdown": {
             "day": {
-                "z_term": -2.46,
-                "absorption_term": 47.02,
+                "tech_composite_term": 4.0,
                 "ret1d_term": 3.12,
                 "ema_term": 5.56,
-                "intent_term": 4.62,
+                "ema_history_confidence": 1.0,
                 "atr_penalty": 2.25,
             },
             "week": {
-                "z_term": -1.72,
-                "absorption_term": 23.51,
+                "tech_composite_term": 5.5,
                 "ret1d_term": 1.56,
                 "ema_term": 9.27,
-                "intent_term": 4.62,
+                "ema_history_confidence": 1.0,
                 "atr_penalty": 0.90,
             },
             "penalties": [],
@@ -320,7 +318,7 @@ def test_prediction_reason_text_is_human_readable():
     assert "confidence=medium" in text
     assert "drivers=" in text and "drags=" in text
     assert "penalties=none" in text
-    assert "factors day[" in text and "week[" in text
+    assert "factors day[tech" in text and "week[tech" in text
 
 
 def test_absorption_calibration_v2_fallback_default(monkeypatch):
@@ -329,7 +327,7 @@ def test_absorption_calibration_v2_fallback_default(monkeypatch):
     closes = [100.0 + i * 0.1 for i in range(30)]
     df = pd.DataFrame({"close": closes, "high": closes, "low": closes, "volume": [1e6] * 30})
     monkeypatch.setattr("breeze_client.fetch_equity_data", lambda *a, **k: df)
-    monkeypatch.setattr("breeze_client.volume_absorption_ratio", lambda _df: 9.0)
+    monkeypatch.setattr("breeze_client.volume_participation_ratio", lambda _df: 9.0)
     monkeypatch.setattr("sector_audit._recent_absorption_samples", lambda *a, **k: [])
     monkeypatch.setattr(
         "brain.generate_titan_narrative",
@@ -350,7 +348,7 @@ def test_absorption_calibration_v2_uses_historical_percentile(monkeypatch):
     closes = [100.0 + i * 0.1 for i in range(30)]
     df = pd.DataFrame({"close": closes, "high": closes, "low": closes, "volume": [1e6] * 30})
     monkeypatch.setattr("breeze_client.fetch_equity_data", lambda *a, **k: df)
-    monkeypatch.setattr("breeze_client.volume_absorption_ratio", lambda _df: 6.0)
+    monkeypatch.setattr("breeze_client.volume_participation_ratio", lambda _df: 6.0)
     monkeypatch.setattr(
         "sector_audit._recent_absorption_samples",
         lambda *a, **k: [0.8, 1.0, 1.2, 1.4, 2.0, 2.2, 2.4, 2.6, 2.8, 3.0],

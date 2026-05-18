@@ -86,7 +86,7 @@ def build_symbol_daily_feature(
     if audit.get("trap_exit_proxy"):
         flags.append("up-move-trap")
     if audit.get("panic_absorption_proxy"):
-        flags.append("panic-absorption")
+        flags.append("panic-vol-down-day")
     if audit.get("cluster_guardrail_applied"):
         flags.append("cluster-guardrail")
     if audit.get("macro_guardrail_applied"):
@@ -105,6 +105,7 @@ def build_symbol_daily_feature(
             "intent_score": audit.get("intent_score"),
             "effective_intent_score": audit.get("effective_intent_score", audit.get("intent_score")),
             "z_score": audit.get("z_score"),
+            "volume_participation_ratio": audit.get("volume_participation_ratio", audit.get("absorption_ratio")),
             "absorption_ratio": audit.get("absorption_ratio"),
             "return_1d_pct": audit.get("return_1d_pct"),
             "ema_200_distance_pct": audit.get("ema_200_distance_pct"),
@@ -149,7 +150,12 @@ def build_sector_daily_rollup(
                 lambda a: _safe_float(a.get("ema_200_distance_pct")) > 0.0
             ),
             "pct_z_gt_2": pct(lambda a: _safe_float(a.get("z_score")) > 2.0),
-            "pct_absorption_gt_1": pct(lambda a: _safe_float(a.get("absorption_ratio")) > 1.0),
+            "pct_volume_participation_gt_1": pct(
+                lambda a: _safe_float(a.get("volume_participation_ratio", a.get("absorption_ratio"))) > 1.0
+            ),
+            "pct_absorption_gt_1": pct(
+                lambda a: _safe_float(a.get("volume_participation_ratio", a.get("absorption_ratio"))) > 1.0
+            ),
             "trap_count": sum(1 for a in audits if a.get("trap_exit_proxy")),
             "panic_absorption_count": sum(1 for a in audits if a.get("panic_absorption_proxy")),
             "macro_guardrail_count": sum(1 for a in audits if a.get("macro_guardrail_applied")),

@@ -295,7 +295,7 @@ def run_live() -> None:
         create_breeze_session,
         fetch_nifty_data,
         fetch_nifty_option_metrics_with_expiry_fallback,
-        volume_absorption_ratio,
+        volume_participation_ratio,
     )
     from supabase_log import save_audit_log
 
@@ -306,11 +306,11 @@ def run_live() -> None:
     close_col = "close" if "close" in df.columns else df.columns[-1]
     series = pd.to_numeric(df[close_col], errors="coerce")
     z = calculate_z_score(series, window=20)
-    absorption = volume_absorption_ratio(df)
+    vpr = volume_participation_ratio(df)
     opt = fetch_nifty_option_metrics_with_expiry_fallback(breeze)
     pcr = get_pcr(opt["put_oi"], opt["call_oi"])
     oi_wall = find_oi_walls(opt["chain_df"]) if not opt["chain_df"].empty else {"strike": float("nan"), "oi": float("nan")}
-    intent = calculate_intent_score(pcr, z, absorption)
+    intent = calculate_intent_score(pcr, z, vpr)
     audit = {
         "benchmark": "index",
         "sector_mode": False,
@@ -318,7 +318,8 @@ def run_live() -> None:
         "symbol": "NIFTY",
         "exchange": "NSE",
         "z_score": z,
-        "absorption_ratio": absorption,
+        "volume_participation_ratio": vpr,
+        "absorption_ratio": vpr,
         "pcr": pcr,
         "put_oi": opt["put_oi"],
         "call_oi": opt["call_oi"],

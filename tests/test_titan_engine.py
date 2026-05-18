@@ -1,12 +1,12 @@
 import math
 
 import pandas as pd
-import pytest
 
 from titan_engine import (
     calculate_atr,
     calculate_absorption_ratio,
     calculate_ema,
+    calculate_equity_technical_score,
     calculate_intent_score,
     calculate_z_score,
     find_oi_walls,
@@ -57,10 +57,14 @@ def test_find_oi_walls_skewed_itm():
     assert w["strike"] == 18000.0
 
 
+def test_equity_technical_score_range():
+    s = calculate_equity_technical_score(0.0, 1.5)
+    assert 0.0 <= s <= 100.0
+
+
 def test_intent_score_range():
     score = calculate_intent_score(1.0, 0.0, 1.0)
     assert 0.0 <= score <= 100.0
-
 
 def test_calculate_ema_last_value():
     s = pd.Series([100.0, 101.0, 102.0, 103.0])

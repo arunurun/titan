@@ -17,7 +17,7 @@ import pandas as pd
 from postgrest.exceptions import APIError
 from supabase import create_client
 
-from breeze_client import fetch_equity_data, volume_absorption_ratio
+from breeze_client import fetch_equity_data, volume_participation_ratio
 from config_loader import TitanConfig
 from sector_registry import SectorInstrument
 
@@ -348,7 +348,7 @@ def build_sector_rankings(
         series = pd.to_numeric(df[close_col], errors="coerce") if close_col is not None else pd.Series(dtype=float)
         ret_1w = _return_pct(series, periods_back=5)
         ret_1m = _return_pct(series, periods_back=20)
-        absorption = volume_absorption_ratio(df) if not df.empty else float("nan")
+        absorption = volume_participation_ratio(df) if not df.empty else float("nan")
         market_cap_cr, market_cap_source = fetch_nse_market_cap_inr_cr(inst.symbol)
         if market_cap_cr is None:
             market_cap_cr, market_cap_source = fetch_moneycontrol_market_cap_inr_cr(inst.symbol)

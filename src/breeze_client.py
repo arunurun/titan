@@ -226,10 +226,12 @@ def fetch_nifty_option_metrics_with_expiry_fallback(
     }
 
 
-def volume_absorption_ratio(ohlc_df: pd.DataFrame) -> float:
+def volume_participation_ratio(ohlc_df: pd.DataFrame) -> float:
     """
-    Index cash volume vs trailing session average (5 sessions when available).
-    Same ratio shape as delivery absorption: current / average.
+    Cash-market **volume participation**: last session volume / trailing average volume.
+
+    This is **not** delivery-based absorption and **not** FII/DII flow. It measures
+    whether today's turnover is high vs recent sessions (participation proxy).
     """
     if ohlc_df.empty or "volume" not in ohlc_df.columns:
         return float("nan")
@@ -243,6 +245,11 @@ def volume_absorption_ratio(ohlc_df: pd.DataFrame) -> float:
     if avg == 0.0:
         return float("inf") if current > 0 else 0.0
     return current / avg
+
+
+def volume_absorption_ratio(ohlc_df: pd.DataFrame) -> float:
+    """Deprecated alias for :func:`volume_participation_ratio` (legacy name)."""
+    return volume_participation_ratio(ohlc_df)
 
 
 def fetch_equity_data(
