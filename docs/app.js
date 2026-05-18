@@ -612,7 +612,7 @@ function wireEvents() {
   if (persistBtn) {
     persistBtn.addEventListener("click", async () => {
       try {
-        setWorking("Dispatch Persist Token");
+        setWorking("Persist token");
         const tokenInput = (el("tokenInput")?.value || "").trim();
         if (!tokenInput) throw new Error("Token input is required.");
         await checkConnection();

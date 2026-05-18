@@ -86,6 +86,13 @@
       flex: 1 1 calc(33.333% - 6px);
       min-width: 100px;
     }
+    .btn-toolbar--4 button.btn-sm {
+      flex: 1 1 calc(25% - 6px);
+      min-width: 90px;
+    }
+    @media (max-width: 520px) {
+      .btn-toolbar--4 button.btn-sm { flex: 1 1 calc(50% - 4px); }
+    }
     @media (max-width: 400px) {
       .btn-toolbar--3 button.btn-sm { flex: 1 1 calc(50% - 4px); }
     }
@@ -126,12 +133,15 @@
 
     <div class="card">
       <h3>Session &amp; connection</h3>
-      <p class="small">After Breeze login, copy <code>API_Session</code> from the redirect URL, then paste under Persist Token.</p>
-      <div class="btn-toolbar btn-toolbar--3" role="group" aria-label="Quick actions">
+      <p class="small">Paste <code>API_Session</code> (or full redirect URL) below after Breeze login, then <strong>Persist token</strong>.</p>
+      <div class="btn-toolbar btn-toolbar--4" role="group" aria-label="Quick actions">
         <button type="button" class="secondary btn-sm" id="breezeLoginBtn">Breeze login</button>
         <button type="button" class="secondary btn-sm" id="validateBtn">Validate token</button>
         <button type="button" class="btn-sm" id="testConnBtn">Test connection</button>
+        <button type="button" class="warning btn-sm" id="persistBtn">Persist token</button>
       </div>
+      <label for="tokenInput">Breeze token</label>
+      <textarea id="tokenInput" rows="3" placeholder="Paste API_Session or redirect URL"></textarea>
       <p class="proxy-line">Proxy: <code id="proxyBase">loading…</code></p>
     </div>
 
@@ -219,13 +229,6 @@
     </div>
 
     <div class="card">
-      <h3>Persist Breeze Token</h3>
-      <label>API_Session or redirect URL with API_Session</label>
-      <textarea id="tokenInput" rows="3" placeholder="Paste token or redirect URL"></textarea>
-      <button type="button" class="warning" id="persistBtn">Dispatch Persist Token</button>
-    </div>
-
-    <div class="card">
       <h3>Latest workflow runs</h3>
       <div id="status" class="status">Loading UI…</div>
       <div class="runs-footer">
@@ -234,6 +237,6 @@
     </div>
   </div>
 
-  <script defer src="./app.js?v=20260518-10"></script>
+  <script defer src="./app.js?v=20260518-11"></script>
 </body>
 </html>
