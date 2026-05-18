@@ -158,6 +158,8 @@ def run_all_sectors(
     exclude_sectors: tuple[str, ...],
     macro_snapshot: dict | None,
     event_snapshot: dict | None,
+    priority_only: bool = False,
+    priority_top_n: int | None = None,
 ) -> None:
     from sector_audit import run_sector_live
     from sector_registry import list_active_sector_ids
@@ -188,6 +190,10 @@ def run_all_sectors(
             digest=digest,
             send_email=not single_digest,
         )
+        if priority_only:
+            run_kwargs["priority_only"] = True
+            if priority_top_n is not None:
+                run_kwargs["priority_top_n"] = max(1, int(priority_top_n))
         if macro_snapshot is not None:
             run_kwargs["macro_snapshot"] = macro_snapshot
         if event_snapshot is not None:
@@ -436,7 +442,7 @@ def main() -> None:
     p.add_argument(
         "--sector-priority-only",
         action="store_true",
-        help="Use persisted priority symbols (sector_priority_rankings) for --sector runs.",
+        help="Use persisted priority symbols (sector_priority_rankings) for --sector or --all-sectors runs.",
     )
     p.add_argument(
         "--sector-priority-top-n",
@@ -637,6 +643,8 @@ def main() -> None:
                 exclude_sectors=exclude_sectors,
                 macro_snapshot=macro_snapshot,
                 event_snapshot=event_snapshot,
+                priority_only=args.sector_priority_only,
+                priority_top_n=args.sector_priority_top_n,
             )
         except Exception as e:
             summary = str(e).strip().split("\n", 1)[0].strip()

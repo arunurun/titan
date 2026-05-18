@@ -86,6 +86,12 @@
     <p class="muted">GitHub-hosted control page for mobile use. Buttons dispatch workflows and show latest run status.</p>
 
     <div class="card">
+      <h3>Breeze login (new session token)</h3>
+      <p class="small">Opens ICICI Breeze in a new tab (API key is held only in the proxy secret). After login, copy <code>API_Session</code> from the redirect URL and paste it under Persist Token.</p>
+      <button type="button" class="secondary" id="breezeLoginBtn">Open Breeze login</button>
+    </div>
+
+    <div class="card">
       <h3>Connection</h3>
       <p class="small">
         This page is tokenless by design. It talks to a secure backend proxy that stores GitHub credentials server-side.
@@ -114,6 +120,7 @@
             <option value="ai">ai</option>
             <option value="auto">auto</option>
             <option value="auto_ancillary">auto_ancillary</option>
+            <option value="banks_psu">banks_psu</option>
             <option value="banks_private">banks_private</option>
             <option value="capital_goods_industrials">capital_goods_industrials</option>
             <option value="cement_building_materials">cement_building_materials</option>
@@ -136,6 +143,20 @@
             <option value="textiles">textiles</option>
           </select>
           <p class="small" id="sectorHint">Used only when mode=sector.</p>
+        </div>
+      </div>
+      <div class="row two">
+        <div>
+          <label>Titan scope</label>
+          <select id="titanScope">
+            <option value="priority" selected>priority (weekend refresh list)</option>
+            <option value="full">full sector universe</option>
+          </select>
+          <p class="small" id="titanScopeHint">Ranked list in Supabase; refresh Saturdays.</p>
+        </div>
+        <div>
+          <label>Priority top N (optional)</label>
+          <input id="priorityTopN" value="" placeholder="10 single sector / 5 all sectors" />
         </div>
       </div>
       <div class="row two">
@@ -230,6 +251,6 @@
     </div>
   </div>
 
-  <script defer src="./app.js?v=20260517-4"></script>
+  <script defer src="./app.js?v=20260518-1"></script>
 </body>
 </html>

@@ -11,8 +11,10 @@ const ALLOWED_WORKFLOWS = new Set([
   "run_titan_now.yml",
   "validate_breeze_token_manual.yml",
   "persist_breeze_token_manual.yml",
+  "refresh_sector_rankings_weekly.yml",
 ]);
 const RUN_MODES = new Set(["sector", "all_sectors", "live", "custom", "portfolio"]);
+const TITAN_SCOPES = new Set(["full", "priority"]);
 const ALLOWED_EXCHANGES = new Set(["NSE", "BSE"]);
 const SYMBOL_RE = /^[A-Z0-9&._-]{1,25}$/;
 const SECTOR_ID_RE = /^[a-z0-9_]{1,64}$/;
@@ -146,6 +148,8 @@ function sanitizeRunTitanInputs(inputObj) {
     all_sector_workers: allSectorWorkers,
     portfolio_holdings_json: "",
     portfolio_max_positions: portfolioMaxPositions,
+    titan_scope: "",
+    priority_top_n: "",
   };
 
   if (mode === "sector") {
@@ -180,12 +184,40 @@ function sanitizeRunTitanInputs(inputObj) {
     cleaned.sector_id = "";
   }
 
+  if (mode === "sector" || mode === "all_sectors") {
+    const ts = toStringInput(input.titan_scope).toLowerCase() || "priority";
+    if (!TITAN_SCOPES.has(ts)) {
+      throw new Error("titan_scope must be full or priority");
+    }
+    cleaned.titan_scope = ts;
+    const ptn = toStringInput(input.priority_top_n);
+    if (ptn) {
+      if (!/^\d+$/.test(ptn)) {
+        throw new Error("priority_top_n must be numeric");
+      }
+      const n = Number(ptn);
+      if (n < 1 || n > 25) {
+        throw new Error("priority_top_n out of range");
+      }
+    }
+    cleaned.priority_top_n = ptn;
+  }
+
   return cleaned;
+}
+
+function sanitizeRefreshRankingsInputs(inputObj) {
+  const input = inputObj && typeof inputObj === "object" ? inputObj : {};
+  const top_n = parseBoundedInt(input.top_n, "top_n", { min: 1, max: 25 });
+  return { top_n: top_n || "10" };
 }
 
 function sanitizeDispatchPayload(workflow, inputs) {
   if (workflow === "run_titan_now.yml") {
     return sanitizeRunTitanInputs(inputs);
+  }
+  if (workflow === "refresh_sector_rankings_weekly.yml") {
+    return sanitizeRefreshRankingsInputs(inputs);
   }
   if (workflow === "persist_breeze_token_manual.yml") {
     const breezeTokenInput = toStringInput(inputs?.breeze_token_input);
@@ -255,6 +287,15 @@ export default {
 
     try {
       const url = new URL(request.url);
+
+      if (request.method === "GET" && url.pathname === "/breeze-login") {
+        const key = env.BREEZE_API_KEY ? String(env.BREEZE_API_KEY).trim() : "";
+        if (!key) {
+          return json({ error: "BREEZE_API_KEY not configured on proxy" }, 501);
+        }
+        const target = `https://api.icicidirect.com/apiuser/login?api_key=${encodeURIComponent(key)}`;
+        return Response.redirect(target, 302);
+      }
 
       if (request.method === "POST" && url.pathname === "/dispatch") {
         const body = await request.json();

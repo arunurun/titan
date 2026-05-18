@@ -969,7 +969,11 @@ def build_equity_live_audit(
             "source": None,
             "note": (
                 "FII/DII (and true delivery 'absorption') are not in Breeze daily cash bars. "
-                "Wire NSE/BSE institutional + delivery feeds by symbol/date to populate this object."
+                "Wire NSE/BSE institutional + delivery feeds by symbol/date to populate this object. "
+                "Next implementation step when you pick a source: add columns or a small table "
+                "(e.g. fii_net_crs, dii_net_crs, as_of), ingest in a script, and in build_equity_live_audit "
+                "set institutional_flow['available'] = True and fold that into a separate score block "
+                "so it is never confused with VPR (volume_participation_ratio)."
             ),
         },
     }

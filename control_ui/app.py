@@ -139,6 +139,14 @@ TEMPLATE = """
     <div class="logo-line"></div>
     <p class="hint">Local-only utility page to trigger analysis and manage Breeze token.</p>
 
+    {% if breeze_login_url %}
+    <div class="card">
+      <h3>Breeze login (session token)</h3>
+      <p class="hint">Opens ICICI Breeze in a new tab. After login, copy <code>API_Session</code> from the redirect URL and paste it under <strong>Persist New Breeze Token</strong>.</p>
+      <p><a href="{{ breeze_login_url }}" target="_blank" rel="noopener noreferrer">Open Breeze login</a></p>
+    </div>
+    {% endif %}
+
     {% if message %}
       <div class="card">
         <div class="{{ level }}">{{ message }}</div>
@@ -151,20 +159,27 @@ TEMPLATE = """
         <label>Mode</label>
         <select name="mode">
           <option value="live" {% if run_mode == "live" %}selected{% endif %}>Live (NIFTY)</option>
-          <option value="sector" {% if run_mode == "sector" %}selected{% endif %}>Sector (Digest)</option>
-          <option value="all_sectors" {% if run_mode == "all_sectors" %}selected{% endif %}>All Sectors (Digest)</option>
+          <option value="sector" {% if run_mode == "sector" %}selected{% endif %}>Single sector</option>
+          <option value="all_sectors" {% if run_mode == "all_sectors" %}selected{% endif %}>All sectors</option>
         </select>
-        <label>Sector ID (for sector mode)</label>
+        <label>Scope (single sector / all sectors)</label>
+        <select name="titan_scope">
+          <option value="priority" {% if titan_scope == "priority" %}selected{% endif %}>Top ranked only (Supabase priority list; refresh weekly Saturday)</option>
+          <option value="full" {% if titan_scope == "full" %}selected{% endif %}>Full mapped universe</option>
+        </select>
+        <label>Sector ID (when mode = single sector)</label>
         <select name="sector_id">
           {% for sid in sectors %}
             <option value="{{ sid }}" {% if selected_sector == sid %}selected{% endif %}>{{ sid }}</option>
           {% endfor %}
         </select>
-        <label>Max symbols (optional; leave blank for full sector list)</label>
+        <label>Priority top N (optional; blank = 10 per sector, 5 when running all sectors)</label>
+        <input name="priority_top_n" value="{{ priority_top_n_field }}" placeholder="default by mode" />
+        <label>Max symbols (optional; full mode only; cap universe)</label>
         <input name="max_symbols" value="" placeholder="all" />
         <label>Workers (optional)</label>
         <input name="workers" value="2" />
-        <label>All-sector workers (optional; used when mode=all_sectors)</label>
+        <label>All-sector workers (optional; mode = all sectors)</label>
         <input name="all_sector_workers" value="20" />
         <button type="submit">Run Analysis</button>
       </form>
@@ -178,8 +193,8 @@ TEMPLATE = """
       {% if token_status %}
         <p><strong>Status:</strong> <span class="{{ token_level }}">{{ token_status }}</span></p>
       {% endif %}
-      {% if login_url %}
-        <p><strong>Breeze Login URL:</strong> <a href="{{ login_url }}" target="_blank">{{ login_url }}</a></p>
+      {% if breeze_login_url %}
+        <p><strong>Breeze login:</strong> <a href="{{ breeze_login_url }}" target="_blank" rel="noopener noreferrer">Open in new tab</a></p>
       {% endif %}
       {% if token_detail %}
         <pre>{{ token_detail }}</pre>
@@ -239,6 +254,13 @@ def _breeze_login_url(api_key: str) -> str:
     return f"https://api.icicidirect.com/apiuser/login?api_key={quote(api_key, safe='')}"
 
 
+def _safe_breeze_login_url() -> str:
+    raw = (os.environ.get("BREEZE_API_KEY") or "").strip()
+    if not raw:
+        return ""
+    return _breeze_login_url(raw)
+
+
 def _load_token_from_supabase() -> str:
     client = _supabase_client()
     res = client.table("session_config").select("breeze_session_token").eq("id", 1).limit(1).execute()
@@ -274,12 +296,23 @@ def _run_titan_now(
     max_symbols: str,
     workers: str,
     all_sector_workers: str,
+    titan_scope: str,
+    priority_top_n: str,
 ) -> tuple[int, str]:
+    mode = (mode or "sector").strip().lower()
+    scope = (titan_scope or "priority").strip().lower()
+    if scope not in ("full", "priority"):
+        scope = "priority"
     cmd = [sys.executable, "main.py"]
+    timeout_sec = 7200 if mode == "all_sectors" else 3600
+
     if mode == "live":
         cmd.append("--live")
     elif mode == "all_sectors":
         cmd.extend(["--all-sectors", "--exclude-sectors", "unknown,non_equity"])
+        if scope == "priority":
+            topn = (priority_top_n or "").strip() or "5"
+            cmd.extend(["--sector-priority-only", "--sector-priority-top-n", topn])
         if (max_symbols or "").strip():
             cmd.extend(["--sector-max-symbols", max_symbols.strip()])
         if (workers or "").strip():
@@ -289,6 +322,9 @@ def _run_titan_now(
     else:
         sid = (sector_id or "").strip() or "defence"
         cmd.extend(["--sector", sid, "--sector-digest"])
+        if scope == "priority":
+            topn = (priority_top_n or "").strip() or "10"
+            cmd.extend(["--sector-priority-only", "--sector-priority-top-n", topn])
         if (max_symbols or "").strip():
             cmd.extend(["--sector-max-symbols", max_symbols.strip()])
         if (workers or "").strip():
@@ -299,7 +335,7 @@ def _run_titan_now(
         cwd=ROOT,
         text=True,
         capture_output=True,
-        timeout=600,
+        timeout=timeout_sec,
         env=dict(os.environ),
     )
     output = (proc.stdout or "") + ("\n" if proc.stdout and proc.stderr else "") + (proc.stderr or "")
@@ -354,11 +390,19 @@ def _render_page(**kwargs):
     portfolio_pdf_path = str(kwargs.pop("portfolio_pdf_path", None) or "")
     portfolio_holdings_text = str(kwargs.pop("portfolio_holdings_text", None) or "")
     portfolio_max_positions = str(kwargs.pop("portfolio_max_positions", None) or "20")
+    titan_scope = str(kwargs.pop("titan_scope", None) or "priority")
+    if titan_scope not in ("full", "priority"):
+        titan_scope = "priority"
+    priority_top_n_field = str(kwargs.pop("priority_top_n_field", None) or "")
+    breeze_login_url = str(kwargs.pop("breeze_login_url", None) or "")
     return render_template_string(
         TEMPLATE,
         sectors=sectors,
         selected_sector=selected_sector,
         run_mode=run_mode,
+        titan_scope=titan_scope,
+        priority_top_n_field=priority_top_n_field,
+        breeze_login_url=breeze_login_url,
         portfolio_pdf_path=portfolio_pdf_path,
         portfolio_holdings_text=portfolio_holdings_text,
         portfolio_max_positions=portfolio_max_positions,
@@ -368,7 +412,8 @@ def _render_page(**kwargs):
 
 @app.get("/")
 def index():
-    return _render_page()
+    load_dotenv(ROOT / ".env", override=False)
+    return _render_page(breeze_login_url=_safe_breeze_login_url())
 
 
 @app.post("/run-analysis")
@@ -379,8 +424,18 @@ def run_analysis():
     max_symbols = request.form.get("max_symbols", "")
     workers = request.form.get("workers", "")
     all_sector_workers = request.form.get("all_sector_workers", "")
+    titan_scope = request.form.get("titan_scope", "priority").strip()
+    priority_top_n = request.form.get("priority_top_n", "")
     try:
-        code, output = _run_titan_now(mode, sector_id, max_symbols, workers, all_sector_workers)
+        code, output = _run_titan_now(
+            mode,
+            sector_id,
+            max_symbols,
+            workers,
+            all_sector_workers,
+            titan_scope,
+            priority_top_n,
+        )
         level = "ok" if code == 0 else "err"
         msg = f"Analysis finished with exit code {code}."
         return _render_page(
@@ -389,6 +444,9 @@ def run_analysis():
             run_output=output,
             run_mode=mode,
             selected_sector=sector_id,
+            titan_scope=titan_scope,
+            priority_top_n_field=priority_top_n,
+            breeze_login_url=_safe_breeze_login_url(),
         )
     except Exception as exc:  # noqa: BLE001
         return _render_page(
@@ -396,6 +454,9 @@ def run_analysis():
             level="err",
             run_mode=mode,
             selected_sector=sector_id,
+            titan_scope=titan_scope,
+            priority_top_n_field=priority_top_n,
+            breeze_login_url=_safe_breeze_login_url(),
         )
 
 
@@ -413,7 +474,7 @@ def validate_token():
             token_status=status,
             token_level=token_level,
             token_detail=detail,
-            login_url=_breeze_login_url(api_key),
+            breeze_login_url=_breeze_login_url(api_key),
             message="Token validation complete.",
             level="ok" if ok else "warn",
         )
@@ -435,7 +496,7 @@ def persist_token():
             return _render_page(
                 message=f"Provided token is invalid: {detail}",
                 level="err",
-                login_url=_breeze_login_url(api_key),
+                breeze_login_url=_breeze_login_url(api_key),
             )
         _persist_token_to_supabase(token)
         if also_write_env:
@@ -446,7 +507,7 @@ def persist_token():
             token_status="VALID",
             token_level="ok",
             token_detail="New token stored successfully.",
-            login_url=_breeze_login_url(api_key),
+            breeze_login_url=_breeze_login_url(api_key),
         )
     except Exception as exc:  # noqa: BLE001
         return _render_page(message=f"Persist token failed: {exc}", level="err")

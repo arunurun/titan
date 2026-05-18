@@ -2,12 +2,14 @@ const WORKFLOWS = {
   runTitan: "run_titan_now.yml",
   validate: "validate_breeze_token_manual.yml",
   persist: "persist_breeze_token_manual.yml",
+  refreshRankings: "refresh_sector_rankings_weekly.yml",
 };
 const PROXY_BASE = "https://titan-proxy.arunjain-real.workers.dev";
 const SECTOR_OPTIONS = [
   "ai",
   "auto",
   "auto_ancillary",
+  "banks_psu",
   "banks_private",
   "capital_goods_industrials",
   "cement_building_materials",
@@ -30,6 +32,7 @@ const SECTOR_OPTIONS = [
   "textiles",
 ];
 const RUN_MODES = new Set(["sector", "all_sectors", "live", "custom", "portfolio"]);
+const TITAN_SCOPES = new Set(["full", "priority"]);
 const EXCHANGE_OPTIONS = new Set(["NSE", "BSE"]);
 const CUSTOM_SYMBOL_TOKEN_RE = /^[A-Z0-9&._-]{1,25}$/;
 const MAX_CUSTOM_SYMBOLS = 120;
@@ -129,6 +132,21 @@ function setSectorModeUi(mode) {
     customExchangeHintEl.textContent = isCustomMode
       ? "Used only when mode=custom."
       : "Ignored for selected mode.";
+  }
+  const titanScopeEl = el("titanScope");
+  const priorityTopNEl = el("priorityTopN");
+  const titanScopeHintEl = el("titanScopeHint");
+  const isSectorOrAll = mode === "sector" || mode === "all_sectors";
+  if (titanScopeEl) {
+    titanScopeEl.disabled = !isSectorOrAll;
+  }
+  if (priorityTopNEl) {
+    priorityTopNEl.disabled = !isSectorOrAll;
+  }
+  if (titanScopeHintEl) {
+    titanScopeHintEl.textContent = isSectorOrAll
+      ? "Uses sector_priority_rankings; weekly refresh on Saturdays."
+      : "Not used for this mode.";
   }
 }
 
@@ -537,10 +555,30 @@ function buildRunTitanInputs() {
     max_symbols: maxSymbols,
     workers,
     all_sector_workers: allSectorWorkers,
+    titan_scope: "",
+    priority_top_n: "",
   };
 
   if (mode === "sector" && !sectorId) {
     throw new Error("Sector ID is required for sector mode.");
+  }
+  if (mode === "sector" || mode === "all_sectors") {
+    const ts = String(el("titanScope")?.value || "priority").trim().toLowerCase();
+    if (!TITAN_SCOPES.has(ts)) {
+      throw new Error("Titan scope must be full or priority.");
+    }
+    inputs.titan_scope = ts;
+    const ptn = String(el("priorityTopN")?.value || "").trim();
+    if (ptn) {
+      if (!/^\d+$/.test(ptn)) {
+        throw new Error("Priority top N must be a whole number or blank.");
+      }
+      const n = Number(ptn);
+      if (n < 1 || n > 25) {
+        throw new Error("Priority top N must be between 1 and 25.");
+      }
+    }
+    inputs.priority_top_n = ptn;
   }
   if (mode === "portfolio") {
     throw new Error("Use the 'Portfolio PDF Quick Scan' section for portfolio mode.");
@@ -565,9 +603,10 @@ function buildRunTitanInputs() {
 
 async function loadLatestRuns() {
   const runs = await ghApi("/runs?limit=20");
-  const relevant = (runs.workflow_runs || []).filter((r) =>
-    Object.values(WORKFLOWS).includes(r.path.split("/").pop()),
-  );
+  const relevant = (runs.workflow_runs || []).filter((r) => {
+    const name = r.path.split("/").pop();
+    return Object.values(WORKFLOWS).includes(name);
+  });
   if (!relevant.length) {
     setStatus("No recent runs for control workflows.");
     return;
@@ -579,6 +618,18 @@ async function loadLatestRuns() {
 }
 
 function wireEvents() {
+  const breezeLoginBtn = el("breezeLoginBtn");
+  if (breezeLoginBtn) {
+    breezeLoginBtn.addEventListener("click", () => {
+      try {
+        const { proxyBase } = cfg();
+        window.open(`${proxyBase}/breeze-login`, "_blank", "noopener,noreferrer");
+      } catch (e) {
+        setStatus(`Breeze login failed:\n${e.message}`);
+      }
+    });
+  }
+
   const runModeEl = el("runMode");
   if (runModeEl) {
     runModeEl.addEventListener("change", () => {

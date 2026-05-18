@@ -46,6 +46,18 @@ on:
         description: "Max holdings to evaluate for mode=portfolio"
         required: false
         default: "50"
+      titan_scope:
+        description: "full = entire sector universe | priority = top names from last weekend refresh"
+        required: false
+        default: "priority"
+        type: choice
+        options:
+          - full
+          - priority
+      priority_top_n:
+        description: "Top N symbols when titan_scope=priority (empty = 10 for sector, 5 for all_sectors)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -86,6 +98,9 @@ jobs:
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           SMTP_USE_TLS: ${{ secrets.SMTP_USE_TLS }}
         run: |
+          SCOPE="${{ inputs.titan_scope }}"
+          if [ -z "$SCOPE" ]; then SCOPE="priority"; fi
+
           if [ "${{ inputs.mode }}" = "live" ]; then
             python main.py --live
           elif [ "${{ inputs.mode }}" = "portfolio" ]; then
@@ -105,6 +120,11 @@ jobs:
             python main.py $ARGS --custom-symbols "${{ inputs.custom_symbols }}"
           elif [ "${{ inputs.mode }}" = "all_sectors" ]; then
             ARGS="--all-sectors --exclude-sectors unknown,non_equity"
+            if [ "$SCOPE" = "priority" ]; then
+              TOPN="${{ inputs.priority_top_n }}"
+              if [ -z "$TOPN" ]; then TOPN=5; fi
+              ARGS="$ARGS --sector-priority-only --sector-priority-top-n $TOPN"
+            fi
             if [ -n "${{ inputs.max_symbols }}" ]; then
               ARGS="$ARGS --sector-max-symbols ${{ inputs.max_symbols }}"
             fi
@@ -116,17 +136,18 @@ jobs:
             fi
             python main.py $ARGS
           else
-            if [ "${{ inputs.sector_id }}" = "ai" ]; then
-              # Keep manual AI runs constrained to top-ranked AI names.
-              python main.py --sector ai --sector-priority-only --sector-priority-top-n 10 --sector-workers 1
+            if [ "$SCOPE" = "priority" ]; then
+              TOPN="${{ inputs.priority_top_n }}"
+              if [ -z "$TOPN" ]; then TOPN=10; fi
+              ARGS="--sector ${{ inputs.sector_id }} --sector-priority-only --sector-priority-top-n $TOPN --sector-digest"
             else
               ARGS="--sector ${{ inputs.sector_id }} --sector-digest"
-              if [ -n "${{ inputs.max_symbols }}" ]; then
-                ARGS="$ARGS --sector-max-symbols ${{ inputs.max_symbols }}"
-              fi
-              if [ -n "${{ inputs.workers }}" ]; then
-                ARGS="$ARGS --sector-workers ${{ inputs.workers }}"
-              fi
-              python main.py $ARGS
             fi
+            if [ -n "${{ inputs.max_symbols }}" ]; then
+              ARGS="$ARGS --sector-max-symbols ${{ inputs.max_symbols }}"
+            fi
+            if [ -n "${{ inputs.workers }}" ]; then
+              ARGS="$ARGS --sector-workers ${{ inputs.workers }}"
+            fi
+            python main.py $ARGS
           fi

@@ -1,0 +1,51 @@
+# Recomputes sector_priority_rankings + sector_daily_winners for every active sector.
+# Intended schedule: weekly (Saturday). Weekday Titan runs should use persisted ranks only.
+
+name: Refresh sector rankings (weekly)
+
+on:
+  workflow_dispatch:
+    inputs:
+      top_n:
+        description: "Priority depth per sector (match Run Titan single-sector default)"
+        required: false
+        default: "10"
+        type: string
+  schedule:
+    # Saturday 02:00 UTC ≈ 07:30 IST — adjust if you prefer a different local window
+    - cron: "0 2 * * 6"
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Load Breeze token from Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python scripts/inject_breeze_session_from_supabase.py
+
+      - name: Refresh all sector rankings
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          BREEZE_API_KEY: ${{ secrets.BREEZE_API_KEY }}
+          BREEZE_SECRET: ${{ secrets.BREEZE_SECRET }}
+          BREEZE_SESSION_TOKEN: ${{ secrets.BREEZE_SESSION_TOKEN }}
+          BREEZE_HIST_CALL_INTERVAL_SECONDS: "0.35"
+        run: |
+          TOPN="${{ inputs.top_n }}"
+          if [ -z "$TOPN" ]; then TOPN=10; fi
+          python scripts/refresh_all_sector_rankings.py --top-n "$TOPN" --exclude-sectors unknown,non_equity

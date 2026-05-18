@@ -251,6 +251,8 @@ def test_all_sectors_invokes_parallel_runner(monkeypatch):
         exclude_sectors=("unknown", "non_equity"),
         macro_snapshot=None,
         event_snapshot=None,
+        priority_only=False,
+        priority_top_n=None,
     )
 
 
@@ -277,6 +279,8 @@ def test_run_all_sectors_default_sends_per_sector_email(monkeypatch):
         exclude_sectors=(),
         macro_snapshot=None,
         event_snapshot=None,
+        priority_only=False,
+        priority_top_n=None,
     )
     main_mod.send_success_post_email.assert_not_called()
 
@@ -305,6 +309,8 @@ def test_run_all_sectors_single_digest_env(monkeypatch):
         exclude_sectors=(),
         macro_snapshot=None,
         event_snapshot=None,
+        priority_only=False,
+        priority_top_n=None,
     )
     mock_email.assert_called_once()
     body = mock_email.call_args[0][0]
