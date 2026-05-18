@@ -288,8 +288,9 @@ export default {
 
     try {
       const url = new URL(request.url);
+      const path = (url.pathname || "/").replace(/\/+$/, "") || "/";
 
-      if (request.method === "GET" && url.pathname === "/breeze-login") {
+      if (request.method === "GET" && path === "/breeze-login") {
         const key = env.BREEZE_API_KEY ? String(env.BREEZE_API_KEY).trim() : "";
         if (!key) {
           return json({ error: "BREEZE_API_KEY not configured on proxy" }, 501);
@@ -298,7 +299,7 @@ export default {
         return Response.redirect(target, 302);
       }
 
-      if (request.method === "POST" && url.pathname === "/dispatch") {
+      if (request.method === "POST" && path === "/dispatch") {
         const body = await request.json();
         const workflow = String(body.workflow || "").trim();
         const ref = String(body.ref || "main").trim();
@@ -322,13 +323,13 @@ export default {
         return json({ ok: true, workflow, ref });
       }
 
-      if (request.method === "GET" && url.pathname === "/runs") {
+      if (request.method === "GET" && path === "/runs") {
         const limit = Number(url.searchParams.get("limit") || "20");
         const data = await gh(env, `/actions/runs?per_page=${Math.max(1, Math.min(limit, 100))}`);
         return json(data);
       }
 
-      if (request.method === "GET" && url.pathname === "/health") {
+      if (request.method === "GET" && path === "/health") {
         return json({
           ok: true,
           repo: `${env.REPO_OWNER || "<missing>"}/${env.REPO_NAME || "<missing>"}`,

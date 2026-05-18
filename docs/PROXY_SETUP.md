@@ -11,11 +11,18 @@ It requires a small backend proxy that stores GitHub PAT server-side.
    - `GITHUB_PAT` (fine-grained token with repo Actions write access)
    - `REPO_OWNER` = `arunurun`
    - `REPO_NAME` = `titan`
+   - `BREEZE_API_KEY` (optional but required for **Open Breeze login**: `GET /breeze-login` redirects to ICICI using this key; without it the endpoint responds with `501` and a JSON error)
 4. Deploy Worker.
 5. Copy Worker URL, e.g. `https://titan-dispatch.<subdomain>.workers.dev`
 6. Set that Worker URL as `PROXY_BASE` in `docs/app.js`.
 7. Deploy/update the UI static site.
 8. Tap **Test Connection** in the UI. It should return `Connection OK` with repo/workflow details.
+
+## Breeze login redirect
+
+- `GET https://<your-proxy>/breeze-login` → `302` to ICICI Breeze login (uses `BREEZE_API_KEY` secret).
+- Trailing slashes are accepted (`/breeze-login/`).
+- Set the secret from the repo root: `npx wrangler secret put BREEZE_API_KEY` (uses root `wrangler.toml` / `titan-proxy` worker).
 
 ## Common UI errors and fixes
 
