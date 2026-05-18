@@ -67,17 +67,37 @@ def load_sector_instruments(
                 f"no CSV fallback found at {SECTORS_DIR / f'{sid}.csv'}."
             )
 
-    seen: set[tuple[str, str]] = set()
-    ordered: list[SectorInstrument] = []
-    for inst in rows:
-        key = (inst.symbol, inst.exchange)
-        if key not in seen:
-            seen.add(key)
-            ordered.append(inst)
+    # Prefer one primary exchange per symbol (NSE first), because many
+    # BSE rows are metadata-only for our Breeze historical endpoint.
+    ordered = _normalize_primary_exchange(rows)
 
     if cap is None:
         return ordered
     return ordered[:cap]
+
+
+def _normalize_primary_exchange(rows: list[SectorInstrument]) -> list[SectorInstrument]:
+    seen_symbols: set[str] = set()
+    out: list[SectorInstrument] = []
+
+    # Stable first pass for NSE rows in original order.
+    for inst in rows:
+        if inst.exchange != "NSE":
+            continue
+        if inst.symbol in seen_symbols:
+            continue
+        seen_symbols.add(inst.symbol)
+        out.append(inst)
+
+    # Second pass: keep BSE only when symbol was not seen in NSE.
+    for inst in rows:
+        if inst.exchange != "BSE":
+            continue
+        if inst.symbol in seen_symbols:
+            continue
+        seen_symbols.add(inst.symbol)
+        out.append(inst)
+    return out
 
 
 def _load_sector_instruments_from_supabase(sid: str) -> list[SectorInstrument]:

@@ -97,6 +97,37 @@ def test_sector_passes_sector_workers(monkeypatch):
     )
 
 
+def test_sector_priority_only_passes_flags(monkeypatch):
+    import main as main_mod
+    import sector_audit
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "prog",
+            "--sector",
+            "ai",
+            "--sector-priority-only",
+            "--sector-priority-top-n",
+            "10",
+        ],
+    )
+    mock_run = MagicMock()
+    monkeypatch.setattr(sector_audit, "run_sector_live", mock_run)
+
+    main_mod.main()
+
+    mock_run.assert_called_once_with(
+        "ai",
+        max_workers=None,
+        max_symbols=None,
+        digest=True,
+        priority_only=True,
+        priority_top_n=10,
+    )
+
+
 def test_sector_failure_calls_send_failure_email(monkeypatch):
     import main as main_mod
     import sector_audit

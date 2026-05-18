@@ -203,6 +203,11 @@ def persist_sector_run_analytics(
             )
             for a in audits
         ]
+        # Replace same-day sector feature slice to avoid stale symbols leaking into
+        # leaders/laggards when multiple runs happen on the same trade_date.
+        client.table("symbol_daily_features").delete().eq("trade_date", trade_date).eq(
+            "sector", sector
+        ).execute()
         client.table("symbol_daily_features").upsert(
             features,
             on_conflict="trade_date,sector,symbol,exchange",

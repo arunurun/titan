@@ -1,0 +1,163 @@
+{
+  "run_started_at": "2026-05-17T19:21:06.456219",
+  "sectors_total": 24,
+  "sectors": [
+    {
+      "sector": "ai",
+      "status": "ok",
+      "requested": 45,
+      "successful": 28,
+      "skipped_no_data": 17,
+      "hard_failures": 0,
+      "hard_failure_breakdown": "none"
+    },
+    {
+      "sector": "auto",
+      "status": "ok",
+      "requested": 90,
+      "successful": 42,
+      "skipped_no_data": 46,
+      "hard_failures": 2,
+      "hard_failure_breakdown": "data_fetch_failed=2"
+    },
+    {
+      "sector": "auto_ancillary",
+      "status": "ok",
+      "requested": 43,
+      "successful": 26,
+      "skipped_no_data": 16,
+      "hard_failures": 1,
+      "hard_failure_breakdown": "data_fetch_failed=1"
+    },
+    {
+      "sector": "banks_private",
+      "status": "ok",
+      "requested": 184,
+      "successful": 98,
+      "skipped_no_data": 46,
+      "hard_failures": 40,
+      "hard_failure_breakdown": "data_fetch_failed=40"
+    },
+    {
+      "sector": "banks_psu",
+      "status": "error",
+      "error": "[SectorRegistry] No active instruments mapped for sector 'banks_psu' in Supabase and no CSV fallback found at C:\\Arun\\Study\\Cursor\\Titan\\data\\sectors\\banks_psu.csv.",
+      "traceback_tail": "RuntimeError: [SectorRegistry] No active instruments mapped for sector 'banks_psu' in Supabase and no CSV fallback found at C:\\Arun\\Study\\Cursor\\Titan\\data\\sectors\\banks_psu.csv."
+    },
+    {
+      "sector": "capital_goods_industrials",
+      "status": "error",
+      "error": "[Sector] All 253 instruments failed for sector 'capital_goods_industrials'",
+      "traceback_tail": "RuntimeError: [Sector] All 253 instruments failed for sector 'capital_goods_industrials'"
+    },
+    {
+      "sector": "cement_building_materials",
+      "status": "error",
+      "error": "[Sector] All 63 instruments failed for sector 'cement_building_materials'",
+      "traceback_tail": "RuntimeError: [Sector] All 63 instruments failed for sector 'cement_building_materials'"
+    },
+    {
+      "sector": "chemicals",
+      "status": "error",
+      "error": "[Sector] All 205 instruments failed for sector 'chemicals'",
+      "traceback_tail": "RuntimeError: [Sector] All 205 instruments failed for sector 'chemicals'"
+    },
+    {
+      "sector": "consumer_discretionary",
+      "status": "error",
+      "error": "[Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py",
+      "traceback_tail": "RuntimeError: [Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py"
+    },
+    {
+      "sector": "defence",
+      "status": "error",
+      "error": "[Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py",
+      "traceback_tail": "RuntimeError: [Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py"
+    },
+    {
+      "sector": "fmcg_staples",
+      "status": "error",
+      "error": "[Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py",
+      "traceback_tail": "RuntimeError: [Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py"
+    },
+    {
+      "sector": "infrastructure_construction",
+      "status": "error",
+      "error": "[Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py",
+      "traceback_tail": "RuntimeError: [Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py"
+    },
+    {
+      "sector": "insurance",
+      "status": "error",
+      "error": "[Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py",
+      "traceback_tail": "RuntimeError: [Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py"
+    },
+    {
+      "sector": "it",
+      "status": "error",
+      "error": "[Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py",
+      "traceback_tail": "RuntimeError: [Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py"
+    },
+    {
+      "sector": "logistics",
+      "status": "error",
+      "error": "[Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py",
+      "traceback_tail": "RuntimeError: [Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py"
+    },
+    {
+      "sector": "media",
+      "status": "error",
+      "error": "[Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py",
+      "traceback_tail": "RuntimeError: [Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py"
+    },
+    {
+      "sector": "metals_mining",
+      "status": "error",
+      "error": "[Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py",
+      "traceback_tail": "RuntimeError: [Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py"
+    },
+    {
+      "sector": "nbfc_financial_services",
+      "status": "error",
+      "error": "[Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py",
+      "traceback_tail": "RuntimeError: [Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py"
+    },
+    {
+      "sector": "oil_gas_energy",
+      "status": "error",
+      "error": "[Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py",
+      "traceback_tail": "RuntimeError: [Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py"
+    },
+    {
+      "sector": "pharma_healthcare",
+      "status": "error",
+      "error": "[Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py",
+      "traceback_tail": "RuntimeError: [Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py"
+    },
+    {
+      "sector": "power_utilities",
+      "status": "error",
+      "error": "[Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py",
+      "traceback_tail": "RuntimeError: [Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py"
+    },
+    {
+      "sector": "realty_reits",
+      "status": "error",
+      "error": "[Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py",
+      "traceback_tail": "RuntimeError: [Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py"
+    },
+    {
+      "sector": "telecom",
+      "status": "error",
+      "error": "[Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py",
+      "traceback_tail": "RuntimeError: [Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py"
+    },
+    {
+      "sector": "textiles",
+      "status": "error",
+      "error": "[Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py",
+      "traceback_tail": "RuntimeError: [Breeze] Session token expired. Get a new session from ICICI (browser login), then update: local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. Run: python scripts/breeze_session.py"
+    }
+  ],
+  "run_finished_at": "2026-05-18T08:49:34.988099"
+}

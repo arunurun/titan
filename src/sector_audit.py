@@ -125,6 +125,8 @@ def _format_symbol_metrics_line(result: dict[str, Any]) -> str:
     cap = calibration.get("cap")
     cap_method = calibration.get("method", "n/a")
     rows = audit.get("rows")
+    exchange_used = str(audit.get("exchange_used", exchange))
+    fallback_used = bool(audit.get("exchange_fallback_used", False))
     flags: list[str] = []
     if audit.get("panic_absorption_proxy"):
         flags.append("panic-absorption")
@@ -150,7 +152,8 @@ def _format_symbol_metrics_line(result: dict[str, Any]) -> str:
         f"| ema200_delta {_fmt_metric(ema_dist)}% | atr14 {_fmt_metric(atr_pct)}% "
         f"| nextDay {_fmt_metric(next_day)} | nextWeek {_fmt_metric(next_week)} "
         f"| sell {sell_signal} "
-        f"| flags={flag_text} | rows {rows}"
+        f"| flags={flag_text} | rows {rows} "
+        f"| exchange_used={exchange_used}{' (fallback)' if fallback_used else ''}"
     )
     sell_reason_text = (
         f" ({'; '.join(str(x) for x in sell_reasons[:2])})" if sell_reasons else ""
@@ -803,6 +806,8 @@ def build_equity_live_audit(
         breeze=breeze,
         lookback_calendar_days=lookback_calendar_days,
     )
+    exchange_used = str(df.attrs.get("exchange_used", inst.exchange)).strip().upper()
+    fallback_used = bool(df.attrs.get("exchange_fallback_used", False))
     if df.empty:
         if strict_data:
             raise RuntimeError(
@@ -814,6 +819,8 @@ def build_equity_live_audit(
             "sector": sector_id,
             "symbol": inst.symbol,
             "exchange": inst.exchange,
+        "exchange_used": exchange_used or inst.exchange,
+        "exchange_fallback_used": fallback_used,
             "skipped_no_data": True,
             "z_score": float("nan"),
             "absorption_ratio": float("nan"),
@@ -881,6 +888,8 @@ def build_equity_live_audit(
         "sector": sector_id,
         "symbol": inst.symbol,
         "exchange": inst.exchange,
+        "exchange_used": exchange_used or inst.exchange,
+        "exchange_fallback_used": fallback_used,
         "z_score": z,
         "absorption_ratio": absorption_raw,
         "absorption_calibrated_ratio": absorption_calibrated_raw,
@@ -1068,6 +1077,8 @@ def run_sector_live(
     macro_snapshot: dict[str, Any] | None = None,
     event_snapshot: dict[str, Any] | None = None,
     instruments_override: list[SectorInstrument] | None = None,
+    priority_only: bool = False,
+    priority_top_n: int | None = None,
 ) -> str:
     from email_notify import send_success_post_email
     from breeze_client import create_breeze_session
@@ -1076,7 +1087,25 @@ def run_sector_live(
     # Preflight Breeze auth once to fail fast on expired tokens.
     # Without this, each worker thread would emit the same auth stacktrace.
     create_breeze_session(cfg)
-    instruments = instruments_override if instruments_override is not None else load_sector_instruments(sector_id)
+    if instruments_override is not None:
+        instruments = instruments_override
+    elif priority_only:
+        from sector_priority import load_priority_instruments
+
+        instruments = load_priority_instruments(
+            cfg,
+            sector_key=sector_id,
+            top_n=priority_top_n,
+        )
+        if not instruments:
+            logger.warning(
+                "No persisted priority list found for sector=%s (top_n=%s); falling back to full sector list.",
+                sector_id,
+                priority_top_n,
+            )
+            instruments = load_sector_instruments(sector_id)
+    else:
+        instruments = load_sector_instruments(sector_id)
     if not instruments:
         raise RuntimeError(f"[Sector] No instruments loaded for sector {sector_id!r}")
 

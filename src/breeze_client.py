@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
 import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Protocol
@@ -25,6 +27,33 @@ class _BreezeCredentials(Protocol):
 logger = logging.getLogger(__name__)
 # Reduce verbose SDK payload dumps in workflow logs.
 logging.getLogger("APILogger").setLevel(logging.INFO)
+_HIST_CALL_LOCK = threading.Lock()
+_LAST_HIST_CALL_AT = 0.0
+_MIN_HIST_CALL_INTERVAL_SECONDS = 0.75
+
+
+def _min_hist_call_interval_seconds() -> float:
+    raw = os.environ.get("BREEZE_HIST_CALL_INTERVAL_SECONDS", "").strip()
+    if not raw:
+        return _MIN_HIST_CALL_INTERVAL_SECONDS
+    try:
+        v = float(raw)
+    except ValueError:
+        return _MIN_HIST_CALL_INTERVAL_SECONDS
+    return max(0.0, v)
+
+
+def _rate_limited_historical_call(breeze: BreezeConnect, **kwargs: Any) -> Any:
+    global _LAST_HIST_CALL_AT
+    interval = _min_hist_call_interval_seconds()
+    with _HIST_CALL_LOCK:
+        now = time.monotonic()
+        wait = interval - (now - _LAST_HIST_CALL_AT)
+        if wait > 0:
+            time.sleep(wait)
+        raw = breeze.get_historical_data(**kwargs)
+        _LAST_HIST_CALL_AT = time.monotonic()
+    return raw
 
 
 def create_breeze_session(config: _BreezeCredentials) -> BreezeConnect:
@@ -72,7 +101,13 @@ def _is_breeze_no_data_response(raw: dict[str, Any]) -> bool:
     err = raw.get("Error")
     if err is None:
         return False
-    return "no data" in str(err).lower()
+    msg = str(err).lower()
+    return ("no data" in msg) or ("historical data fail" in msg)
+
+
+def _is_breeze_rate_limit_response(raw: dict[str, Any]) -> bool:
+    err = str(raw.get("Error", "")).lower()
+    return ("limit exceed" in err) or ("api call per minute" in err)
 
 
 def _rows_from_option_response(raw: Any, label: str) -> list[dict[str, Any]]:
@@ -219,6 +254,7 @@ def fetch_equity_data(
     lookback_calendar_days: int = 60,
     max_retries: int = 3,
     backoff_base_seconds: float = 2.0,
+    allow_exchange_fallback: bool = True,
 ) -> pd.DataFrame:
     """
     Fetch cash OHLC (and volume) for an equity symbol on NSE or BSE.
@@ -240,38 +276,68 @@ def fetch_equity_data(
     from_date = start.strftime("%Y-%m-%dT00:00:00.000Z")
     to_date = end.strftime("%Y-%m-%dT23:59:59.999Z")
 
-    label = f"{sc_raw}->{sc} ({ex})" if sc != sc_raw else f"{sc} ({ex})"
-    last_err: Exception | None = None
-    for attempt in range(max_retries + 1):
-        try:
-            raw = breeze.get_historical_data(
-                interval="1day",
-                from_date=from_date,
-                to_date=to_date,
-                stock_code=sc,
-                exchange_code=ex,
-                product_type="cash",
-            )
-            if not isinstance(raw, dict):
-                raise RuntimeError(f"[Breeze] Unexpected historical response: {raw!r}")
-            if raw.get("Success") is None:
-                # Breeze sometimes returns HTTP 200 with Error='No Data Found' for valid but inactive/unavailable scrips.
-                # Treat this as a clean no-data skip so sector runs stay resilient.
-                if _is_breeze_no_data_response(raw):
-                    logger.info("Breeze historical no data for %s: %s", label, raw.get("Error"))
+    def _fetch_one_exchange(exchange: str) -> pd.DataFrame:
+        stock_code = resolve_breeze_stock_code(sc_raw, exchange)
+        label = f"{sc_raw}->{stock_code} ({exchange})" if stock_code != sc_raw else f"{stock_code} ({exchange})"
+        last_err: Exception | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                raw = _rate_limited_historical_call(
+                    breeze,
+                    interval="1day",
+                    from_date=from_date,
+                    to_date=to_date,
+                    stock_code=stock_code,
+                    exchange_code=exchange,
+                    product_type="cash",
+                )
+                if not isinstance(raw, dict):
+                    raise RuntimeError(f"[Breeze] Unexpected historical response: {raw!r}")
+                if raw.get("Success") is None:
+                    if _is_breeze_rate_limit_response(raw):
+                        raise RuntimeError(f"[Breeze] Rate limited: {raw.get('Error')}")
+                    # Breeze sometimes returns HTTP 200 with Error='No Data Found' for valid but inactive/unavailable scrips.
+                    # Treat this as a clean no-data skip so sector runs stay resilient.
+                    if _is_breeze_no_data_response(raw):
+                        logger.info("Breeze historical no data for %s: %s", label, raw.get("Error"))
+                        return pd.DataFrame()
+                    raise RuntimeError(f"[Breeze] Unexpected historical response: {raw!r}")
+                rows = raw["Success"]
+                if not rows:
                     return pd.DataFrame()
-                raise RuntimeError(f"[Breeze] Unexpected historical response: {raw!r}")
-            rows = raw["Success"]
-            if not rows:
-                return pd.DataFrame()
-            df = pd.DataFrame(rows)
-            return df
-        except Exception as e:
-            last_err = e
-            logger.warning("Breeze fetch attempt %s for %s failed: %s", attempt + 1, label, e)
-            if attempt < max_retries:
-                time.sleep(backoff_base_seconds * (2**attempt))
-    raise RuntimeError(f"[Breeze] {label} historical fetch failed after retries") from last_err
+                return pd.DataFrame(rows)
+            except Exception as e:
+                last_err = e
+                logger.warning("Breeze fetch attempt %s for %s failed: %s", attempt + 1, label, e)
+                if attempt < max_retries:
+                    msg = str(e).lower()
+                    if "rate limited" in msg or "limit exceed" in msg:
+                        # Breeze minute caps need much longer cool-off than standard network retries.
+                        sleep_seconds = max(20.0, 20.0 * (attempt + 1))
+                    else:
+                        sleep_seconds = backoff_base_seconds * (2**attempt)
+                    time.sleep(sleep_seconds)
+        raise RuntimeError(f"[Breeze] {label} historical fetch failed after retries") from last_err
+
+    primary_df = _fetch_one_exchange(ex)
+    primary_df.attrs["exchange_requested"] = ex
+    primary_df.attrs["exchange_used"] = ex
+    primary_df.attrs["exchange_fallback_used"] = False
+    if not primary_df.empty or not allow_exchange_fallback:
+        return primary_df
+
+    alt = "BSE" if ex == "NSE" else "NSE"
+    logger.info(
+        "Breeze returned no rows for %s (%s); trying fallback exchange %s",
+        sc_raw,
+        ex,
+        alt,
+    )
+    fallback_df = _fetch_one_exchange(alt)
+    fallback_df.attrs["exchange_requested"] = ex
+    fallback_df.attrs["exchange_used"] = alt
+    fallback_df.attrs["exchange_fallback_used"] = True
+    return fallback_df
 
 
 def fetch_nifty_data(

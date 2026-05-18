@@ -63,6 +63,28 @@ def test_build_equity_live_audit_success(monkeypatch):
     assert "effective_intent_score" in audit
 
 
+def test_build_equity_live_audit_records_exchange_fallback_metadata(monkeypatch):
+    from sector_audit import build_equity_live_audit
+
+    closes = [100.0 + i * 0.1 for i in range(30)]
+    df = pd.DataFrame({"close": closes, "volume": [1e6] * 30})
+    df.attrs["exchange_requested"] = "NSE"
+    df.attrs["exchange_used"] = "BSE"
+    df.attrs["exchange_fallback_used"] = True
+    monkeypatch.setattr("breeze_client.fetch_equity_data", lambda *a, **k: df)
+    monkeypatch.setattr(
+        "brain.generate_titan_narrative",
+        lambda audit, api_key=None, api_keys=None: "Post body",
+    )
+
+    breeze = MagicMock()
+    inst = SectorInstrument("HAL", "NSE")
+    audit, _ = build_equity_live_audit(make_cfg(), breeze, inst, sector_id="defence")
+    assert audit["exchange"] == "NSE"
+    assert audit["exchange_used"] == "BSE"
+    assert audit["exchange_fallback_used"] is True
+
+
 def test_build_equity_live_audit_event_flags(monkeypatch):
     from sector_audit import build_equity_live_audit
 

@@ -432,6 +432,18 @@ def main() -> None:
         help="One Gemini call per symbol (high quota). Default is one digest call for the whole sector.",
     )
     p.add_argument(
+        "--sector-priority-only",
+        action="store_true",
+        help="Use persisted priority symbols (sector_priority_rankings) for --sector runs.",
+    )
+    p.add_argument(
+        "--sector-priority-top-n",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Optional cap for priority-only list size when using --sector-priority-only.",
+    )
+    p.add_argument(
         "--sector-digest",
         action="store_true",
         help=argparse.SUPPRESS,
@@ -579,6 +591,10 @@ def main() -> None:
             max_symbols=args.sector_max_symbols,
             digest=sector_digest,
         )
+        if args.sector_priority_only:
+            run_kwargs["priority_only"] = True
+            if args.sector_priority_top_n is not None:
+                run_kwargs["priority_top_n"] = max(1, int(args.sector_priority_top_n))
         sector_id = args.sector.strip() or "custom_ui"
         if custom_symbols_raw:
             symbols = _parse_custom_symbols(custom_symbols_raw)

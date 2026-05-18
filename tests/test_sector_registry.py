@@ -88,7 +88,7 @@ def test_empty_sector_mapping_raises(monkeypatch):
         load_sector_symbols("unknown_sector")
 
 
-def test_bse_rows_and_dedupe_by_exchange(monkeypatch):
+def test_prefers_nse_when_symbol_exists_in_both_exchanges(monkeypatch):
     _mock_supabase(
         monkeypatch,
         [
@@ -97,15 +97,27 @@ def test_bse_rows_and_dedupe_by_exchange(monkeypatch):
         ],
     )
     inst = load_sector_instruments("defence")
-    assert len(inst) == 2
-    assert SectorInstrument("FOO", "NSE") in inst
-    assert SectorInstrument("FOO", "BSE") in inst
+    assert inst == [SectorInstrument("FOO", "NSE")]
 
 
-def test_invalid_exchange_raises(monkeypatch):
+def test_keeps_bse_when_nse_missing(monkeypatch):
+    _mock_supabase(
+        monkeypatch,
+        [
+            {"market_instruments": {"symbol": "ONLYBSE", "exchange": "BSE"}},
+        ],
+    )
+    inst = load_sector_instruments("defence")
+    assert inst == [SectorInstrument("ONLYBSE", "BSE")]
+
+
+def test_invalid_exchange_raises(monkeypatch, tmp_path: Path):
+    sectors_dir = tmp_path / "sectors"
+    sectors_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("sector_registry.SECTORS_DIR", sectors_dir)
     _mock_supabase(monkeypatch, [{"market_instruments": {"symbol": "X", "exchange": "NYSE"}}])
-    out = load_sector_symbols("defence")
-    assert "HAL" in out
+    with pytest.raises(RuntimeError, match="Invalid exchange"):
+        load_sector_symbols("no_csv_fallback")
 
 
 def test_falls_back_to_csv_when_supabase_missing(monkeypatch, tmp_path: Path):

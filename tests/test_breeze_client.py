@@ -88,10 +88,109 @@ def test_fetch_equity_data_no_data_found_returns_empty_and_does_not_retry(mock_b
     }
     mock_breeze_cls.return_value = api
 
-    df = fetch_equity_data(make_cfg(), "AICHAMP", "NSE", breeze=api, max_retries=4)
+    df = fetch_equity_data(
+        make_cfg(),
+        "AICHAMP",
+        "NSE",
+        breeze=api,
+        max_retries=4,
+        allow_exchange_fallback=False,
+    )
 
     assert df.empty
     assert api.get_historical_data.call_count == 1
+
+
+@patch("breeze_client.BreezeConnect")
+def test_fetch_equity_data_historical_data_fail_treated_as_soft_no_data(mock_breeze_cls, monkeypatch):
+    monkeypatch.setattr(
+        "breeze_client.resolve_breeze_stock_code",
+        lambda sym, ex: sym.strip().upper(),
+    )
+    api = MagicMock()
+    api.get_historical_data.return_value = {
+        "Success": None,
+        "Status": 500,
+        "Error": "Historical Data Fail",
+    }
+    mock_breeze_cls.return_value = api
+
+    df = fetch_equity_data(
+        make_cfg(),
+        "BADSYM",
+        "NSE",
+        breeze=api,
+        max_retries=4,
+        allow_exchange_fallback=False,
+    )
+
+    assert df.empty
+    assert api.get_historical_data.call_count == 1
+
+
+@patch("breeze_client.BreezeConnect")
+def test_fetch_equity_data_fallback_to_bse_when_nse_has_no_data(mock_breeze_cls, monkeypatch):
+    monkeypatch.setattr(
+        "breeze_client.resolve_breeze_stock_code",
+        lambda sym, ex: sym.strip().upper(),
+    )
+    api = MagicMock()
+    api.get_historical_data.side_effect = [
+        {"Success": None, "Status": 200, "Error": "No Data Found"},
+        {"Success": [{"close": 10.0, "volume": 100.0, "datetime": "2024-01-01"}]},
+    ]
+    mock_breeze_cls.return_value = api
+
+    df = fetch_equity_data(make_cfg(), "FOO", "NSE", breeze=api, max_retries=0)
+
+    assert len(df) == 1
+    assert df.attrs.get("exchange_requested") == "NSE"
+    assert df.attrs.get("exchange_used") == "BSE"
+    assert df.attrs.get("exchange_fallback_used") is True
+    first_call = api.get_historical_data.call_args_list[0].kwargs
+    second_call = api.get_historical_data.call_args_list[1].kwargs
+    assert first_call["exchange_code"] == "NSE"
+    assert second_call["exchange_code"] == "BSE"
+
+
+@patch("breeze_client.BreezeConnect")
+def test_fetch_equity_data_primary_exchange_metadata(mock_breeze_cls, monkeypatch):
+    monkeypatch.setattr(
+        "breeze_client.resolve_breeze_stock_code",
+        lambda sym, ex: sym.strip().upper(),
+    )
+    api = MagicMock()
+    api.get_historical_data.return_value = {
+        "Success": [{"close": 21.0, "volume": 100.0, "datetime": "2024-01-01"}],
+    }
+    mock_breeze_cls.return_value = api
+
+    df = fetch_equity_data(make_cfg(), "BAR", "NSE", breeze=api, max_retries=0)
+
+    assert len(df) == 1
+    assert df.attrs.get("exchange_requested") == "NSE"
+    assert df.attrs.get("exchange_used") == "NSE"
+    assert df.attrs.get("exchange_fallback_used") is False
+
+
+@patch("breeze_client.BreezeConnect")
+def test_fetch_equity_data_rate_limited_then_success_retries(mock_breeze_cls, monkeypatch):
+    monkeypatch.setattr(
+        "breeze_client.resolve_breeze_stock_code",
+        lambda sym, ex: sym.strip().upper(),
+    )
+    monkeypatch.setattr("breeze_client.time.sleep", lambda _s: None)
+    api = MagicMock()
+    api.get_historical_data.side_effect = [
+        {"Success": None, "Status": 5, "Error": "Limit exceed: API call per minute:Try after some time"},
+        {"Success": [{"close": 99.0, "volume": 1000.0, "datetime": "2024-01-01"}]},
+    ]
+    mock_breeze_cls.return_value = api
+
+    df = fetch_equity_data(make_cfg(), "RATELIM", "NSE", breeze=api, max_retries=2)
+
+    assert len(df) == 1
+    assert api.get_historical_data.call_count == 2
 
 
 def test_volume_absorption_ratio_trailing_avg():
