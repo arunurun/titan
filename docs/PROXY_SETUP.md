@@ -41,6 +41,9 @@ Then redeploy: `npx wrangler deploy`. In the UI, **Test connection** should show
 - Run `sql/alter_llm_digest_memory_add_full_digest.sql` once if your project created `llm_digest_memory` before that column existed.
 - Run `sql/alter_llm_digest_memory_add_github_run_id.sql` once so each row can be tied to a GitHub Actions run (`GITHUB_RUN_ID` is passed from `run_titan_now.yml` into `main.py` / `sector_audit.py`).
 - **Run Titan Now** must set **`TITAN_ENABLE_ANALYSIS_STORE=1`** in the workflow (see `run_titan_now.yml`). Without it, `llm_digest_memory` stays empty even when email digests succeed.
+- GitHub secret **`SUPABASE_KEY`** must be the **service_role** key (not anon) so Actions can insert into `llm_digest_memory`. If you use the anon key, run `sql/grant_llm_digest_memory.sql` in the SQL Editor.
+- After a digest run, open the Actions log and search for **`TITAN_LLM_DIGEST_MEMORY`** — you should see `persisted=True`.
+- **Test connection** in the UI shows **`llm_digest_memory rows (proxy)`** — should be ≥ 1 after a successful sector/custom digest.
 - The Worker exposes:
   - **`GET /insights/latest?sector=<sector_id>`** — latest digest for that sector (no GitHub run filter).
   - **`GET /insights/github-run/<github_run_id>?sector=<sector_id>`** — digest for that workflow run and sector (`sector` required for `all_sectors` jobs).

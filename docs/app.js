@@ -217,9 +217,15 @@ async function checkConnection({ showSuccess = false } = {}) {
   if (showSuccess) {
     const flows = Array.isArray(health.allowed_workflows) ? health.allowed_workflows.join(", ") : "n/a";
     const insights = health.has_supabase_insights === true ? "yes" : "no";
+    const digestRows =
+      health.digest_memory_rows != null ? String(health.digest_memory_rows) : "unknown";
+    const digestErr = health.digest_memory_count_error
+      ? `\nDigest table count error: ${health.digest_memory_count_error}`
+      : "";
     setStatus(
       `Connection OK\nProxy repo: ${health.repo}\nPAT configured: ${Boolean(health.has_pat)}\n` +
         `Supabase insights: ${insights}\n` +
+        `llm_digest_memory rows (proxy): ${digestRows}${digestErr}\n` +
         `Allowed workflows: ${flows}`,
     );
   }

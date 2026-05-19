@@ -1378,6 +1378,7 @@ def run_sector_live(
     if digest:
         from analysis_store import persist_sector_run_analytics
         from analysis_store import (
+            analysis_store_enabled,
             build_comparison_payload,
             persist_llm_digest_memory,
             quality_checks_for_run,
@@ -1546,23 +1547,35 @@ def run_sector_live(
             lines.append(f"--- {r['symbol']} ({r['exchange']}) FAILED ---")
             lines.append(r.get("error", "") or "")
         digest_text = "\n".join(lines).strip()
-        if persist_meta.get("persisted") and persist_meta.get("run_id"):
-            gh_rid = (os.environ.get("GITHUB_RUN_ID") or "").strip() or None
+        gh_rid = (os.environ.get("GITHUB_RUN_ID") or "").strip() or None
+        if analysis_store_enabled():
+            mem_run_id = str(persist_meta.get("run_id") or "").strip()
+            if not mem_run_id:
+                mem_run_id = f"{sector_id}-{datetime.now(IST).strftime('%Y%m%d-%H%M%S')}"
             mem_meta = persist_llm_digest_memory(
                 cfg,
-                run_id=str(persist_meta["run_id"]),
+                run_id=mem_run_id,
                 sector=sector_id,
                 prompt_facts=comparison if comparison.get("enabled") else {"enabled": False},
-                output_text=post,
+                output_text=post or digest_text[:8000] or "(digest)",
                 model_name=None,
                 full_digest=digest_text,
                 github_run_id=gh_rid,
+            )
+            # Visible in GitHub Actions logs for mobile-insights debugging.
+            print(
+                "TITAN_LLM_DIGEST_MEMORY "
+                f"persisted={mem_meta.get('persisted')} "
+                f"reason={mem_meta.get('reason', 'ok')} "
+                f"sector={sector_id} run_id={mem_run_id} github_run_id={gh_rid or ''} "
+                f"analytics_persisted={bool(persist_meta.get('persisted'))}",
+                flush=True,
             )
             if not mem_meta.get("persisted"):
                 logger.warning(
                     "llm_digest_memory not saved (sector=%s run_id=%s github_run_id=%s): %s",
                     sector_id,
-                    persist_meta.get("run_id"),
+                    mem_run_id,
                     gh_rid or "",
                     mem_meta,
                 )

@@ -353,6 +353,25 @@ async function fetchLatestInsight(env, sector) {
   return { ok: true, insight };
 }
 
+async function countDigestMemoryRows(base, key) {
+  const url = `${base}/rest/v1/llm_digest_memory?select=run_id&limit=1`;
+  const res = await fetch(url, {
+    headers: {
+      apikey: key,
+      Authorization: `Bearer ${key}`,
+      Accept: "application/json",
+      Prefer: "count=exact",
+    },
+  });
+  const txt = await res.text();
+  if (!res.ok) {
+    throw new Error(`Supabase REST ${res.status}: ${txt.slice(0, 300)}`);
+  }
+  const range = res.headers.get("content-range") || "";
+  const m = range.match(/\/(\d+)$/);
+  return m ? Number(m[1]) : null;
+}
+
 async function supabaseSelectDigestRows(base, key, queryPath) {
   const url = `${base}/rest/v1/llm_digest_memory${queryPath}`;
   const res = await fetch(url, {
@@ -586,12 +605,25 @@ export default {
       if (isGetLike && path === "/health") {
         const supabaseUrl = Boolean(String(env.SUPABASE_URL || "").trim());
         const supabaseKey = Boolean(String(env.SUPABASE_SERVICE_ROLE_KEY || "").trim());
+        let digest_memory_rows = null;
+        let digest_memory_count_error = null;
+        if (supabaseUrl && supabaseKey) {
+          try {
+            const base = String(env.SUPABASE_URL || "").trim().replace(/\/+$/, "");
+            const key = String(env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
+            digest_memory_rows = await countDigestMemoryRows(base, key);
+          } catch (e) {
+            digest_memory_count_error = String(e.message || e);
+          }
+        }
         return json({
           ok: true,
           repo: `${env.REPO_OWNER || "<missing>"}/${env.REPO_NAME || "<missing>"}`,
           has_pat: Boolean(env.GITHUB_PAT),
           allowed_workflows: Array.from(ALLOWED_WORKFLOWS),
           has_supabase_insights: supabaseUrl && supabaseKey,
+          digest_memory_rows,
+          digest_memory_count_error,
         });
       }
 

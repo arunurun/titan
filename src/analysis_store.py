@@ -526,4 +526,4 @@ def persist_llm_digest_memory(
         payload = e.args[0] if e.args else {}
         msg = payload.get("message", str(e)) if isinstance(payload, dict) else str(e)
         logger.warning("LLM digest memory persist failed: %s", msg)
-        return {"enabled": True, "persisted": False, "reason": "api_error"}
+        return {"enabled": True, "persisted": False, "reason": "api_error", "message": msg}
