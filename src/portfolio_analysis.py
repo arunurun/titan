@@ -49,7 +49,7 @@ _COMMON_NON_SYMBOLS = {
 _PORTFOLIO_ICICI_ALIASES: dict[str, tuple[str, str]] = {
     "JYORES": ("JYOTIRES", "BSE"),  # BSE-only listing
     "NAGCON": ("NCC", "NSE"),
-    "CPSETF": ("CPSEETF", "NSE"),
+    "CPSETF": ("CPSEETF", "NSE"),  # ETFs often absent from market_instruments sync
     "DSPGOL": ("GOLDADD", "NSE"),
     "COMENG": ("JWL", "NSE"),
     "HINAER": ("HAL", "NSE"),
@@ -59,6 +59,10 @@ _PORTFOLIO_ICICI_ALIASES: dict[str, tuple[str, str]] = {
     "GOLINT": ("GOLDIAM", "NSE"),
     "KALJEW": ("KALYANKJIL", "NSE"),
     "UTSCZG": ("UTSSAV", "NSE"),
+    "NETTEC": ("NETWEB", "NSE"),
+    "KECIN": ("KEC", "NSE"),  # not KENIN (Kennametal)
+    "JARTEX": ("SGMART", "NSE"),  # not JAYTEX (different issuer)
+    "GARREA": ("GRSE", "NSE"),  # not BGEAR-RE (Bharat Gears rights)
 }
 
 _SYMBOL_ALIAS_HINTS = {
@@ -216,15 +220,7 @@ def _resolve_symbol(
     other_ex = "BSE" if ex == "NSE" else "NSE"
     other_map = by_exchange.get(other_ex, {})
 
-    # 1) Exact in same exchange.
-    if key_raw in same_map:
-        return same_map[key_raw], ex, "exact_match", 1.0
-
-    # 2) Trimmed numeric suffix exact.
-    if key_trim in same_map:
-        return same_map[key_trim], ex, "numeric_suffix_stripped", 0.95
-
-    # 3) ICICI PDF / contract codes → listed ticker (+ exchange when not NSE).
+    # 1) ICICI PDF / contract codes first (PDF uses SC; universe may list SC or wrong fuzzy match).
     icici = _PORTFOLIO_ICICI_ALIASES.get(key_trim) or _PORTFOLIO_ICICI_ALIASES.get(key_raw)
     if icici:
         listed, ex_pref = icici
@@ -236,6 +232,16 @@ def _resolve_symbol(
             return same_map[listed_key], ex, "icici_pdf_alias", 0.93
         if listed_key in other_map:
             return other_map[listed_key], other_ex, "icici_pdf_alias_cross_exchange", 0.9
+        # Trust scrip map even when ETF / small cap missing from market_instruments (Breeze uses NS→SC).
+        return listed, ex_pref, "icici_pdf_alias", 0.91
+
+    # 2) Exact in same exchange.
+    if key_raw in same_map:
+        return same_map[key_raw], ex, "exact_match", 1.0
+
+    # 3) Trimmed numeric suffix exact.
+    if key_trim in same_map:
+        return same_map[key_trim], ex, "numeric_suffix_stripped", 0.95
 
     # 4) Alias hints from known broker/PDF patterns.
     hint = _SYMBOL_ALIAS_HINTS.get(key_trim) or _SYMBOL_ALIAS_HINTS.get(key_raw)

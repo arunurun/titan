@@ -124,6 +124,35 @@ def test_resolve_icici_pdf_contract_codes_to_nse_tickers():
     assert sym4 == "GOLDADD"
 
 
+def test_resolve_icici_aliases_without_market_instruments_row():
+    """ETFs and other rows filtered from universe sync still resolve for portfolio."""
+    empty = {"NSE": {}, "BSE": {}}
+    sym, ex, reason, conf = _resolve_symbol("CPSETF", "NSE", by_exchange=empty)
+    assert sym == "CPSEETF" and ex == "NSE" and reason == "icici_pdf_alias"
+    assert conf >= 0.9
+    sym2, ex2, reason2, _ = _resolve_symbol("DSPGOL", "NSE", by_exchange=empty)
+    assert sym2 == "GOLDADD" and ex2 == "NSE" and reason2 == "icici_pdf_alias"
+
+
+def test_resolve_icici_codes_avoid_fuzzy_false_positives():
+    universe = {
+        "NSE": {
+            "KENIN": "KENIN",
+            "JAYTEX": "JAYTEX",
+            "BGEARRE": "BGEAR-RE",
+            "NETWEB": "NETWEB",
+            "KEC": "KEC",
+            "SGMART": "SGMART",
+            "GRSE": "GRSE",
+        },
+        "BSE": {"JAYTEX": "JAYTEX"},
+    }
+    assert _resolve_symbol("KECIN", "NSE", by_exchange=universe)[:3] == ("KEC", "NSE", "icici_pdf_alias")
+    assert _resolve_symbol("JARTEX", "NSE", by_exchange=universe)[:3] == ("SGMART", "NSE", "icici_pdf_alias")
+    assert _resolve_symbol("GARREA", "NSE", by_exchange=universe)[:3] == ("GRSE", "NSE", "icici_pdf_alias")
+    assert _resolve_symbol("NETTEC", "NSE", by_exchange=universe)[:3] == ("NETWEB", "NSE", "icici_pdf_alias")
+
+
 def test_resolve_symbol_numeric_suffix_and_alias():
     universe = {
         "NSE": {
