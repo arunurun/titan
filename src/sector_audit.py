@@ -8,6 +8,7 @@ import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from statistics import median
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -16,6 +17,12 @@ from supabase import create_client
 
 from config_loader import TitanConfig, load_config
 from sector_registry import SectorInstrument, load_sector_instruments
+from tape_metrics import (
+    benchmark_relative_returns,
+    median_notional_inr_20d,
+    percentile_rank_0_100,
+    pct_return_n_sessions_back,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -191,9 +198,11 @@ def _prediction_brief_line(audit: dict[str, Any]) -> str:
         confidence = "low"
 
     contributors = [
-        ("structure", _safe_float(week.get("tech_composite_term"))),
+        ("tapeBlend", _safe_float(week.get("tech_composite_term"))),
         ("trend", _safe_float(week.get("ema_term"))),
-        ("momentum", _safe_float(week.get("ret1d_term"))),
+        ("momentum1d", _safe_float(week.get("ret1d_term"))),
+        ("momentum5d", _safe_float(week.get("ret5d_term"))),
+        ("vsNifty5d", _safe_float(week.get("rel5_term"))),
         ("volatility", -_safe_float(week.get("atr_penalty"))),
     ]
     drivers = [name for name, val in contributors if not math.isnan(val) and val >= 1.0]
@@ -253,6 +262,23 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     if not math.isnan(_safe_float(ema_dist)):
         tape_bits.insert(2, f"vs 200-day avg {_fmt_metric(ema_dist)}%")
     lines_out.append("Tape · " + " · ".join(tape_bits))
+
+    rank_bits: list[str] = []
+    sp_int = audit.get("sector_pctile_effective_intent")
+    if not math.isnan(_safe_float(sp_int)):
+        rank_bits.append(f"intent vs sector peers pctile {_fmt_metric(sp_int)}")
+    sp_nw = audit.get("sector_pctile_next_week_score")
+    if not math.isnan(_safe_float(sp_nw)):
+        rank_bits.append(f"next-week vs sector pctile {_fmt_metric(sp_nw)}")
+    for label, key in (
+        ("vs NIFTY 5d", "rel_return_5d_vs_nifty_pct"),
+        ("vs NIFTY 20d", "rel_return_20d_vs_nifty_pct"),
+    ):
+        v = _safe_float(audit.get(key))
+        if not math.isnan(v):
+            rank_bits.append(f"{label} {_fmt_metric(v)}%")
+    if rank_bits:
+        lines_out.append("Sector / benchmark · " + " · ".join(rank_bits[:4]))
 
     if not math.isnan(_safe_float(nf)):
         nd_l = _horizon_score_label(nf)
@@ -577,20 +603,51 @@ def _predictive_scores(audit: dict[str, Any]) -> tuple[float, float, dict[str, A
     """
     tech = _safe_float(audit.get("effective_intent_score", audit.get("intent_score")))
     ret1d = _safe_float(audit.get("return_1d_pct"))
+    ret5d = _safe_float(audit.get("return_5d_pct"))
+    ret10d = _safe_float(audit.get("return_10d_pct"))
+    rel5 = _safe_float(audit.get("rel_return_5d_vs_nifty_pct"))
+    rel20 = _safe_float(audit.get("rel_return_20d_vs_nifty_pct"))
     ema_dist = _safe_float(audit.get("ema_200_distance_pct"))
-    atr_pct = _safe_float(audit.get("atr_14_pct"))
+    atr_in = _safe_float(audit.get("atr_penalty_input"))
+    if math.isnan(atr_in):
+        atr_in = _safe_float(audit.get("atr_14_pct"))
     ema_conf = _ema_history_confidence(audit.get("rows"))
 
     tech_day = 0.0 if math.isnan(tech) else ((tech - 50.0) * 0.52)
     tech_week = 0.0 if math.isnan(tech) else ((tech - 50.0) * 0.62)
-    ret_term = 0.0 if math.isnan(ret1d) else (ret1d * 0.55)
+    ret1_w = 0.18 if audit.get("extreme_price_move_proxy") else 0.42
+    ret_term = 0.0 if math.isnan(ret1d) else (ret1d * ret1_w)
+    ret5_term = 0.0 if math.isnan(ret5d) else (ret5d * 0.28)
+    ret10_term = 0.0 if math.isnan(ret10d) else (ret10d * 0.15)
+    rel5_term = 0.0 if math.isnan(rel5) else (rel5 * 0.2)
+    rel20_term = 0.0 if math.isnan(rel20) else (rel20 * 0.11)
     ema_base = 0.0 if math.isnan(ema_dist) else (ema_dist * 0.26 * ema_conf)
     ema_day = ema_base * 0.85
     ema_week = ema_base * 1.0
-    atr_penalty = 0.0 if math.isnan(atr_pct) else (atr_pct * 0.45)
+    atr_penalty = 0.0 if math.isnan(atr_in) else (atr_in * 0.45)
 
-    day_score = 50.0 + tech_day + ret_term + ema_day - atr_penalty
-    week_score = 50.0 + tech_week + (ret_term * 0.82) + ema_week - (atr_penalty * 0.35)
+    day_score = (
+        50.0
+        + tech_day
+        + ret_term
+        + ret5_term
+        + 0.55 * ret10_term
+        + rel5_term
+        + 0.55 * rel20_term
+        + ema_day
+        - atr_penalty
+    )
+    week_score = (
+        50.0
+        + tech_week
+        + (ret_term * 0.78)
+        + 0.82 * ret5_term
+        + 0.48 * ret10_term
+        + 0.72 * rel5_term
+        + 0.5 * rel20_term
+        + ema_week
+        - (atr_penalty * 0.35)
+    )
 
     penalties: list[str] = []
     if audit.get("trap_exit_proxy"):
@@ -611,13 +668,21 @@ def _predictive_scores(audit: dict[str, Any]) -> tuple[float, float, dict[str, A
         "day": {
             "tech_composite_term": round(tech_day, 2),
             "ret1d_term": round(ret_term, 2),
+            "ret5d_term": round(ret5_term, 2),
+            "ret10d_term": round(0.55 * ret10_term, 2),
+            "rel5_term": round(rel5_term, 2),
+            "rel20_term": round(0.55 * rel20_term, 2),
             "ema_term": round(ema_day, 2),
             "ema_history_confidence": round(ema_conf, 2),
             "atr_penalty": round(atr_penalty, 2),
         },
         "week": {
             "tech_composite_term": round(tech_week, 2),
-            "ret1d_term": round(ret_term * 0.82, 2),
+            "ret1d_term": round(ret_term * 0.78, 2),
+            "ret5d_term": round(0.82 * ret5_term, 2),
+            "ret10d_term": round(0.48 * ret10_term, 2),
+            "rel5_term": round(0.72 * rel5_term, 2),
+            "rel20_term": round(0.5 * rel20_term, 2),
             "ema_term": round(ema_week, 2),
             "ema_history_confidence": round(ema_conf, 2),
             "atr_penalty": round(atr_penalty * 0.35, 2),
@@ -681,9 +746,11 @@ def _prediction_reason_text(audit: dict[str, Any]) -> str:
         confidence = "low"
 
     contributors = [
-        ("techComposite", _safe_float(week.get("tech_composite_term"))),
+        ("tapeBlend", _safe_float(week.get("tech_composite_term"))),
         ("trend", _safe_float(week.get("ema_term"))),
-        ("momentum", _safe_float(week.get("ret1d_term"))),
+        ("momentum1d", _safe_float(week.get("ret1d_term"))),
+        ("momentum5d", _safe_float(week.get("ret5d_term"))),
+        ("vsNifty5d", _safe_float(week.get("rel5_term"))),
         ("volatility", -_safe_float(week.get("atr_penalty"))),
     ]
     drivers = [name for name, val in contributors if not math.isnan(val) and val >= 1.0]
@@ -907,6 +974,101 @@ def _apply_event_guardrails(ok_results: list[dict[str, Any]]) -> int:
     return adjusted
 
 
+def _liquidity_floor_inr() -> float:
+    raw = (os.environ.get("TITAN_MIN_MEDIAN_DAILY_NOTIONAL_INR") or "").strip()
+    if not raw:
+        return 1_200_000.0
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 1_200_000.0
+
+
+def _apply_sector_cross_section(
+    ok_results: list[dict[str, Any]], *, score_percentiles: bool = True
+) -> None:
+    """
+    Sector-relative percentiles, ATR penalty scaling vs sector median, liquidity peer rank.
+
+    Call with ``score_percentiles=False`` before recomputing horizon scores, then
+    ``score_percentiles=True`` after ``_refresh_symbol_scoring_outputs`` so next-week
+    percentiles match the final blended scores.
+    """
+    audits = [r["audit"] for r in ok_results if isinstance(r.get("audit"), dict)]
+    floor = _liquidity_floor_inr()
+    if len(audits) < 2:
+        for a in audits:
+            if not score_percentiles:
+                a["sector_cross_section_applied"] = False
+                ap = _safe_float(a.get("atr_14_pct"))
+                a["atr_penalty_input"] = ap if not math.isnan(ap) else float("nan")
+                mn = _safe_float(a.get("median_notional_inr_20d"))
+                a["liquidity_thin_proxy"] = bool(not math.isnan(mn) and mn > 0 and mn < floor)
+                if a["liquidity_thin_proxy"]:
+                    a["liquidity_thin_reason"] = f"median daily notional below ₹{floor:,.0f}"
+                else:
+                    a.pop("liquidity_thin_reason", None)
+            else:
+                vals_nw = [_safe_float(a.get("next_week_score"))]
+                vals_nd = [_safe_float(a.get("next_day_score"))]
+                a["sector_pctile_next_week_score"] = percentile_rank_0_100(
+                    [v for v in vals_nw if not math.isnan(v)], vals_nw[0]
+                )
+                a["sector_pctile_next_day_score"] = percentile_rank_0_100(
+                    [v for v in vals_nd if not math.isnan(v)], vals_nd[0]
+                )
+                a["sector_cross_section_applied"] = True
+        return
+
+    def series(key: str) -> list[float]:
+        return [_safe_float(a.get(key)) for a in audits]
+
+    def assign_percentile(src: str, dst: str) -> None:
+        vals = [v for v in series(src) if not math.isnan(v)]
+        for a in audits:
+            v = _safe_float(a.get(src))
+            a[dst] = percentile_rank_0_100(vals, v) if vals and not math.isnan(v) else float("nan")
+
+    if not score_percentiles:
+        assign_percentile("effective_intent_score", "sector_pctile_effective_intent")
+        assign_percentile("intent_score", "sector_pctile_intent")
+        assign_percentile("z_score", "sector_pctile_z_score")
+        assign_percentile("return_1d_pct", "sector_pctile_return_1d_pct")
+        assign_percentile("return_5d_pct", "sector_pctile_return_5d_pct")
+        assign_percentile("median_notional_inr_20d", "sector_pctile_median_notional_20d")
+
+        atrs = [v for v in series("atr_14_pct") if not math.isnan(v)]
+        med_atr = float(median(atrs)) if atrs else float("nan")
+        for a in audits:
+            a["sector_cross_section_applied"] = False
+            a["sector_median_atr_14_pct"] = med_atr
+            ap = _safe_float(a.get("atr_14_pct"))
+            if not math.isnan(ap) and not math.isnan(med_atr) and med_atr > 1e-9:
+                a["atr_penalty_input"] = round(min(5.0, ap / med_atr), 4)
+            elif not math.isnan(ap):
+                a["atr_penalty_input"] = ap
+            else:
+                a["atr_penalty_input"] = float("nan")
+
+            mn = _safe_float(a.get("median_notional_inr_20d"))
+            sp = _safe_float(a.get("sector_pctile_median_notional_20d"))
+            thin_peer = not math.isnan(sp) and sp <= 15.0
+            thin_hard = not math.isnan(mn) and mn > 0 and mn < floor
+            a["liquidity_thin_proxy"] = bool(thin_hard or thin_peer)
+            if thin_peer:
+                a["liquidity_thin_reason"] = "bottom-quintile median turnover vs sector peers"
+            elif thin_hard:
+                a["liquidity_thin_reason"] = f"median daily notional below ₹{floor:,.0f}"
+            else:
+                a.pop("liquidity_thin_reason", None)
+        return
+
+    assign_percentile("next_week_score", "sector_pctile_next_week_score")
+    assign_percentile("next_day_score", "sector_pctile_next_day_score")
+    for a in audits:
+        a["sector_cross_section_applied"] = True
+
+
 def _prediction_quality_gate(
     ok_results: list[dict[str, Any]],
     *,
@@ -1043,6 +1205,15 @@ def build_equity_live_audit(
             "intent_score": float("nan"),
             "rows": 0,
             "option_chain_unavailable": True,
+            "return_1d_pct": float("nan"),
+            "return_5d_pct": float("nan"),
+            "return_10d_pct": float("nan"),
+            "return_20d_pct": float("nan"),
+            "median_notional_inr_20d": float("nan"),
+            "rel_return_5d_vs_nifty_pct": float("nan"),
+            "rel_return_10d_vs_nifty_pct": float("nan"),
+            "rel_return_20d_vs_nifty_pct": float("nan"),
+            "extreme_price_move_proxy": False,
         }
         return skip, ""
     close_col = "close" if "close" in df.columns else df.columns[-1]
@@ -1055,6 +1226,19 @@ def build_equity_live_audit(
         if (not math.isnan(close_last) and not math.isnan(close_prev) and close_prev != 0.0)
         else float("nan")
     )
+    ret5d = pct_return_n_sessions_back(series_non_na, 5)
+    ret10d = pct_return_n_sessions_back(series_non_na, 10)
+    ret20d = pct_return_n_sessions_back(series_non_na, 20)
+    med_notional = median_notional_inr_20d(df, close_col)
+    bench = getattr(_THREAD_LOCAL, "sector_benchmark_ohlc", None)
+    rel_map = benchmark_relative_returns(df, bench, close_col, horizons=(5, 10, 20))
+    extreme_move = False
+    if not math.isnan(ret1d) and abs(ret1d) >= 18.0:
+        extreme_move = True
+    if not math.isnan(ret5d) and abs(ret5d) >= 38.0:
+        extreme_move = True
+    if not math.isnan(ret10d) and abs(ret10d) >= 48.0:
+        extreme_move = True
     z, z_fast, z_slow, z_blend_note = _blend_equity_z_score(series)
     vpr_raw = volume_participation_ratio(df)
     vpr_calibrated_raw, vpr_for_scoring, vpr_calibration = _calibrate_volume_participation_v2(
@@ -1115,6 +1299,14 @@ def build_equity_live_audit(
         "absorption_calibration": vpr_calibration,
         "close_last": close_last,
         "return_1d_pct": ret1d,
+        "return_5d_pct": ret5d,
+        "return_10d_pct": ret10d,
+        "return_20d_pct": ret20d,
+        "median_notional_inr_20d": med_notional,
+        "extreme_price_move_proxy": extreme_move,
+        "rel_return_5d_vs_nifty_pct": rel_map.get("rel_return_5d_vs_nifty_pct", float("nan")),
+        "rel_return_10d_vs_nifty_pct": rel_map.get("rel_return_10d_vs_nifty_pct", float("nan")),
+        "rel_return_20d_vs_nifty_pct": rel_map.get("rel_return_20d_vs_nifty_pct", float("nan")),
         "ema_200": ema_200,
         "ema_200_distance_pct": ema_distance_pct,
         "atr_14": atr_14,
@@ -1319,6 +1511,17 @@ def run_sector_live(
     # Preflight Breeze auth once to fail fast on expired tokens.
     # Without this, each worker thread would emit the same auth stacktrace.
     create_breeze_session(cfg)
+    import pandas as pd
+
+    from breeze_client import fetch_nifty_data
+
+    try:
+        _nifty_df = fetch_nifty_data(cfg, lookback_calendar_days=210)
+        _THREAD_LOCAL.sector_benchmark_ohlc = _nifty_df if not _nifty_df.empty else None
+    except Exception as ex:
+        logger.warning("NIFTY benchmark prefetch skipped: %s", ex)
+        _THREAD_LOCAL.sector_benchmark_ohlc = None
+
     if instruments_override is not None:
         instruments = instruments_override
     elif priority_only:
@@ -1373,6 +1576,9 @@ def run_sector_live(
                     err_row["post"] = ""
                 results.append(err_row)
 
+    if hasattr(_THREAD_LOCAL, "sector_benchmark_ohlc"):
+        delattr(_THREAD_LOCAL, "sector_benchmark_ohlc")
+
     ok_count = sum(1 for r in results if r.get("ok"))
     if ok_count == 0:
         raise RuntimeError(
@@ -1392,13 +1598,15 @@ def run_sector_live(
         from supabase_log import save_audit_log
 
         ok_results = [r for r in results if r.get("ok")]
-        audits = [r["audit"] for r in ok_results]
-        quality_gate = _prediction_quality_gate(ok_results, total_count=len(results))
         red_ratio, cluster_downgrades = _apply_cluster_guardrails(ok_results)
         event_adjustments = _apply_event_guardrails(ok_results)
         macro_applied, macro_reason = _apply_macro_guardrails(ok_results, macro_snapshot)
+        _apply_sector_cross_section(ok_results, score_percentiles=False)
         for r in ok_results:
             _refresh_symbol_scoring_outputs(r["audit"])
+        _apply_sector_cross_section(ok_results, score_percentiles=True)
+        quality_gate = _prediction_quality_gate(ok_results, total_count=len(results))
+        audits = [r["audit"] for r in ok_results]
         persist_meta = persist_sector_run_analytics(
             cfg,
             sector=sector_id,

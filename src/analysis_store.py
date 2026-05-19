@@ -94,6 +94,25 @@ def build_symbol_daily_feature(
     if audit.get("event_guardrail_applied") or audit.get("event_risk_soon"):
         flags.append("event-guardrail")
 
+    tape_extras = {
+        "return_5d_pct": audit.get("return_5d_pct"),
+        "return_10d_pct": audit.get("return_10d_pct"),
+        "return_20d_pct": audit.get("return_20d_pct"),
+        "rel_return_5d_vs_nifty_pct": audit.get("rel_return_5d_vs_nifty_pct"),
+        "rel_return_10d_vs_nifty_pct": audit.get("rel_return_10d_vs_nifty_pct"),
+        "rel_return_20d_vs_nifty_pct": audit.get("rel_return_20d_vs_nifty_pct"),
+        "median_notional_inr_20d": audit.get("median_notional_inr_20d"),
+        "liquidity_thin_proxy": audit.get("liquidity_thin_proxy"),
+        "extreme_price_move_proxy": audit.get("extreme_price_move_proxy"),
+        "atr_penalty_input": audit.get("atr_penalty_input"),
+        "sector_pctile_effective_intent": audit.get("sector_pctile_effective_intent"),
+        "sector_pctile_next_week_score": audit.get("sector_pctile_next_week_score"),
+        "sector_pctile_return_5d_pct": audit.get("sector_pctile_return_5d_pct"),
+        "next_week_score": audit.get("next_week_score"),
+        "next_day_score": audit.get("next_day_score"),
+        "prediction_breakdown": audit.get("prediction_breakdown"),
+    }
+
     return sanitize_for_json(
         {
             "trade_date": trade_date,
@@ -113,6 +132,7 @@ def build_symbol_daily_feature(
             "flags": flags,
             "option_chain_unavailable": bool(audit.get("option_chain_unavailable", False)),
             "rows_count": int(audit.get("rows") or 0),
+            "tape_extras": tape_extras,
         }
     )
 

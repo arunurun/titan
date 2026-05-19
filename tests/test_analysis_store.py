@@ -30,6 +30,8 @@ def test_build_symbol_daily_feature_basic():
         "trap_exit_proxy": False,
         "high_volume_down_day_proxy": True,
         "panic_absorption_proxy": True,
+        "return_5d_pct": 2.1,
+        "next_week_score": 58.0,
     }
     row = build_symbol_daily_feature(
         audit,
@@ -41,6 +43,8 @@ def test_build_symbol_daily_feature_basic():
     assert row["symbol"] == "HAL"
     assert row["rows_count"] == 38
     assert "high-vol-down-day" in row["flags"]
+    assert "tape_extras" in row
+    assert row["tape_extras"]["return_5d_pct"] == 2.1
 
 
 def test_build_sector_daily_rollup_shapes_metrics():

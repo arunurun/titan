@@ -19,6 +19,13 @@
 - Fixed stale same-day symbol leakage in `symbol_daily_features` rollup inputs.
 - Finalized AI universe to 12 stocks and regenerated top-10 winners + Titan digest.
 
+## 2026-05-19
+
+- Sector digest: two-phase cross-section (ATR/liquidity/stable percentiles, then refresh, then next-week/day sector percentiles); digest lines for sector vs Nifty context.
+- Action signals: bucketed capped defensive risk; BUY blocked on thin liquidity, extreme-move proxy, weak 5d trend, or severe 5d underperformance vs Nifty.
+- Analysis store: `tape_extras` JSON on `symbol_daily_features` (migration `sql/alter_symbol_daily_features_add_tape_extras.sql`); skip-audit dict includes multi-day / relative-return keys for consistency.
+- Tests: `test_tape_metrics`, extended action/digest/store/sector coverage.
+
 ## 2026-05-17
 
 - Stabilized sector runs with NSE-first instrument normalization.

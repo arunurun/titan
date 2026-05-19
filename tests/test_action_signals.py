@@ -39,6 +39,30 @@ def test_derive_hold_not_buy_when_trap_flag():
     assert sig != "buy"
 
 
+def test_derive_hold_not_buy_when_liquidity_thin():
+    sig, _, _ = derive_action_signal(
+        {
+            "next_week_score": 75.0,
+            "effective_intent_score": 70.0,
+            "return_1d_pct": 1.0,
+            "liquidity_thin_proxy": True,
+        }
+    )
+    assert sig != "buy"
+
+
+def test_derive_hold_not_buy_when_extreme_move_proxy():
+    sig, _, _ = derive_action_signal(
+        {
+            "next_week_score": 75.0,
+            "effective_intent_score": 70.0,
+            "return_1d_pct": 1.0,
+            "extreme_price_move_proxy": True,
+        }
+    )
+    assert sig != "buy"
+
+
 def test_derive_trim_and_exit_bands():
     trim_sig, trim_risk, _ = derive_action_signal(
         {

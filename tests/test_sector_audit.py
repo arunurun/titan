@@ -60,6 +60,9 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
             "day": {},
             "penalties": [],
         },
+        "sector_pctile_effective_intent": 62.0,
+        "rel_return_5d_vs_nifty_pct": 0.35,
+        "rel_return_20d_vs_nifty_pct": -0.12,
     }
     result = {"symbol": "WELCORP", "exchange": "NSE", "audit": audit}
     text = _format_symbol_metrics_line(result)
@@ -71,6 +74,7 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
     assert "intent input" in text.lower()
     assert "Why this action" in text
     assert "\n" in text
+    assert "Sector / benchmark" in text
 
 
 def test_symbol_digest_verbose_restores_legacy_line(monkeypatch):
@@ -575,3 +579,43 @@ def test_sell_signal_framework_states():
     assert exit_signal == "exit-risk"
     assert exit_risk >= 7.0
     assert reasons
+
+
+def test_apply_sector_cross_section_two_phase_orders_next_week_percentile():
+    from sector_audit import _apply_sector_cross_section
+
+    ok = [
+        {
+            "audit": {
+                "next_week_score": 50.0,
+                "next_day_score": 50.0,
+                "effective_intent_score": 60.0,
+                "intent_score": 60.0,
+                "z_score": 0.0,
+                "return_1d_pct": 0.0,
+                "return_5d_pct": 0.0,
+                "atr_14_pct": 2.0,
+                "median_notional_inr_20d": 5e6,
+            }
+        },
+        {
+            "audit": {
+                "next_week_score": 80.0,
+                "next_day_score": 50.0,
+                "effective_intent_score": 60.0,
+                "intent_score": 60.0,
+                "z_score": 0.0,
+                "return_1d_pct": 0.0,
+                "return_5d_pct": 0.0,
+                "atr_14_pct": 2.0,
+                "median_notional_inr_20d": 5e6,
+            }
+        },
+    ]
+    _apply_sector_cross_section(ok, score_percentiles=False)
+    ok[0]["audit"]["next_week_score"] = 35.0
+    ok[1]["audit"]["next_week_score"] = 75.0
+    _apply_sector_cross_section(ok, score_percentiles=True)
+    p0 = ok[0]["audit"]["sector_pctile_next_week_score"]
+    p1 = ok[1]["audit"]["sector_pctile_next_week_score"]
+    assert p0 < p1
