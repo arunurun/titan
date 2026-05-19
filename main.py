@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import sys
+import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -148,6 +149,20 @@ def _env_truthy(name: str, default: bool = False) -> bool:
     return raw.lower() in ("1", "true", "yes", "on")
 
 
+def _all_sectors_inter_delay_seconds() -> float:
+    """
+    Extra pause after each sector when running --all-sectors serially.
+    Gemini spacing is also enforced in brain._gemini_generate_content (GEMINI_MIN_CALL_INTERVAL_SECONDS).
+    """
+    raw = (os.environ.get("TITAN_ALL_SECTORS_DELAY_SECONDS") or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 0.0
+
+
 def run_all_sectors(
     *,
     max_workers: int | None,
@@ -166,17 +181,33 @@ def run_all_sectors(
     sectors = [s for s in list_active_sector_ids(include_unknown=False) if s not in set(exclude_sectors)]
     if not sectors:
         raise RuntimeError("No active sectors found after exclusions.")
-    sector_parallelism = all_sector_workers if all_sector_workers is not None else max(20, len(sectors))
+    sector_parallelism = all_sector_workers if all_sector_workers is not None else 1
     sector_parallelism = max(1, min(int(sector_parallelism), len(sectors)))
+    inter_delay = _all_sectors_inter_delay_seconds()
     logger.info(
-        "Running all sectors (%s) with sector_parallelism=%s: %s",
+        "Running all sectors (%s) with sector_parallelism=%s%s: %s",
         len(sectors),
         sector_parallelism,
+        f", inter-sector delay={inter_delay}s" if inter_delay > 0 and sector_parallelism == 1 else "",
         ", ".join(sectors),
     )
-    single_digest = _env_truthy("TITAN_ALL_SECTORS_SINGLE_DIGEST", default=True)
+    if sector_parallelism > 1:
+        logger.warning(
+            "all-sector-workers=%s runs sectors in parallel; Gemini calls are still serialized but "
+            "free-tier quota may exhaust. Prefer --all-sector-workers 1 for digest runs.",
+            sector_parallelism,
+        )
+    single_digest = _env_truthy("TITAN_ALL_SECTORS_SINGLE_DIGEST", default=False)
     if single_digest:
-        logger.info("All-sector email mode: single consolidated digest (set TITAN_ALL_SECTORS_SINGLE_DIGEST=0 for one email per sector).")
+        logger.info(
+            "All-sector email mode: single consolidated digest "
+            "(set TITAN_ALL_SECTORS_SINGLE_DIGEST=0 for one email per sector)."
+        )
+    else:
+        logger.info(
+            "All-sector email mode: one email per sector (default) "
+            "(set TITAN_ALL_SECTORS_SINGLE_DIGEST=1 for a single consolidated digest)."
+        )
     failed: list[str] = []
     successful_posts: dict[str, str] = {}
     successful_posts_lock = Lock()
@@ -201,15 +232,29 @@ def run_all_sectors(
         with successful_posts_lock:
             successful_posts[sid] = post_text
 
-    with ThreadPoolExecutor(max_workers=sector_parallelism) as pool:
-        future_map = {pool.submit(_run_sector, sid): sid for sid in sectors}
-        for fut in as_completed(future_map):
-            sid = future_map[fut]
+    if sector_parallelism == 1:
+        for i, sid in enumerate(sectors):
             try:
-                fut.result()
+                _run_sector(sid)
             except Exception:
                 failed.append(sid)
                 logger.exception("Sector run failed: %s", sid)
+            if inter_delay > 0 and i < len(sectors) - 1:
+                logger.info(
+                    "All-sectors throttle: sleeping %.1fs before next sector",
+                    inter_delay,
+                )
+                time.sleep(inter_delay)
+    else:
+        with ThreadPoolExecutor(max_workers=sector_parallelism) as pool:
+            future_map = {pool.submit(_run_sector, sid): sid for sid in sectors}
+            for fut in as_completed(future_map):
+                sid = future_map[fut]
+                try:
+                    fut.result()
+                except Exception:
+                    failed.append(sid)
+                    logger.exception("Sector run failed: %s", sid)
     if single_digest and successful_posts:
         lines = [
             "Titan all-sectors consolidated digest",
@@ -407,7 +452,7 @@ def main() -> None:
         type=int,
         default=None,
         metavar="N",
-        help="Parallel sector runs when using --all-sectors (default: max(20, sector_count), bounded by sector_count).",
+        help="Parallel sector runs when using --all-sectors (default: 1 = serial; use >1 only with paid Gemini quota).",
     )
     p.add_argument(
         "--exclude-sectors",

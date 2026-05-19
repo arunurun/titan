@@ -64,11 +64,13 @@ Set `SMTP_HOST`, `SMTP_PORT` (default 587), `SMTP_USER`, `SMTP_PASSWORD`, `EMAIL
 
 ## Optional: all-sector consolidated email
 
-Default `--all-sectors` behavior: Titan sends **one** consolidated success email after every sector finishes (same digest content as before, concatenated under `=== Sector: … ===` headers).
+Default `--all-sectors` behavior: **one success email per sector** (each sector digest as it completes). Sectors run **one at a time** by default (`--all-sector-workers 1`). Set **`GEMINI_MIN_CALL_INTERVAL_SECONDS=45`** (GitHub Actions all-sectors workflow does this) to space Gemini calls on free tier.
 
-To restore **one email per sector** instead, set:
+For a **single consolidated** email after all sectors finish, set:
 
-- `TITAN_ALL_SECTORS_SINGLE_DIGEST=0`
+- `TITAN_ALL_SECTORS_SINGLE_DIGEST=1`
+
+Optional extra pause between serial sectors: `TITAN_ALL_SECTORS_DELAY_SECONDS` (default `0`; brain throttle already spaces Gemini).
 
 ## Verify
 

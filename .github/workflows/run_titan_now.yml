@@ -27,9 +27,9 @@ on:
         required: false
         default: "4"
       all_sector_workers:
-        description: "Optional sector-parallel workers (used when mode=all_sectors)"
+        description: "Sector parallelism for all_sectors (1=serial, recommended for free-tier Gemini)"
         required: false
-        default: "8"
+        default: "1"
       custom_symbols:
         description: "Custom symbols list (comma/space/newline separated, used when mode=custom)"
         required: false
@@ -94,6 +94,8 @@ jobs:
           TITAN_ENABLE_ANALYSIS_STORE: ${{ secrets.TITAN_ENABLE_ANALYSIS_STORE }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
+          GEMINI_MIN_CALL_INTERVAL_SECONDS: "45"
+          GEMINI_SECTOR_DIGEST_FAIL_OPEN: "true"
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}

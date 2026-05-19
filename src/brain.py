@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import textwrap
+import threading
 import time
 from collections.abc import Sequence
 from typing import Any
@@ -44,9 +45,54 @@ Protocol:
 - Output a single concise post suitable for X/LinkedIn (plain text).
 - After drafting, mentally verify policy compliance before answering."""
 
+# Disable AFC (automatic function calling): SDK default allows up to 10 extra round-trips per
+# generate_content, each billed as API traffic — bad for free-tier quotas. Titan prompts are
+# tool-free plain generation only.
 _GEN_CONFIG = types.GenerateContentConfig(
     system_instruction=TITAN_V12_SYSTEM_INSTRUCTION,
+    automatic_function_calling=types.AutomaticFunctionCallingConfig(
+        disable=True,
+        maximum_remote_calls=0,
+    ),
 )
+
+_GEMINI_CALL_LOCK = threading.Lock()
+_LAST_GEMINI_CALL_AT = 0.0
+
+
+def _min_gemini_call_interval_seconds() -> float:
+    """
+    Minimum wall time between generate_content calls (process-wide).
+    Default 0 (no throttle). For --all-sectors on free tier, set GEMINI_MIN_CALL_INTERVAL_SECONDS=45 in CI or .env.
+    """
+    raw = os.environ.get("GEMINI_MIN_CALL_INTERVAL_SECONDS", "").strip()
+    if not raw:
+        return 0.0
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 45.0
+
+
+def _gemini_generate_content(client: genai.Client, *, model: str, user_text: str) -> Any:
+    """Rate-limited wrapper around models.generate_content."""
+    global _LAST_GEMINI_CALL_AT
+    interval = _min_gemini_call_interval_seconds()
+    with _GEMINI_CALL_LOCK:
+        if interval > 0:
+            now = time.monotonic()
+            wait = interval - (now - _LAST_GEMINI_CALL_AT)
+            if wait > 0:
+                logger.info("Gemini throttle: waiting %.1fs before API call", wait)
+                time.sleep(wait)
+        try:
+            return client.models.generate_content(
+                model=model,
+                contents=user_text,
+                config=_GEN_CONFIG,
+            )
+        finally:
+            _LAST_GEMINI_CALL_AT = time.monotonic()
 
 
 def _policy_check_passes(text: str) -> bool:
@@ -87,12 +133,50 @@ def _is_retryable_gemini_error(err_s: str) -> bool:
 _RETRYABLE_HTTP_CODES = frozenset({429, 500, 502, 503, 504})
 
 
+def _gemini_error_search_text(exc: BaseException) -> str:
+    """Collect message/details/response from SDK errors for quota parsing and logging."""
+    chunks: list[str] = []
+    cur: BaseException | None = exc
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        chunks.append(str(cur))
+        if GenaiAPIError is not None and isinstance(cur, GenaiAPIError):
+            for attr in ("message", "details"):
+                v = getattr(cur, attr, None)
+                if v is not None:
+                    chunks.append(str(v))
+            resp = getattr(cur, "response", None)
+            if resp is not None:
+                chunks.append(str(resp))
+        nxt = cur.__cause__ or cur.__context__
+        cur = nxt if isinstance(nxt, BaseException) else None
+    return "\n".join(chunks)
+
+
+def _gemini_http_status(exc: BaseException) -> int | None:
+    cur: BaseException | None = exc
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if GenaiAPIError is not None and isinstance(cur, GenaiAPIError):
+            code = getattr(cur, "code", None)
+            if isinstance(code, int):
+                return code
+        code = getattr(cur, "status_code", None)
+        if isinstance(code, int):
+            return code
+        nxt = cur.__cause__ or cur.__context__
+        cur = nxt if isinstance(nxt, BaseException) else None
+    return None
+
+
 def _is_per_day_quota_exhausted(err: BaseException) -> bool:
     """
     True when the API reports daily free-tier (or per-day) generation caps.
     Retrying the same day / same project does not help; avoid long backoff loops.
     """
-    err_s = str(err)
+    err_s = _gemini_error_search_text(err)
     if "GenerateRequestsPerDayPerProjectPerModel" in err_s:
         return True
     if "GenerateRequestsPerDay" in err_s and "FreeTier" in err_s:
@@ -138,34 +222,45 @@ def _generate(keys: list[str], model: str, user_text: str) -> str:
     if not keys:
         raise ValueError("No Gemini API keys configured")
     last_err: Exception | None = None
+    seen_429_on_prior_key = False
     for ki, api_key in enumerate(keys):
         client = _make_client(api_key)
         for attempt in range(6):
             try:
-                resp = client.models.generate_content(
-                    model=model,
-                    contents=user_text,
-                    config=_GEN_CONFIG,
-                )
+                resp = _gemini_generate_content(client, model=model, user_text=user_text)
                 return (resp.text or "").strip()
             except Exception as e:
                 last_err = e
                 if not _is_retryable_gemini_exception(e):
                     raise
-                err_s = str(e)
+                err_s = _gemini_error_search_text(e)
+                http_code = _gemini_http_status(e)
                 if ki + 1 < len(keys):
+                    if http_code == 429:
+                        seen_429_on_prior_key = True
                     logger.info(
                         "Gemini transient/quota error on key %s/%s; trying next API key",
                         ki + 1,
                         len(keys),
                     )
                     break
+                # Last key: if we already saw 429 on an earlier key, another 429 is almost always the
+                # same quota pool — do not burn minutes in sleep/backoff loops.
+                if seen_429_on_prior_key and http_code == 429:
+                    logger.warning(
+                        "Gemini 429 on key %s/%s after a prior key also returned 429; "
+                        "failing fast (same-project quota).",
+                        ki + 1,
+                        len(keys),
+                    )
+                    raise
                 if _is_per_day_quota_exhausted(e):
                     logger.warning(
                         "Gemini daily quota exhausted (or per-day cap); not retrying backoff loop"
                     )
                     raise
-                if attempt >= 5:
+                max_attempts = 2 if http_code == 429 else 6
+                if attempt >= max_attempts - 1:
                     raise
                 delay = 15.0 * (attempt + 1)
                 m = re.search(r"retry in ([0-9.]+)s", err_s, re.I)

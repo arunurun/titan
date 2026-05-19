@@ -53,6 +53,42 @@ def test_generate_rotates_to_next_key_on_quota(mock_client_cls):
 
 @patch("brain.time.sleep")
 @patch("brain.genai.Client")
+def test_gemini_generate_content_throttles_second_call(mock_client_cls, mock_sleep):
+    monkeypatch_interval = 10.0
+    with patch("brain._min_gemini_call_interval_seconds", return_value=monkeypatch_interval):
+        import brain
+
+        brain._LAST_GEMINI_CALL_AT = 0.0
+        ok = MagicMock(text="ok")
+        instance = MagicMock()
+        instance.models.generate_content.return_value = ok
+        mock_client_cls.return_value = instance
+        c = mock_client_cls.return_value
+        brain._gemini_generate_content(c, model="gemini-2.5-flash-lite", user_text="a")
+        brain._gemini_generate_content(c, model="gemini-2.5-flash-lite", user_text="b")
+    assert mock_sleep.call_count >= 1
+    assert instance.models.generate_content.call_count == 2
+
+
+@patch("brain.time.sleep")
+@patch("brain.genai.Client")
+def test_generate_fails_fast_when_two_keys_both_429(mock_client_cls, mock_sleep):
+    """Second key hitting 429 after first key 429 is usually same quota; do not sleep-retry six times."""
+    err = ClientError(429, {"error": {"message": "quota", "status": "RESOURCE_EXHAUSTED"}}, None)
+    c1 = MagicMock()
+    c1.models.generate_content.side_effect = err
+    c2 = MagicMock()
+    c2.models.generate_content.side_effect = err
+    mock_client_cls.side_effect = [c1, c2]
+    with pytest.raises(RuntimeError, match=r"\[Gemini\]"):
+        generate_titan_narrative({"x": 1}, api_keys=["k1", "k2"])
+    assert c1.models.generate_content.call_count == 1
+    assert c2.models.generate_content.call_count == 1
+    mock_sleep.assert_not_called()
+
+
+@patch("brain.time.sleep")
+@patch("brain.genai.Client")
 def test_generate_fails_fast_on_daily_free_tier_quota(mock_client_cls, mock_sleep):
     """Daily free-tier caps are not fixed by sleeping; do not burn 6 backoff attempts."""
     err = Exception(
