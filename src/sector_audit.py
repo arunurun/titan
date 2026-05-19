@@ -109,6 +109,35 @@ def _equity_technical_label(score: Any) -> str:
     return "high defensive bias"
 
 
+def _horizon_score_label(score: Any) -> str:
+    """
+    Labels for next_day / next_week heuristic scores (baseline 50 in _predictive_scores).
+
+    Intentionally aligned with internal gates: >=55 reads as meaningfully constructive,
+    not merely >50 vs the mathematical midpoint.
+    """
+    try:
+        v = float(score)
+    except (TypeError, ValueError):
+        return "unknown"
+    if math.isnan(v):
+        return "unknown"
+    if v >= 70.0:
+        return "strong constructive"
+    if v >= 55.0:
+        return "moderate constructive"
+    if v >= 45.0:
+        return "neutral band"
+    if v >= 35.0:
+        return "soft caution"
+    return "defensive tilt"
+
+
+def _high_volume_down_day_stress(audit: dict[str, Any]) -> bool:
+    """Elevated turnover on a negative session (not order-flow absorption)."""
+    return bool(audit.get("high_volume_down_day_proxy") or audit.get("panic_absorption_proxy"))
+
+
 def _digest_verbose_symbol_lines_enabled() -> bool:
     """Long single-line payload for power users / debugging (default: short blocks)."""
     return (os.environ.get("TITAN_DIGEST_VERBOSE_SYMBOLS") or "").strip().lower() in (
@@ -127,8 +156,8 @@ def _sell_signal_plain_english(signal: str) -> str:
 
 def _digest_flags_simple(audit: dict[str, Any]) -> list[str]:
     out: list[str] = []
-    if audit.get("panic_absorption_proxy"):
-        out.append("heavy volume on a down day")
+    if _high_volume_down_day_stress(audit):
+        out.append("heavy turnover on a down day (volume stress; not delivery/absorption)")
     if audit.get("trap_exit_proxy"):
         out.append("trap-exit style move")
     if audit.get("cluster_guardrail_applied"):
@@ -191,7 +220,7 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     audit = result["audit"]
     z = audit.get("z_score")
     intent = audit.get("effective_intent_score", audit.get("intent_score"))
-    vpr = audit.get("volume_participation_ratio", audit.get("absorption_ratio"))
+    vpr_label_src = _volume_participation_for_digest_label(audit)
     ret1d = audit.get("return_1d_pct")
     atr_pct = audit.get("atr_14_pct")
     next_week = audit.get("next_week_score")
@@ -208,16 +237,17 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
 
     lines_out: list[str] = []
     lines_out.append(f"{symbol} ({exchange}) — {_sell_signal_plain_english(str(sell_signal))}")
+    nw_l = _horizon_score_label(next_week)
     lines_out.append(
         "Scores · "
-        f"next week {_fmt_metric(next_week)} · "
+        f"next week {_fmt_metric(next_week)} ({nw_l}) · "
         f"intent {_fmt_metric(intent)} ({_equity_technical_label(intent)}) · "
         f"1d {_fmt_metric(ret1d)}%"
     )
 
     tape_bits = [
         f"z {_fmt_metric(z)} ({_z_label(z)})",
-        f"volume {_volume_participation_label(vpr)}",
+        f"volume {_volume_participation_label(vpr_label_src)} (intent input)",
         f"ATR {_fmt_metric(atr_pct)}%",
     ]
     if not math.isnan(_safe_float(ema_dist)):
@@ -225,7 +255,8 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     lines_out.append("Tape · " + " · ".join(tape_bits))
 
     if not math.isnan(_safe_float(nf)):
-        lines_out.append(f"Very short horizon: tomorrow ~{_fmt_metric(nf)}")
+        nd_l = _horizon_score_label(nf)
+        lines_out.append(f"Very short horizon: tomorrow ~{_fmt_metric(nf)} ({nd_l})")
 
     if sell_reasons:
         sr = "; ".join(str(x) for x in sell_reasons[:3])
@@ -295,8 +326,8 @@ def _format_symbol_metrics_line_verbose(result: dict[str, Any]) -> str:
     exchange_used = str(audit.get("exchange_used", exchange))
     fallback_used = bool(audit.get("exchange_fallback_used", False))
     flags: list[str] = []
-    if audit.get("panic_absorption_proxy"):
-        flags.append("panic-volume-on-down-day")
+    if _high_volume_down_day_stress(audit):
+        flags.append("high-vol-down-day")
     if audit.get("trap_exit_proxy"):
         flags.append("up-move-trap")
     if audit.get("cluster_guardrail_applied"):
@@ -310,14 +341,16 @@ def _format_symbol_metrics_line_verbose(result: dict[str, Any]) -> str:
         f"{fundamental_status}:{_fmt_metric(fundamental_score)}"
         + (f" ({'; '.join(str(x) for x in fundamental_reasons[:2])})" if fundamental_reasons else "")
     )
+    zb = str(audit.get("z_score_blend") or "n/a")
     base = (
         f"{symbol} ({exchange}) | techScore {_fmt_metric(intent)} [{_equity_technical_label(intent)}] "
-        f"| z {_fmt_metric(z)} [{_z_label(z)}] | volPart {_fmt_metric(vpr, 3)} "
-        f"[{_volume_participation_label(vpr)}] | volPartScore {_fmt_metric(vpr_score, 2)}"
+        f"| z {_fmt_metric(z)} ({_z_label(z)}; {zb}) | volPart raw {_fmt_metric(vpr, 3)} "
+        f"| score-input {_fmt_metric(vpr_score, 2)} [{_volume_participation_label(vpr_score)}]"
         f"{vpr_cap_suffix} "
         f"| ret1d {_fmt_metric(ret1d)}% "
         f"| ema200_delta {_fmt_metric(ema_dist)}% | atr14 {_fmt_metric(atr_pct)}% "
-        f"| nextDay {_fmt_metric(next_day)} | nextWeek {_fmt_metric(next_week)} "
+        f"| nextDay {_fmt_metric(next_day)} ({_horizon_score_label(next_day)}) "
+        f"| nextWeek {_fmt_metric(next_week)} ({_horizon_score_label(next_week)}) "
         f"| sell {sell_signal} "
         f"| flags={flag_text} | rows {rows} "
         f"| exchange_used={exchange_used}{' (fallback)' if fallback_used else ''}"
@@ -342,6 +375,25 @@ def _safe_float(x: Any) -> float:
         return float(x)
     except (TypeError, ValueError):
         return float("nan")
+
+
+def _volume_participation_for_digest_label(audit: dict[str, Any]) -> Any:
+    """
+    Prefer the calibrated / capped participation series used for intent scoring so
+    digest tape wording matches the equity technical composite.
+    """
+    for key in (
+        "volume_participation_for_scoring",
+        "absorption_for_scoring",
+        "volume_participation_ratio",
+        "absorption_ratio",
+    ):
+        if key not in audit:
+            continue
+        v = _safe_float(audit.get(key))
+        if not math.isnan(v):
+            return audit.get(key)
+    return float("nan")
 
 
 def _percentile(values: list[float], pct: float) -> float:
@@ -545,10 +597,10 @@ def _predictive_scores(audit: dict[str, Any]) -> tuple[float, float, dict[str, A
         day_score -= 8.0
         week_score -= 5.0
         penalties.append("trap_exit_proxy")
-    if audit.get("panic_absorption_proxy"):
+    if _high_volume_down_day_stress(audit):
         day_score -= 6.0
         week_score -= 4.0
-        penalties.append("panic_volume_participation_proxy")
+        penalties.append("high_volume_down_day_stress")
     if audit.get("event_risk_soon"):
         day_score -= 4.0
         week_score -= 6.0
@@ -578,7 +630,7 @@ def _predictive_scores(audit: dict[str, Any]) -> tuple[float, float, dict[str, A
 def _bucket_name(audit: dict[str, Any]) -> str:
     eff = _safe_float(audit.get("effective_intent_score", audit.get("intent_score")))
     z = _safe_float(audit.get("z_score"))
-    ab = _safe_float(audit.get("volume_participation_ratio", audit.get("absorption_ratio")))
+    ab = _safe_float(_volume_participation_for_digest_label(audit))
     if audit.get("trap_exit_proxy"):
         return "trap-risk"
     if (not math.isnan(eff) and eff >= 65.0) and (not math.isnan(z) and z >= 2.0) and (
@@ -592,7 +644,7 @@ def _bucket_name(audit: dict[str, Any]) -> str:
 
 def _short_reason(audit: dict[str, Any]) -> str:
     z = _safe_float(audit.get("z_score"))
-    ab = _safe_float(audit.get("volume_participation_ratio", audit.get("absorption_ratio")))
+    ab = _safe_float(_volume_participation_for_digest_label(audit))
     bits: list[str] = []
     if not math.isnan(z):
         bits.append(f"z={z:.2f}")
@@ -902,6 +954,30 @@ def _prediction_quality_gate(
     }
 
 
+def _blend_equity_z_score(close_series: Any) -> tuple[float, float, float | None, str]:
+    """
+    Blend a 20-session close z-score with a slower window when enough history exists.
+
+    Short windows can flag "bearish deviation" during orderly pullbacks inside a
+    slower uptrend; mixing a ~60-session (or max available) z reduces that mismatch
+    versus EMA200-style context without dropping the responsive 20d read entirely.
+    """
+    import pandas as pd
+
+    from titan_engine import calculate_z_score
+
+    s = pd.to_numeric(close_series, errors="coerce").dropna()
+    n = len(s)
+    win_fast = min(20, max(2, n))
+    z_fast = calculate_z_score(s, window=win_fast)
+    if n < 45:
+        return z_fast, z_fast, None, "20d_only"
+    slow_win = min(60, max(21, n - 1))
+    z_slow = calculate_z_score(s, window=max(2, slow_win))
+    z = round(0.55 * z_fast + 0.45 * z_slow, 4)
+    return z, z_fast, z_slow, f"0.55*{win_fast}d+0.45*{slow_win}d"
+
+
 def build_equity_live_audit(
     cfg: TitanConfig,
     breeze: Any,
@@ -931,7 +1007,6 @@ def build_equity_live_audit(
         calculate_atr,
         calculate_ema,
         calculate_equity_technical_score,
-        calculate_z_score,
     )
 
     df = fetch_equity_data(
@@ -980,7 +1055,7 @@ def build_equity_live_audit(
         if (not math.isnan(close_last) and not math.isnan(close_prev) and close_prev != 0.0)
         else float("nan")
     )
-    z = calculate_z_score(series, window=20)
+    z, z_fast, z_slow, z_blend_note = _blend_equity_z_score(series)
     vpr_raw = volume_participation_ratio(df)
     vpr_calibrated_raw, vpr_for_scoring, vpr_calibration = _calibrate_volume_participation_v2(
         cfg,
@@ -1011,7 +1086,7 @@ def build_equity_live_audit(
     )
     pcr = float("nan")
     intent = calculate_equity_technical_score(z, vpr_for_scoring)
-    panic_absorption_proxy = (
+    high_volume_down_day_proxy = (
         not math.isnan(ret1d) and ret1d < 0.0 and not math.isnan(vpr_raw) and vpr_raw >= 1.5
     )
     trap_exit_proxy = (
@@ -1027,6 +1102,9 @@ def build_equity_live_audit(
         "exchange_used": exchange_used or inst.exchange,
         "exchange_fallback_used": fallback_used,
         "z_score": z,
+        "z_score_fast_20": z_fast,
+        "z_score_slow": float("nan") if z_slow is None else z_slow,
+        "z_score_blend": z_blend_note,
         "volume_participation_ratio": vpr_raw,
         "volume_participation_calibrated_ratio": vpr_calibrated_raw,
         "volume_participation_for_scoring": vpr_for_scoring,
@@ -1045,7 +1123,8 @@ def build_equity_live_audit(
         "structural_break_proxy": (
             not math.isnan(atr_break_multiple) and atr_break_multiple >= 1.5
         ),
-        "panic_absorption_proxy": panic_absorption_proxy,
+        "high_volume_down_day_proxy": high_volume_down_day_proxy,
+        "panic_absorption_proxy": high_volume_down_day_proxy,
         "trap_exit_proxy": trap_exit_proxy,
         **event_info,
         "history_lt_200_sessions": len(series_non_na) < 200,

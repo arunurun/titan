@@ -345,6 +345,9 @@ def generate_sector_digest_narrative(
             "ema_200_distance_pct": a.get("ema_200_distance_pct"),
             "atr_14_pct": a.get("atr_14_pct"),
             "panic_absorption_proxy": a.get("panic_absorption_proxy"),
+            "high_volume_down_day_proxy": a.get(
+                "high_volume_down_day_proxy", a.get("panic_absorption_proxy")
+            ),
             "trap_exit_proxy": a.get("trap_exit_proxy"),
             "event_risk_present": a.get("event_risk_present"),
             "event_risk_soon": a.get("event_risk_soon"),

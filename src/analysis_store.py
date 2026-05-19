@@ -85,8 +85,8 @@ def build_symbol_daily_feature(
     flags: list[str] = []
     if audit.get("trap_exit_proxy"):
         flags.append("up-move-trap")
-    if audit.get("panic_absorption_proxy"):
-        flags.append("panic-vol-down-day")
+    if audit.get("high_volume_down_day_proxy") or audit.get("panic_absorption_proxy"):
+        flags.append("high-vol-down-day")
     if audit.get("cluster_guardrail_applied"):
         flags.append("cluster-guardrail")
     if audit.get("macro_guardrail_applied"):
@@ -157,7 +157,11 @@ def build_sector_daily_rollup(
                 lambda a: _safe_float(a.get("volume_participation_ratio", a.get("absorption_ratio"))) > 1.0
             ),
             "trap_count": sum(1 for a in audits if a.get("trap_exit_proxy")),
-            "panic_absorption_count": sum(1 for a in audits if a.get("panic_absorption_proxy")),
+            "panic_absorption_count": sum(
+                1
+                for a in audits
+                if a.get("high_volume_down_day_proxy") or a.get("panic_absorption_proxy")
+            ),
             "macro_guardrail_count": sum(1 for a in audits if a.get("macro_guardrail_applied")),
             "cluster_guardrail_count": sum(1 for a in audits if a.get("cluster_guardrail_applied")),
             "event_guardrail_count": sum(1 for a in audits if a.get("event_guardrail_applied")),

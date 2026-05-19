@@ -1,5 +1,6 @@
 """Sector equity audit (cash metrics, mocked Breeze/Gemini)."""
 
+import math
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -40,6 +41,7 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
         "fundamental_score": float("nan"),
         "fundamental_reasons": [],
         "hypothesis_support": "technical_only",
+        "high_volume_down_day_proxy": False,
         "panic_absorption_proxy": False,
         "trap_exit_proxy": False,
         "cluster_guardrail_applied": True,
@@ -65,6 +67,8 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
     assert "WELCORP (NSE)" in text
     assert "TRIM" in text or "trim" in text.lower()
     assert "next week" in text.lower()
+    assert "neutral band" in text.lower()
+    assert "intent input" in text.lower()
     assert "Why this action" in text
     assert "\n" in text
 
@@ -96,7 +100,7 @@ def test_symbol_digest_verbose_restores_legacy_line(monkeypatch):
     }
     text = _format_symbol_metrics_line({"symbol": "WELCORP", "exchange": "NSE", "audit": audit})
     assert "techScore" in text
-    assert "volPartScore" in text
+    assert "score-input" in text
 
 
 def test_build_equity_live_audit_skips_narrative(monkeypatch):
@@ -140,6 +144,8 @@ def test_build_equity_live_audit_success(monkeypatch):
     assert "ema_200_distance_pct" in audit
     assert "atr_14_pct" in audit
     assert "effective_intent_score" in audit
+    assert audit.get("z_score_blend") == "20d_only"
+    assert "high_volume_down_day_proxy" in audit
 
 
 def test_build_equity_live_audit_records_exchange_fallback_metadata(monkeypatch):
@@ -162,6 +168,26 @@ def test_build_equity_live_audit_records_exchange_fallback_metadata(monkeypatch)
     assert audit["exchange"] == "NSE"
     assert audit["exchange_used"] == "BSE"
     assert audit["exchange_fallback_used"] is True
+
+
+def test_blend_equity_z_score_short_series_is_fast_only():
+    from sector_audit import _blend_equity_z_score
+
+    s = pd.Series([100.0 + i * 0.05 for i in range(30)])
+    z, z_fast, z_slow, note = _blend_equity_z_score(s)
+    assert note == "20d_only"
+    assert z_slow is None
+    assert z == z_fast
+
+
+def test_blend_equity_z_score_blends_when_enough_history():
+    from sector_audit import _blend_equity_z_score
+
+    s = pd.Series([100.0 + i * 0.02 + 0.1 * math.sin(i / 5.0) for i in range(50)])
+    z, z_fast, z_slow, note = _blend_equity_z_score(s)
+    assert z_slow is not None
+    assert "0.55*" in note
+    assert z == round(0.55 * z_fast + 0.45 * z_slow, 4)
 
 
 def test_build_equity_live_audit_event_flags(monkeypatch):

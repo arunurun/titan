@@ -28,6 +28,7 @@ def test_build_symbol_daily_feature_basic():
         "atr_14_pct": 3.2,
         "rows": 38,
         "trap_exit_proxy": False,
+        "high_volume_down_day_proxy": True,
         "panic_absorption_proxy": True,
     }
     row = build_symbol_daily_feature(
@@ -39,7 +40,7 @@ def test_build_symbol_daily_feature_basic():
     )
     assert row["symbol"] == "HAL"
     assert row["rows_count"] == 38
-    assert "panic-vol-down-day" in row["flags"]
+    assert "high-vol-down-day" in row["flags"]
 
 
 def test_build_sector_daily_rollup_shapes_metrics():

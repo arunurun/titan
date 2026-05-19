@@ -151,8 +151,8 @@ def derive_action_signal(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
 
     if audit.get("trap_exit_proxy"):
         add(2.0, "trap-exit proxy")
-    if audit.get("panic_absorption_proxy"):
-        add(1.0, "panic volume-participation proxy")
+    if audit.get("high_volume_down_day_proxy") or audit.get("panic_absorption_proxy"):
+        add(1.0, "high-volume down-day stress")
     if audit.get("cluster_guardrail_applied"):
         add(1.0, "cluster guardrail")
     if audit.get("macro_guardrail_applied"):
