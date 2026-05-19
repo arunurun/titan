@@ -849,7 +849,7 @@ function initInsightsPage() {
               "No digest text for this run and sector (or row missing).") +
               (data.workflow_mode === "portfolio" || data.workflow_mode === "live"
                 ? ""
-                : "\n\nTip: new runs need sql/alter_llm_digest_memory_add_github_run_id.sql applied in Supabase, and workflow env GITHUB_RUN_ID (already in run_titan_now.yml)."),
+                : "\n\nTip: digests are only saved when GitHub Actions runs with TITAN_ENABLE_ANALYSIS_STORE=1 (and Supabase tables exist). Older runs never wrote rows—dispatch a new Run Titan Now after the workflow fix is on the branch you use."),
           );
           return;
         }

@@ -91,7 +91,8 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           BREEZE_API_KEY: ${{ secrets.BREEZE_API_KEY }}
           BREEZE_SECRET: ${{ secrets.BREEZE_SECRET }}
-          TITAN_ENABLE_ANALYSIS_STORE: ${{ secrets.TITAN_ENABLE_ANALYSIS_STORE }}
+          # Must be "1" for sector/custom digests to persist into public.llm_digest_memory (mobile insights UI).
+          TITAN_ENABLE_ANALYSIS_STORE: "1"
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
           GEMINI_MIN_CALL_INTERVAL_SECONDS: "45"

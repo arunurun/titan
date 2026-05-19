@@ -475,15 +475,28 @@ async function fetchInsightByGithubRun(env, ghRunId, sectorParam) {
   const queryPath =
     `?github_run_id=eq.${gid}&sector=eq.${sev}` +
     "&select=run_id,sector,output_text,full_digest,recorded_at,github_run_id&order=recorded_at.desc&limit=1";
-  const rows = await supabaseSelectDigestRows(base, key, queryPath);
+  let rows = await supabaseSelectDigestRows(base, key, queryPath);
   if (!Array.isArray(rows) || !rows.length) {
+    const latest = await fetchLatestInsight(env, sector);
+    if (latest.insight && String(latest.insight.text || "").trim()) {
+      return {
+        ok: true,
+        insight: latest.insight,
+        ...meta,
+        sector,
+        note:
+          "No row linked to this GitHub run_id in llm_digest_memory. Showing the latest digest for this sector instead. " +
+          "Run Titan Now must use TITAN_ENABLE_ANALYSIS_STORE=1 (see run_titan_now.yml) so new jobs write rows with github_run_id.",
+      };
+    }
     return {
       ok: true,
       insight: null,
       ...meta,
       sector,
       note:
-        "No digest row for this GitHub run and sector. If this is an older run, it may pre-date github_run_id linking—run sql/alter_llm_digest_memory_add_github_run_id.sql and a fresh Titan job.",
+        "llm_digest_memory has no rows for this GitHub run and sector (table empty or persist disabled). " +
+        "Set GitHub Actions env TITAN_ENABLE_ANALYSIS_STORE=1, confirm sql/create_analysis_rollups.sql + alter scripts ran, then run a new sector/custom digest.",
     };
   }
   const row = rows[0];
