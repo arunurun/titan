@@ -134,3 +134,16 @@ def test_success_html_sector_per_symbol_metrics_use_cards():
     assert html.count("border-radius:10px;padding:12px 14px") == 2
     assert "MTARTECH (NSE)" in html and "IDEAFORGE (NSE)" in html
     assert "Scores ·" in html
+    assert "#ea4335" in html
+    assert "#fbbc05" in html or "#fef7e0" in html
+
+
+def test_success_html_sector_buy_card_is_green():
+    body = (
+        "--- Per-symbol metrics ---\n"
+        "SAKSOFT (NSE) — BUY — constructive setup (next-week & intent supportive; add exposure per your mandate)\n"
+        "Scores · next week 72.0 · intent 68.0 (high conviction long bias) · 1d +3.2%\n"
+    )
+    html = _render_success_html(body, subject="Titan sector")
+    assert "#34a853" in html
+    assert "SAKSOFT" in html

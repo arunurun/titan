@@ -44,6 +44,23 @@ _COMMON_NON_SYMBOLS = {
     "ISIN",
     "PORTFOLIO",
 }
+# ICICI contract / PDF codes → (NSE or BSE listed ticker, preferred exchange).
+# Sourced from StockScriptNew.csv (SC → TK/NS). Prevents fuzzy false positives (e.g. GOLINT→GOBLIN).
+_PORTFOLIO_ICICI_ALIASES: dict[str, tuple[str, str]] = {
+    "JYORES": ("JYOTIRES", "BSE"),  # BSE-only listing
+    "NAGCON": ("NCC", "NSE"),
+    "CPSETF": ("CPSEETF", "NSE"),
+    "DSPGOL": ("GOLDADD", "NSE"),
+    "COMENG": ("JWL", "NSE"),
+    "HINAER": ("HAL", "NSE"),
+    "PARDEF": ("PARAS", "NSE"),
+    "DABIND": ("DABUR", "NSE"),
+    "INDREN": ("IREDA", "NSE"),
+    "GOLINT": ("GOLDIAM", "NSE"),
+    "KALJEW": ("KALYANKJIL", "NSE"),
+    "UTSCZG": ("UTSSAV", "NSE"),
+}
+
 _SYMBOL_ALIAS_HINTS = {
     # Common PDF truncations/contract-like tails mapped to equities.
     "ASTMIC": "ASTRAMICRO",
@@ -58,10 +75,11 @@ _SYMBOL_ALIAS_HINTS = {
     "BHAEL": "BEL",
     # Statement contract codes (vary by broker naming).
     "HBLPOW": "HBLENGINE",
-    "DSPGOL": "GOLDETFADD",
+    "DSPGOL": "GOLDADD",
     "SBIGOL": "SETFGOLD",
     "SBISIL": "SBISILVER",
     "SOLIN": "SOLARINDS",
+    **{k: v[0] for k, v in _PORTFOLIO_ICICI_ALIASES.items()},
 }
 
 
@@ -206,7 +224,20 @@ def _resolve_symbol(
     if key_trim in same_map:
         return same_map[key_trim], ex, "numeric_suffix_stripped", 0.95
 
-    # 3) Alias hints from known broker/PDF patterns.
+    # 3) ICICI PDF / contract codes → listed ticker (+ exchange when not NSE).
+    icici = _PORTFOLIO_ICICI_ALIASES.get(key_trim) or _PORTFOLIO_ICICI_ALIASES.get(key_raw)
+    if icici:
+        listed, ex_pref = icici
+        listed_key = _clean_symbol_key(listed)
+        pref_map = by_exchange.get(ex_pref, {})
+        if listed_key in pref_map:
+            return pref_map[listed_key], ex_pref, "icici_pdf_alias", 0.94
+        if listed_key in same_map:
+            return same_map[listed_key], ex, "icici_pdf_alias", 0.93
+        if listed_key in other_map:
+            return other_map[listed_key], other_ex, "icici_pdf_alias_cross_exchange", 0.9
+
+    # 4) Alias hints from known broker/PDF patterns.
     hint = _SYMBOL_ALIAS_HINTS.get(key_trim) or _SYMBOL_ALIAS_HINTS.get(key_raw)
     if hint:
         hint_key = _clean_symbol_key(hint)
@@ -215,7 +246,7 @@ def _resolve_symbol(
         if hint_key in other_map:
             return other_map[hint_key], other_ex, "alias_hint_cross_exchange", 0.9
 
-    # 4) Prefix match in same exchange (avoid SOLIN/PARDEF collapsing to a tiny key like "S").
+    # 5) Prefix match in same exchange (avoid SOLIN/PARDEF collapsing to a tiny key like "S").
     candidates = [
         k
         for k in same_map.keys()
@@ -235,18 +266,23 @@ def _resolve_symbol(
         best = min(candidates, key=lambda x: abs(len(x) - len(key_trim)))
         return same_map[best], ex, "prefix_match", 0.86
 
-    # 5) Fuzzy match in same exchange.
-    close = difflib.get_close_matches(key_trim, list(same_map.keys()), n=1, cutoff=0.72)
+    # 6) Fuzzy match in same exchange (not for known ICICI codes — avoids GOLINT→GOBLIN, etc.).
+    if key_trim not in _PORTFOLIO_ICICI_ALIASES and key_raw not in _PORTFOLIO_ICICI_ALIASES:
+        close = difflib.get_close_matches(key_trim, list(same_map.keys()), n=1, cutoff=0.72)
+    else:
+        close = []
     if close:
         k = close[0]
         return same_map[k], ex, "fuzzy_match", 0.8
 
-    # 6) Cross-exchange exact/trim/fuzzy fallback.
+    # 7) Cross-exchange exact/trim/fuzzy fallback.
     if key_raw in other_map:
         return other_map[key_raw], other_ex, "cross_exchange_exact", 0.78
     if key_trim in other_map:
         return other_map[key_trim], other_ex, "cross_exchange_numeric_trim", 0.76
-    close2 = difflib.get_close_matches(key_trim, list(other_map.keys()), n=1, cutoff=0.75)
+    close2: list[str] = []
+    if key_trim not in _PORTFOLIO_ICICI_ALIASES and key_raw not in _PORTFOLIO_ICICI_ALIASES:
+        close2 = difflib.get_close_matches(key_trim, list(other_map.keys()), n=1, cutoff=0.75)
     if close2:
         k = close2[0]
         return other_map[k], other_ex, "cross_exchange_fuzzy", 0.72
@@ -735,7 +771,7 @@ def analyze_portfolio_holdings(
             ):
                 action_tag = "exit_risk"
                 action_reasons.append("drawdown <= -8%")
-            elif (
+            elif sell_signal == "buy" or (
                 not basis_unreliable
                 and sell_signal == "hold"
                 and isinstance(next_week, (int, float))
@@ -745,7 +781,11 @@ def analyze_portfolio_holdings(
                 and (pnl_pct_f is None or float(pnl_pct_f) <= 20.0)
             ):
                 action_tag = "buy_more"
-                action_reasons.append("trend persistence + intent support")
+                action_reasons.append(
+                    "sector buy signal"
+                    if sell_signal == "buy"
+                    else "trend persistence + intent support"
+                )
             else:
                 action_tag = "hold"
                 action_reasons.append("no strong sell risk")
@@ -853,7 +893,7 @@ def analyze_portfolio_holdings(
 
 
 _ACTION_DIGEST_LABEL = {
-    "buy_more": "ADD — buy more",
+    "buy_more": "BUY — add exposure (constructive setup)",
     "hold": "HOLD — risk <4 (no strong defensive trigger)",
     "trim": "TRIM — risk 4–6: lighten / take profits (below hard-exit bar)",
     "exit_risk": "EXIT RISK — risk ≥7: hard bar — cut sharply or exit",
@@ -924,7 +964,7 @@ def _digest_table_action_label(tag: str) -> str:
         "exit_risk": "EXIT RISK",
         "trim": "TRIM",
         "hold": "HOLD",
-        "buy_more": "ADD",
+        "buy_more": "BUY",
     }.get(tag, tag.upper())
 
 

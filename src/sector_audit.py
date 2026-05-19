@@ -120,13 +120,9 @@ def _digest_verbose_symbol_lines_enabled() -> bool:
 
 
 def _sell_signal_plain_english(signal: str) -> str:
-    s = str(signal or "").strip().lower().replace("_", "-")
-    return {
-        # Risk score bands from _derive_sell_signal: trim 4–6.99, exit-risk ≥7
-        "trim": "TRIM — risk score 4–6: lighten / take profits (below hard-exit bar)",
-        "hold": "HOLD — risk score <4: no strong defensive trigger",
-        "exit-risk": "EXIT RISK — risk score ≥7: hard exit bar — cut exposure sharply or exit",
-    }.get(s, signal or "Review")
+    from action_signals import action_signal_plain_english
+
+    return action_signal_plain_english(signal)
 
 
 def _digest_flags_simple(audit: dict[str, Any]) -> list[str]:
@@ -660,81 +656,9 @@ def _prediction_reason_text(audit: dict[str, Any]) -> str:
 
 
 def _derive_sell_signal(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
-    risk = 0.0
-    reasons: list[str] = []
+    from action_signals import derive_action_signal
 
-    def add(points: float, reason: str) -> None:
-        nonlocal risk
-        risk += points
-        reasons.append(reason)
-
-    next_week = _safe_float(audit.get("next_week_score"))
-    eff = _safe_float(audit.get("effective_intent_score", audit.get("intent_score")))
-    z = _safe_float(audit.get("z_score"))
-    ret1d = _safe_float(audit.get("return_1d_pct"))
-    ema_dist = _safe_float(audit.get("ema_200_distance_pct"))
-    atr_pct = _safe_float(audit.get("atr_14_pct"))
-
-    if not math.isnan(next_week):
-        if next_week < 45.0:
-            add(3.0, f"nextWeek weak {_fmt_metric(next_week)}")
-        elif next_week < 55.0:
-            add(1.0, f"nextWeek soft {_fmt_metric(next_week)}")
-    if not math.isnan(eff):
-        if eff < 45.0:
-            add(2.0, f"intent defensive {_fmt_metric(eff)}")
-        elif eff < 52.0:
-            add(1.0, f"intent cooling {_fmt_metric(eff)}")
-    if not math.isnan(z):
-        if z <= -2.0:
-            add(2.0, f"z bearish {_fmt_metric(z)}")
-        elif z <= -1.0:
-            add(1.0, f"z below mean {_fmt_metric(z)}")
-    if not math.isnan(ret1d):
-        if ret1d <= -2.0:
-            add(2.0, f"1d return weak {_fmt_metric(ret1d)}%")
-        elif ret1d <= -1.0:
-            add(1.0, f"1d return soft {_fmt_metric(ret1d)}%")
-    if not math.isnan(ema_dist):
-        if ema_dist <= -6.0:
-            add(2.0, f"below ema200 {_fmt_metric(ema_dist)}%")
-        elif ema_dist <= -2.0:
-            add(1.0, f"ema200 drift {_fmt_metric(ema_dist)}%")
-    if not math.isnan(atr_pct):
-        if atr_pct >= 6.0:
-            add(2.0, f"atr elevated {_fmt_metric(atr_pct)}%")
-        elif atr_pct >= 4.0:
-            add(1.0, f"atr high {_fmt_metric(atr_pct)}%")
-
-    if audit.get("trap_exit_proxy"):
-        add(2.0, "trap-exit proxy")
-    if audit.get("panic_absorption_proxy"):
-        add(1.0, "panic volume-participation proxy")
-    if audit.get("cluster_guardrail_applied"):
-        add(1.0, "cluster guardrail")
-    if audit.get("macro_guardrail_applied"):
-        add(1.0, "macro guardrail")
-    if audit.get("event_guardrail_applied") or audit.get("event_risk_soon"):
-        add(1.0, "event risk")
-
-    f_status = str(audit.get("fundamental_status") or "unavailable")
-    if f_status == "weak":
-        add(2.0, "fundamentals weak")
-    elif f_status == "balanced":
-        add(1.0, "fundamentals balanced")
-    elif f_status == "strong":
-        risk = max(0.0, risk - 1.0)
-
-    risk = round(risk, 2)
-    if risk >= 7.0:
-        signal = "exit-risk"
-    elif risk >= 4.0:
-        signal = "trim"
-    else:
-        signal = "hold"
-    if not reasons:
-        reasons = ["technical+risk profile stable"]
-    return signal, risk, reasons[:4]
+    return derive_action_signal(audit)
 
 
 def _refresh_symbol_scoring_outputs(audit: dict[str, Any]) -> None:
@@ -743,8 +667,9 @@ def _refresh_symbol_scoring_outputs(audit: dict[str, Any]) -> None:
     audit["next_week_score"] = next_week_score
     audit["prediction_breakdown"] = prediction_breakdown
     audit["hypothesis_support"] = _hypothesis_support_tag(audit)
-    sell_signal, sell_risk_score, sell_reasons = _derive_sell_signal(audit)
-    audit["sell_signal"] = sell_signal
+    action_signal, sell_risk_score, sell_reasons = _derive_sell_signal(audit)
+    audit["sell_signal"] = action_signal
+    audit["action_signal"] = action_signal
     audit["sell_signal_risk_score"] = sell_risk_score
     audit["sell_signal_reasons"] = sell_reasons
 
@@ -1519,8 +1444,22 @@ def run_sector_live(
                     if quality_gate["passed"]
                     else "Gate reasons: " + "; ".join(quality_gate["reasons"])
                 ),
-            "",
-            "--- Per-symbol metrics ---",
+                "",
+                "--- Action summary ---",
+            ]
+        )
+        action_counts = {"buy": 0, "hold": 0, "trim": 0, "exit-risk": 0}
+        for r in ok_results:
+            sig = str((r.get("audit") or {}).get("sell_signal") or "hold").lower()
+            if sig not in action_counts:
+                sig = "hold"
+            action_counts[sig] = action_counts.get(sig, 0) + 1
+        lines.extend(
+            [
+                f"BUY: {action_counts['buy']} | HOLD: {action_counts['hold']} | "
+                f"TRIM: {action_counts['trim']} | EXIT RISK: {action_counts['exit-risk']}",
+                "",
+                "--- Per-symbol metrics ---",
             ]
         )
         # Rank by next-week score first for early winner discovery.

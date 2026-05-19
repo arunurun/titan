@@ -571,6 +571,37 @@ async function fetchInsightTextForSector(sectorId) {
   return insight;
 }
 
+function renderInsightDigestHtml(digestText) {
+  if (window.TitanDigestRender) {
+    window.TitanDigestRender.renderInsightDigestHtml(digestText);
+    return;
+  }
+  const host = el("insightDigestHtml");
+  if (host) host.textContent = String(digestText || "");
+}
+
+function escapeHtml(s) {
+  if (window.TitanDigestRender) return window.TitanDigestRender.escapeHtml(s);
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function renderInsightMeta(runMeta, insight, sectorLabel) {
+  if (window.TitanDigestRender) {
+    window.TitanDigestRender.renderInsightMeta(runMeta, insight, sectorLabel);
+  }
+}
+
+function clearInsightDigestView() {
+  const htmlHost = el("insightDigestHtml");
+  if (htmlHost) htmlHost.innerHTML = "";
+  const metaHost = el("insightDigestMeta");
+  if (metaHost) metaHost.innerHTML = "";
+}
+
 function applyInsightToTextarea(textareaEl, insight, sectorLabel, runMeta = {}) {
   if (!textareaEl || !insight) return;
   let head = "";
@@ -583,7 +614,10 @@ function applyInsightToTextarea(textareaEl, insight, sectorLabel, runMeta = {}) 
   if (head) head += "\n";
   const when = insight.recorded_at ? `Recorded: ${insight.recorded_at}\n` : "";
   const lab = sectorLabel || insight.sector || "";
-  textareaEl.value = `${head}${when}Sector: ${lab}\nDigest run_id: ${insight.run_id || "n/a"}\n\n${insight.text}`;
+  const body = `${head}${when}Sector: ${lab}\nDigest run_id: ${insight.run_id || "n/a"}\n\n${insight.text || ""}`;
+  textareaEl.value = body;
+  renderInsightMeta(runMeta, insight, sectorLabel);
+  renderInsightDigestHtml(insight.text || "");
 }
 
 async function fetchInsightForGithubRun(ghRunId, sectorQuery) {
@@ -850,6 +884,7 @@ function initInsightsPage() {
         };
         if (!ins || !String(ins.text || "").trim()) {
           if (digestTa) digestTa.value = "";
+          clearInsightDigestView();
           setStatus(
             (data.note ||
               "No digest text for this run and sector (or row missing).") +
@@ -866,6 +901,7 @@ function initInsightsPage() {
         );
       } catch (e) {
         if (digestTa) digestTa.value = "";
+        clearInsightDigestView();
         setStatus(`Load digest failed:\n${e.message}`);
       }
     });

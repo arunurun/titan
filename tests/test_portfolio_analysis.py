@@ -97,6 +97,33 @@ def test_resolve_symbol_bhaele_maps_to_bel_not_bhel():
     assert reason == "alias_hint"
 
 
+def test_resolve_icici_pdf_contract_codes_to_nse_tickers():
+    universe = {
+        "NSE": {
+            "NCC": "NCC",
+            "CPSEETF": "CPSEETF",
+            "GOLDADD": "GOLDADD",
+            "JWL": "JWL",
+            "HAL": "HAL",
+            "PARAS": "PARAS",
+            "DABUR": "DABUR",
+            "IREDA": "IREDA",
+            "GOLDIAM": "GOLDIAM",
+            "KALYANKJIL": "KALYANKJIL",
+            "UTSSAV": "UTSSAV",
+        },
+        "BSE": {"JYOTIRES": "JYOTIRES"},
+    }
+    sym, ex, reason, _ = _resolve_symbol("NAGCON", "NSE", by_exchange=universe)
+    assert sym == "NCC" and reason == "icici_pdf_alias"
+    sym2, ex2, _, _ = _resolve_symbol("GOLINT", "NSE", by_exchange=universe)
+    assert sym2 == "GOLDIAM" and ex2 == "NSE"
+    sym3, ex3, _, _ = _resolve_symbol("JYORES", "NSE", by_exchange=universe)
+    assert sym3 == "JYOTIRES" and ex3 == "BSE"
+    sym4, _, _, _ = _resolve_symbol("DSPGOL", "NSE", by_exchange=universe)
+    assert sym4 == "GOLDADD"
+
+
 def test_resolve_symbol_numeric_suffix_and_alias():
     universe = {
         "NSE": {

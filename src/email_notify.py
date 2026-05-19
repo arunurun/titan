@@ -22,6 +22,23 @@ _SYMBOL_DIGEST_HEADLINE_RE = re.compile(
 )
 
 
+def _html_action_colored_cell(cell: str) -> str:
+    """Color table cells that contain BUY / HOLD / TRIM / EXIT action labels."""
+    from action_signals import action_signal_from_digest_headline, action_style
+
+    sig = action_signal_from_digest_headline(cell)
+    if not sig and cell.strip().upper() in ("BUY", "HOLD", "TRIM"):
+        sig = cell.strip().lower()
+    base = "padding:8px;border-bottom:1px solid #eee;font-size:12px;vertical-align:top;"
+    if not sig:
+        return f'<td style="{base}">{escape(cell)}</td>'
+    st = action_style(sig)
+    return (
+        f'<td style="{base}background:{st["bg"]};color:{st["fg"]};font-weight:700;">'
+        f"{escape(cell)}</td>"
+    )
+
+
 def _split_sector_per_symbol_digest_blocks(lines: list[str]) -> tuple[list[str], list[list[str]]]:
     """Group multi-line sector digest metrics under each SYMBOL (EXCH) headline."""
     preamble: list[str] = []
@@ -55,17 +72,36 @@ def _html_per_symbol_sector_cards(other_lines: list[str]) -> str:
         parts.append(
             f'<p style="margin:0 0 10px;color:#5f6368;font-size:12px;line-height:1.45;">{escape(line)}</p>',
         )
-    card_style = (
-        "border:1px solid #dadce0;border-radius:10px;padding:12px 14px;margin:0 0 14px;"
-        "background:#fafafa;box-shadow:0 1px 2px rgba(60,64,67,0.08);"
-    )
+    from action_signals import action_signal_from_digest_headline, action_style
+
     for block in sym_blocks:
-        head = escape(block[0])
+        head_raw = block[0]
+        parsed = action_signal_from_digest_headline(head_raw)
+        if parsed:
+            st = action_style(parsed)
+            card_style = (
+                f"border:2px solid {st['border']};border-radius:10px;padding:12px 14px;margin:0 0 14px;"
+                f"background:{st['bg']};box-shadow:0 1px 2px rgba(60,64,67,0.08);"
+            )
+            badge = parsed.upper().replace("-", " ")
+            head = (
+                f'<span style="display:inline-block;padding:2px 8px;border-radius:6px;'
+                f"background:{st['badge']};color:#fff;font-size:11px;font-weight:700;margin-right:8px;"
+                f'">{escape(badge)}</span>'
+                f'<span style="font-size:14px;font-weight:700;color:{st["fg"]};line-height:1.35;">'
+                f"{escape(head_raw)}</span>"
+            )
+        else:
+            card_style = (
+                "border:1px solid #dadce0;border-radius:10px;padding:12px 14px;margin:0 0 14px;"
+                "background:#fafafa;box-shadow:0 1px 2px rgba(60,64,67,0.08);"
+            )
+            head = (
+                '<span style="font-size:14px;font-weight:700;color:#202124;line-height:1.35;">'
+                f"{escape(head_raw)}</span>"
+            )
         body = block[1:]
-        inner = (
-            f'<div style="{card_style}">'
-            f'<div style="font-size:14px;font-weight:700;color:#202124;line-height:1.35;margin:0;">{head}</div>'
-        )
+        inner = f'<div style="{card_style}"><div style="margin:0;">{head}</div>'
         if body:
             rows = "".join(
                 f'<div style="margin:6px 0 0;font-size:12px;line-height:1.55;color:#3c4043;">{escape(b)}</div>'
@@ -198,10 +234,7 @@ def _render_success_html(post_text: str, *, subject: str) -> str:
                     )
                     tbody = "".join(
                         "<tr>"
-                        + "".join(
-                            f'<td style="padding:8px;border-bottom:1px solid #eee;font-size:12px;vertical-align:top;">{escape(cell)}</td>'
-                            for cell in row
-                        )
+                        + "".join(_html_action_colored_cell(cell) for cell in row)
                         + "</tr>"
                         for row in pipe_rows[1:]
                     )

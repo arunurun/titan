@@ -528,6 +528,20 @@ def test_sell_signal_framework_states():
             "fundamental_status": "weak",
         }
     )
+    buy_signal, buy_risk, buy_reasons = _derive_sell_signal(
+        {
+            "next_week_score": 72.0,
+            "effective_intent_score": 68.0,
+            "z_score": 1.8,
+            "return_1d_pct": 2.0,
+            "ema_200_distance_pct": 4.2,
+            "atr_14_pct": 2.3,
+            "fundamental_status": "strong",
+        }
+    )
+    assert buy_signal == "buy"
+    assert buy_risk < 4.0
+    assert buy_reasons
     assert hold_signal == "hold"
     assert hold_risk < 4.0
     assert trim_signal == "trim"

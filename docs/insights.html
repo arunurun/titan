@@ -89,14 +89,154 @@
       font-size: 0.88rem;
     }
     textarea.digest {
-      min-height: 50vh;
-      max-height: 70vh;
+      min-height: 12rem;
+      max-height: 28vh;
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 0.8rem;
+      font-size: 0.78rem;
       line-height: 1.35;
+    }
+    details.raw-digest { margin-top: 10px; }
+    details.raw-digest summary {
+      cursor: pointer;
+      font-size: 0.85rem;
+      color: var(--muted);
+      user-select: none;
     }
     .small { font-size: 0.82rem; color: var(--muted); }
     .hidden { display: none !important; }
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 0 0 10px;
+      font-size: 0.82rem;
+    }
+    .legend span {
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-weight: 600;
+    }
+    .legend .lg-buy { background: #e6f4ea; color: #137333; }
+    .legend .lg-hold { background: #fef7e0; color: #b06000; }
+    .legend .lg-sell { background: #fce8e6; color: #c5221f; }
+    #insightDigestMeta { margin-bottom: 10px; }
+    .digest-meta-card {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 12px;
+      background: #f8f9fa;
+      font-size: 0.88rem;
+    }
+    .meta-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 4px 0;
+      border-bottom: 1px solid #eceff1;
+    }
+    .meta-row:last-child { border-bottom: none; }
+    .meta-k { color: var(--muted); font-weight: 600; }
+    .meta-v code { font-size: 0.82rem; }
+    .digest-html {
+      min-height: 32vh;
+      max-height: 62vh;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px;
+      background: #fafafa;
+      font-size: 0.88rem;
+      line-height: 1.45;
+    }
+    .digest-lead {
+      margin: 0 0 14px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: #fff;
+      border: 1px solid var(--border);
+    }
+    .digest-lead p { margin: 4px 0; }
+    .digest-section-title {
+      margin: 16px 0 8px;
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: var(--text);
+      border-bottom: 2px solid var(--g-blue);
+      padding-bottom: 4px;
+    }
+    .digest-kv .kv-line {
+      padding: 4px 0;
+      border-bottom: 1px dashed #e8eaed;
+      font-size: 0.86rem;
+    }
+    .digest-kv .kv-line:last-child { border-bottom: none; }
+    .digest-prose p { margin: 6px 0; }
+    .digest-intro p { color: var(--muted); }
+    .snapshot-line {
+      padding: 6px 10px;
+      border-radius: 6px;
+      border-left: 4px solid var(--border);
+      background: #fff;
+    }
+    .digest-card {
+      border-radius: 10px;
+      padding: 10px 12px;
+      margin: 0 0 10px;
+      border: 2px solid var(--border);
+      background: #fff;
+    }
+    .digest-card.action-buy {
+      border-color: var(--g-green);
+      background: #e6f4ea;
+    }
+    .digest-card.action-hold {
+      border-color: var(--g-yellow);
+      background: #fef7e0;
+    }
+    .digest-card.action-sell,
+    .digest-card.action-trim,
+    .digest-card.action-exit {
+      border-color: var(--g-red);
+      background: #fce8e6;
+    }
+    .digest-card .head {
+      font-weight: 700;
+      margin: 0 0 8px;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+    }
+    .digest-card .head .sym { color: var(--text); }
+    .digest-card .head .rest {
+      font-weight: 500;
+      font-size: 0.82rem;
+      color: var(--muted);
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 10px;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+    .badge-buy { background: var(--g-green); color: #fff; }
+    .badge-hold { background: var(--g-yellow); color: #3c2f00; }
+    .badge-sell { background: var(--g-red); color: #fff; }
+    .badge-neutral { background: #5f6368; color: #fff; }
+    .digest-card .line {
+      margin: 4px 0 0;
+      font-size: 0.84rem;
+      color: #3c4043;
+    }
+    .digest-empty { margin: 0; }
+    .digest-fallback {
+      margin: 0;
+      white-space: pre-wrap;
+      font-size: 0.82rem;
+    }
   </style>
 </head>
 <body data-page="insights">
@@ -137,8 +277,18 @@
 
     <div class="card">
       <h3>Digest</h3>
-      <label for="insightDigestBody">Saved digest text</label>
-      <textarea id="insightDigestBody" class="digest" rows="18" readonly placeholder="Choose a run, then tap “Load digest for selected run”…"></textarea>
+      <div class="legend" aria-hidden="true">
+        <span class="lg-buy">BUY</span>
+        <span class="lg-hold">HOLD</span>
+        <span class="lg-sell">TRIM · SELL · EXIT</span>
+      </div>
+      <div id="insightDigestMeta"></div>
+      <div id="insightDigestHtml" class="digest-html" aria-live="polite"></div>
+      <details class="raw-digest">
+        <summary>Show raw digest text</summary>
+        <label for="insightDigestBody" class="small">Copy / search in plain text</label>
+      <textarea id="insightDigestBody" class="digest" rows="10" readonly placeholder="Choose a run, then tap Load digest for selected run…"></textarea>
+      </details>
     </div>
 
     <div class="card">
@@ -147,6 +297,7 @@
     </div>
   </div>
 
-  <script defer src="./app.js?v=20260518-24"></script>
+  <script defer src="./digest-render.js?v=20260519-01"></script>
+  <script defer src="./app.js?v=20260519-01"></script>
 </body>
 </html>
