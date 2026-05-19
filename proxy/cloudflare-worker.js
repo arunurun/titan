@@ -285,6 +285,30 @@ async function gh(env, path, method = "GET", body = null) {
   return JSON.parse(txt);
 }
 
+function normalizeWorkflowInputs(raw) {
+  if (!raw || typeof raw !== "object") return {};
+  const out = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (v == null) continue;
+    const s = typeof v === "string" ? v.trim() : String(v).trim();
+    if (s) out[k] = s;
+  }
+  return out;
+}
+
+function uniqueSectorsFromDigestRows(rows) {
+  const seen = new Set();
+  const out = [];
+  if (!Array.isArray(rows)) return out;
+  for (const row of rows) {
+    const s = toStringInput(row.sector).toLowerCase();
+    if (!s || !SECTOR_ID_RE.test(s) || seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
 function buildInsightFromDigestRow(row, sectorFallback) {
   const full = row.full_digest != null && String(row.full_digest).trim() ? String(row.full_digest) : "";
   const short = row.output_text != null && String(row.output_text).trim() ? String(row.output_text) : "";
@@ -363,8 +387,8 @@ async function fetchInsightByGithubRun(env, ghRunId, sectorParam) {
   if (wf !== "run_titan_now.yml") {
     throw new Error("That GitHub run is not “Run Titan Now”.");
   }
-  const inputs = run.inputs && typeof run.inputs === "object" ? run.inputs : {};
-  const mode = String(inputs.mode || "").trim().toLowerCase();
+  const inputs = normalizeWorkflowInputs(run.inputs);
+  let mode = toStringInput(inputs.mode).toLowerCase();
   const meta = {
     github_run_id: ghRunId,
     github_run_number: run.run_number ?? null,
@@ -372,6 +396,15 @@ async function fetchInsightByGithubRun(env, ghRunId, sectorParam) {
     workflow_status: run.status || null,
     workflow_conclusion: run.conclusion || null,
   };
+
+  const gid = encodeURIComponent(String(ghRunId));
+  const rowsForRun = await supabaseSelectDigestRows(
+    base,
+    key,
+    `?github_run_id=eq.${gid}` +
+      "&select=run_id,sector,output_text,full_digest,recorded_at,github_run_id&order=recorded_at.desc&limit=32",
+  );
+  const sectorsFromDb = uniqueSectorsFromDigestRows(rowsForRun);
 
   if (mode === "portfolio" || mode === "live") {
     return {
@@ -382,28 +415,62 @@ async function fetchInsightByGithubRun(env, ghRunId, sectorParam) {
     };
   }
 
-  let sector = String(sectorParam || "").trim().toLowerCase();
-  if (!sector && (mode === "sector" || mode === "custom")) {
-    sector = String(inputs.sector_id || "").trim().toLowerCase();
+  let sector = toStringInput(sectorParam).toLowerCase();
+  if (!sector) sector = toStringInput(inputs.sector_id).toLowerCase();
+  if (!sector && sectorsFromDb.length === 1) sector = sectorsFromDb[0];
+
+  if (!mode) {
+    if (sectorsFromDb.length > 1) mode = "all_sectors";
+    else if (sectorsFromDb.length === 1) mode = "sector";
+    else if (toStringInput(inputs.custom_symbols)) mode = "custom";
+    else if (toStringInput(inputs.sector_id)) mode = "sector";
   }
+  if (mode) meta.workflow_mode = mode;
+
   if (mode === "all_sectors" && (!sector || !SECTOR_ID_RE.test(sector))) {
+    if (sectorsFromDb.length > 1) {
+      return {
+        ok: false,
+        code: "sector_required",
+        error: "This run has multiple saved sector digests. Pass sector= query param.",
+        available_sectors: sectorsFromDb,
+        ...meta,
+      };
+    }
     return {
       ok: false,
       code: "sector_required",
       error: "This run is all_sectors mode. Pass sector= query param (sector to show).",
+      available_sectors: sectorsFromDb,
       ...meta,
     };
   }
   if (!sector || !SECTOR_ID_RE.test(sector)) {
+    if (sectorsFromDb.length > 1) {
+      return {
+        ok: false,
+        code: "sector_required",
+        error:
+          "GitHub did not return workflow inputs for this run. Pick a sector (saved digests: " +
+          sectorsFromDb.join(", ") +
+          ").",
+        available_sectors: sectorsFromDb,
+        ...meta,
+      };
+    }
     return {
       ok: false,
       code: "bad_sector",
       error: "Could not determine a valid sector for this run.",
+      available_sectors: sectorsFromDb,
+      note:
+        sectorsFromDb.length === 0
+          ? "No llm_digest_memory row with this github_run_id yet (or column not populated for this run)."
+          : "",
       ...meta,
     };
   }
 
-  const gid = encodeURIComponent(String(ghRunId));
   const sev = encodeURIComponent(sector);
   const queryPath =
     `?github_run_id=eq.${gid}&sector=eq.${sev}` +

@@ -581,10 +581,23 @@ function applyInsightToTextarea(textareaEl, insight, sectorLabel, runMeta = {}) 
 }
 
 async function fetchInsightForGithubRun(ghRunId, sectorQuery) {
+  const { proxyBase } = cfg();
   let path = `/insights/github-run/${encodeURIComponent(String(ghRunId))}`;
   const s = String(sectorQuery || "").trim().toLowerCase();
   if (s) path += `?sector=${encodeURIComponent(s)}`;
-  return ghApi(path);
+  const res = await fetch(`${proxyBase}${path}`, {
+    headers: { "Content-Type": "application/json" },
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(
+      typeof data.error === "string" ? data.error : `${res.status} ${res.statusText}`,
+    );
+    err.status = res.status;
+    err.payload = data;
+    throw err;
+  }
+  return data;
 }
 
 async function fillRecentTitanRunsSelect(selectEl, { maxRuns = 5 } = {}) {
@@ -735,17 +748,19 @@ function initInsightsPage() {
       setWorking("Load run metadata");
       lastWorkflowDetail = await ghApi(`/workflow-run/${encodeURIComponent(rid)}`);
       const mode = String(lastWorkflowDetail.inputs?.mode || "").trim().toLowerCase();
-      if (mode === "all_sectors") {
+      const sid = String(lastWorkflowDetail.inputs?.sector_id || "").trim().toLowerCase();
+      if (sid && SECTOR_INPUT_RE.test(sid)) syncSectorDropdowns(sid);
+      if (mode === "all_sectors" || (!mode && !sid)) {
         if (sectorCard) sectorCard.classList.remove("hidden");
         setStatus(
-          `Run #${lastWorkflowDetail.run_number}: all_sectors — pick a sector below, then load digest.`,
+          mode === "all_sectors"
+            ? `Run #${lastWorkflowDetail.run_number}: all_sectors — pick a sector below, then load digest.`
+            : `Run #${lastWorkflowDetail.run_number}: pick a sector below (GitHub did not return workflow inputs), then load digest.`,
         );
       } else {
         if (sectorCard) sectorCard.classList.add("hidden");
-        const sid = String(lastWorkflowDetail.inputs?.sector_id || "").trim().toLowerCase();
-        if (sid && SECTOR_INPUT_RE.test(sid)) syncSectorDropdowns(sid);
         setStatus(
-          `Run #${lastWorkflowDetail.run_number}: mode=${mode || "?"}. Tap “Load digest for selected run”.`,
+          `Run #${lastWorkflowDetail.run_number}: mode=${mode || "sector"}${sid ? `, sector=${sid}` : ""}. Tap “Load digest for selected run”.`,
         );
       }
     } catch (e) {
@@ -793,16 +808,34 @@ function initInsightsPage() {
           lastWorkflowDetail = await ghApi(`/workflow-run/${encodeURIComponent(rid)}`);
         }
         const mode = String(lastWorkflowDetail.inputs?.mode || "").trim().toLowerCase();
-        let sectorQ = "";
-        if (mode === "all_sectors") {
-          sectorQ = String(el("insightSectorId")?.value || "").trim().toLowerCase();
-          if (!sectorQ || !SECTOR_INPUT_RE.test(sectorQ)) {
-            setStatus("For all_sectors runs, pick a sector in the sector list.");
-            return;
-          }
+        let sectorQ = String(el("insightSectorId")?.value || "").trim().toLowerCase();
+        if (!sectorQ) {
+          sectorQ = String(lastWorkflowDetail.inputs?.sector_id || "").trim().toLowerCase();
+        }
+        if (mode === "all_sectors" && (!sectorQ || !SECTOR_INPUT_RE.test(sectorQ))) {
+          setStatus("For all_sectors runs, pick a sector in the sector list.");
+          return;
         }
         setWorking("Load digest from Supabase");
-        const data = await fetchInsightForGithubRun(rid, sectorQ);
+        let data;
+        try {
+          data = await fetchInsightForGithubRun(rid, sectorQ);
+        } catch (e) {
+          const payload = e.payload || {};
+          if (
+            (payload.code === "sector_required" || payload.code === "bad_sector") &&
+            Array.isArray(payload.available_sectors) &&
+            payload.available_sectors.length > 0 &&
+            sectorCard
+          ) {
+            sectorCard.classList.remove("hidden");
+            setStatus(
+              `${e.message}\n\nSaved sectors for this run: ${payload.available_sectors.join(", ")}.\nPick one below and tap “Load digest for selected run” again.`,
+            );
+            return;
+          }
+          throw e;
+        }
         const ins = data.insight;
         const meta = {
           github_run_number: data.github_run_number,
