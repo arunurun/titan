@@ -57,6 +57,142 @@ def calculate_atr(data: pd.DataFrame, window: int = 14) -> float:
     return float(atr.iloc[-1])
 
 
+def calculate_adx(data: pd.DataFrame, window: int = 14) -> float:
+    """
+    Last ADX value from OHLC frame.
+    Requires columns: high, low, close.
+    """
+    if data.empty or window < 2:
+        return float("nan")
+    req = {"high", "low", "close"}
+    if not req.issubset(set(data.columns)):
+        return float("nan")
+
+    h = pd.to_numeric(data["high"], errors="coerce")
+    l = pd.to_numeric(data["low"], errors="coerce")
+    c = pd.to_numeric(data["close"], errors="coerce")
+    prev_h = h.shift(1)
+    prev_l = l.shift(1)
+    prev_c = c.shift(1)
+
+    tr = pd.concat([(h - l).abs(), (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    plus_dm = (h - prev_h).where((h - prev_h) > (prev_l - l), 0.0).clip(lower=0.0)
+    minus_dm = (prev_l - l).where((prev_l - l) > (h - prev_h), 0.0).clip(lower=0.0)
+
+    roll = min(window, len(data))
+    tr_n = tr.rolling(window=roll, min_periods=1).sum()
+    plus_n = plus_dm.rolling(window=roll, min_periods=1).sum()
+    minus_n = minus_dm.rolling(window=roll, min_periods=1).sum()
+    if tr_n.empty:
+        return float("nan")
+
+    plus_di = 100.0 * (plus_n / tr_n.replace(0.0, np.nan))
+    minus_di = 100.0 * (minus_n / tr_n.replace(0.0, np.nan))
+    denom = (plus_di + minus_di).replace(0.0, np.nan)
+    dx = ((plus_di - minus_di).abs() / denom) * 100.0
+    dx = dx.dropna()
+    if dx.empty:
+        return float("nan")
+
+    adx = dx.rolling(window=min(window, len(dx)), min_periods=1).mean()
+    out = float(adx.iloc[-1])
+    return out if not math.isnan(out) else float("nan")
+
+
+def calculate_breakout_20d_distances_pct(data: pd.DataFrame) -> tuple[float, float]:
+    """
+    Returns (pct_to_20d_high, pct_above_20d_low) for latest close.
+    """
+    if data.empty or "close" not in data.columns:
+        return float("nan"), float("nan")
+    closes = pd.to_numeric(data["close"], errors="coerce").dropna()
+    if closes.empty:
+        return float("nan"), float("nan")
+    win = min(20, len(closes))
+    tail = closes.iloc[-win:]
+    high_20 = float(tail.max()) if not tail.empty else float("nan")
+    low_20 = float(tail.min()) if not tail.empty else float("nan")
+    last = float(tail.iloc[-1]) if not tail.empty else float("nan")
+
+    pct_to_high = (
+        ((last / high_20) - 1.0) * 100.0
+        if not math.isnan(last) and not math.isnan(high_20) and high_20 != 0.0
+        else float("nan")
+    )
+    pct_above_low = (
+        ((last / low_20) - 1.0) * 100.0
+        if not math.isnan(last) and not math.isnan(low_20) and low_20 != 0.0
+        else float("nan")
+    )
+    return pct_to_high, pct_above_low
+
+
+def calculate_atr_ratio(data: pd.DataFrame, short_window: int = 14, long_window: int = 63) -> float:
+    """ATR short/long ratio (NaN-safe)."""
+    atr_short = calculate_atr(data, window=short_window)
+    atr_long = calculate_atr(data, window=long_window)
+    if math.isnan(atr_short) or math.isnan(atr_long) or atr_long == 0.0:
+        return float("nan")
+    return float(atr_short / atr_long)
+
+
+def calculate_cmf(data: pd.DataFrame, window: int = 20) -> float:
+    """
+    Chaikin Money Flow (CMF) over the latest rolling window.
+    Requires columns: high, low, close, volume.
+    """
+    if data.empty or window < 1:
+        return float("nan")
+    req = {"high", "low", "close", "volume"}
+    if not req.issubset(set(data.columns)):
+        return float("nan")
+
+    h = pd.to_numeric(data["high"], errors="coerce")
+    l = pd.to_numeric(data["low"], errors="coerce")
+    c = pd.to_numeric(data["close"], errors="coerce")
+    v = pd.to_numeric(data["volume"], errors="coerce")
+    hl_range = (h - l).replace(0.0, np.nan)
+    mfm = (((c - l) - (h - c)) / hl_range).replace([np.inf, -np.inf], np.nan)
+    mfv = mfm * v
+    roll = min(window, len(data))
+    mfv_sum = mfv.rolling(window=roll, min_periods=1).sum()
+    vol_sum = v.rolling(window=roll, min_periods=1).sum().replace(0.0, np.nan)
+    cmf = (mfv_sum / vol_sum).replace([np.inf, -np.inf], np.nan).dropna()
+    if cmf.empty:
+        return float("nan")
+    return float(cmf.iloc[-1])
+
+
+def calculate_obv_slope(data: pd.DataFrame, window: int = 20) -> float:
+    """
+    Linear slope of OBV over the latest window.
+    Returns NaN when close/volume are unavailable.
+    """
+    if data.empty or window < 2:
+        return float("nan")
+    req = {"close", "volume"}
+    if not req.issubset(set(data.columns)):
+        return float("nan")
+    c = pd.to_numeric(data["close"], errors="coerce")
+    v = pd.to_numeric(data["volume"], errors="coerce")
+    if c.dropna().empty or v.dropna().empty:
+        return float("nan")
+    delta = c.diff()
+    direction = delta.apply(lambda x: 1.0 if x > 0 else (-1.0 if x < 0 else 0.0))
+    obv = (direction * v.fillna(0.0)).cumsum().dropna()
+    if len(obv) < 2:
+        return float("nan")
+    tail = obv.iloc[-min(window, len(obv)) :]
+    if len(tail) < 2:
+        return float("nan")
+    x = np.arange(len(tail), dtype=float)
+    y = tail.to_numpy(dtype=float)
+    if np.all(np.isnan(y)):
+        return float("nan")
+    slope = np.polyfit(x, y, 1)[0]
+    return float(slope)
+
+
 def calculate_absorption_ratio(current_delivery: float, avg_delivery_5d: float) -> float:
     """Current delivery vs 5d average; safe when average is zero or invalid."""
     if avg_delivery_5d is None or (isinstance(avg_delivery_5d, float) and math.isnan(avg_delivery_5d)):
