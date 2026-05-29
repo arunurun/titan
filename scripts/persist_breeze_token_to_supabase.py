@@ -15,7 +15,10 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from breeze_session_auth import parse_api_session_from_input  # noqa: E402
+from breeze_session_auth import (  # noqa: E402
+    parse_api_session_from_input,
+    validate_breeze_session_token,
+)
 
 
 def _required(name: str) -> str:
@@ -30,13 +33,19 @@ def main() -> int:
     raw = (os.environ.get("BREEZE_TOKEN_INPUT") or "").strip()
     if not raw:
         raise RuntimeError("Missing BREEZE_TOKEN_INPUT. Pass API_Session or redirect URL.")
+    if "\n" in raw or "\r" in raw:
+        raise RuntimeError("BREEZE_TOKEN_INPUT must be single-line text (no newlines).")
+    if len(raw) >= 2 and raw[0] in ("'", '"') and raw[-1] == raw[0]:
+        raise RuntimeError(
+            "BREEZE_TOKEN_INPUT appears wrapped in quotes. Paste raw API_Session or full redirect URL."
+        )
 
     api_key = _required("BREEZE_API_KEY")
     api_secret = _required("BREEZE_SECRET")
     supabase_url = _required("SUPABASE_URL")
     supabase_key = _required("SUPABASE_KEY")
 
-    token = parse_api_session_from_input(raw)
+    token = validate_breeze_session_token(parse_api_session_from_input(raw))
     breeze = BreezeConnect(api_key=api_key)
     breeze.generate_session(api_secret=api_secret, session_token=token)
 

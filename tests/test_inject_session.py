@@ -44,6 +44,7 @@ def test_inject_writes_github_env(inject_mod, tmp_path, monkeypatch):
             assert inject_mod.main() == 0
         text = gh.read_text(encoding="utf-8")
         assert "BREEZE_SESSION_TOKEN" in text
+        assert "BREEZE_SESSION_TOKEN_SOURCE" in text
         assert "tok=123" in text
         mock_client.table.assert_called_once()
     finally:
@@ -60,7 +61,9 @@ def test_inject_prefers_repository_secret_skips_supabase(inject_mod, tmp_path, m
     with patch.object(inject_mod, "create_client", mock_create):
         assert inject_mod.main() == 0
     mock_create.assert_not_called()
-    assert "secret-token-xyz" in gh.read_text(encoding="utf-8")
+    text = gh.read_text(encoding="utf-8")
+    assert "secret-token-xyz" in text
+    assert "environment:BREEZE_SESSION_TOKEN" in text
 
 
 def test_jwt_role_from_supabase_key(inject_mod):

@@ -50,6 +50,7 @@ def _write_token_to_github_env(token: str, source: str) -> int:
         print("GITHUB_ENV not set; this script is intended for GitHub Actions.", file=sys.stderr)
         return 1
     _append_github_env_multiline("BREEZE_SESSION_TOKEN", token, gh_env)
+    _append_github_env_multiline("BREEZE_SESSION_TOKEN_SOURCE", source, gh_env)
     print(f"Injected BREEZE_SESSION_TOKEN into GITHUB_ENV ({source}).")
     return 0
 
@@ -75,7 +76,7 @@ def main() -> int:
 
     override = (os.environ.get("BREEZE_SESSION_TOKEN") or "").strip()
     if override:
-        return _write_token_to_github_env(override, "environment BREEZE_SESSION_TOKEN")
+        return _write_token_to_github_env(override, "environment:BREEZE_SESSION_TOKEN")
 
     url = os.environ.get("SUPABASE_URL", "").strip()
     key = os.environ.get("SUPABASE_KEY", "").strip()
@@ -123,7 +124,7 @@ def main() -> int:
         )
         return 1
 
-    return _write_token_to_github_env(token, "Supabase session_config")
+    return _write_token_to_github_env(token, "supabase:session_config(id=1)")
 
 
 if __name__ == "__main__":

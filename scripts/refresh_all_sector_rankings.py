@@ -7,19 +7,81 @@ Used by the Saturday scheduled workflow. Runs each sector via the same logic as
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import subprocess
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from breeze_connect import BreezeConnect
+
 ROOT = Path(__file__).resolve().parent.parent
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from breeze_session_auth import validate_breeze_session_token
+
 HEARTBEAT_SECONDS = 60.0
 
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _required_env(name: str) -> str:
+    value = str(os.environ.get(name) or "").strip()
+    if not value:
+        raise RuntimeError(f"Missing required env var: {name}")
+    return value
+
+
+def _token_fingerprint(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
+
+
+def _validate_token_shape(token_raw: str, *, min_length: int = 8) -> str:
+    return validate_breeze_session_token(token_raw, min_length=min_length)
+
+
+def _preflight_breeze_session() -> None:
+    token_source = str(os.environ.get("BREEZE_SESSION_TOKEN_SOURCE") or "env:BREEZE_SESSION_TOKEN").strip()
+    token_raw = os.environ.get("BREEZE_SESSION_TOKEN", "")
+    try:
+        token = _validate_token_shape(token_raw)
+    except ValueError as exc:
+        token_len = len(str(token_raw or "").strip())
+        raise RuntimeError(
+            "Breeze session preflight failed before sector fan-out: "
+            f"{exc}. Refresh session_config(id=1) with a valid API_Session and rerun. "
+            f"diagnostics={{source:{token_source},len:{token_len}}}"
+        ) from exc
+
+    token_len = len(token)
+    token_fp = _token_fingerprint(token)
+    api_key = _required_env("BREEZE_API_KEY")
+    api_secret = _required_env("BREEZE_SECRET")
+
+    breeze = BreezeConnect(api_key=api_key)
+    try:
+        # Single lightweight auth call; if this fails we abort before sector loop.
+        breeze.generate_session(api_secret=api_secret, session_token=token)
+    except Exception as exc:  # noqa: BLE001
+        reason = type(exc).__name__
+        raise RuntimeError(
+            "Breeze session preflight failed before sector fan-out: token invalid/expired. "
+            "Update session_config(id=1) with a fresh API_Session and rerun. "
+            f"diagnostics={{source:{token_source},len:{token_len},fp:{token_fp}}} "
+            f"reason_type={reason}"
+        ) from exc
+
+    print(
+        f"[{_utc_now_iso()}] Breeze preflight OK diagnostics={{source:{token_source},len:{token_len},fp:{token_fp}}}",
+        flush=True,
+    )
 
 
 def main() -> int:
@@ -40,11 +102,12 @@ def main() -> int:
     top_n = max(1, int(args.top_n))
     excl = {x.strip().lower() for x in str(args.exclude_sectors).split(",") if x.strip()}
 
-    sys.path.insert(0, str(ROOT / "src"))
     from dotenv import load_dotenv
 
     load_dotenv(ROOT / ".env", override=False)
     from sector_registry import list_active_sector_ids
+
+    _preflight_breeze_session()
 
     sectors = [s for s in list_active_sector_ids(include_unknown=False) if s not in excl]
     sectors.sort()
