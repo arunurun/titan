@@ -140,6 +140,55 @@ def _horizon_score_label(score: Any) -> str:
     return "defensive tilt"
 
 
+def _metric_icon(v: Any, *, bullish_above: float, bearish_below: float) -> str:
+    f = _safe_float(v)
+    if math.isnan(f):
+        return "🟡➡"
+    if f >= bullish_above:
+        return "🟢⬆"
+    if f <= bearish_below:
+        return "🔴⬇"
+    return "🟡➡"
+
+
+def _breakout_state_icon(
+    pct_to_high: Any,
+    pct_above_low: Any,
+) -> str:
+    to_high = _safe_float(pct_to_high)
+    above_low = _safe_float(pct_above_low)
+    if math.isnan(to_high) and math.isnan(above_low):
+        return "🟡➡"
+    if not math.isnan(to_high) and to_high >= 0.0:
+        return "🟢⬆"
+    if not math.isnan(to_high) and to_high >= -1.0:
+        return "🟢⬆"
+    if not math.isnan(above_low) and above_low <= 1.0:
+        return "🔴⬇"
+    return "🟡➡"
+
+
+def _atr_regime_icon(ratio: Any) -> str:
+    v = _safe_float(ratio)
+    if math.isnan(v):
+        return "🟡➡"
+    if v <= 0.9:
+        return "🟢⬆"
+    if v >= 1.1:
+        return "🔴⬇"
+    return "🟡➡"
+
+
+def _cmf_or_obv_for_digest(audit: dict[str, Any]) -> tuple[str, float]:
+    cmf = _safe_float(audit.get("cmf_20"))
+    if not math.isnan(cmf):
+        return "CMF20", cmf
+    obv_slope = _safe_float(audit.get("obv_slope_20"))
+    if not math.isnan(obv_slope):
+        return "OBV slope", obv_slope
+    return "CMF20", float("nan")
+
+
 def _high_volume_down_day_stress(audit: dict[str, Any]) -> bool:
     """Elevated turnover on a negative session (not order-flow absorption)."""
     return bool(audit.get("high_volume_down_day_proxy") or audit.get("panic_absorption_proxy"))
@@ -213,7 +262,7 @@ def _prediction_brief_line(audit: dict[str, Any]) -> str:
     drv = drivers[0] if drivers else None
     drag = drags[0] if drags else None
 
-    parts = [f"Model read: {confidence} confidence"]
+    parts = [f"Model read confidence: {confidence} (directional heuristic, not a guarantee)"]
     if drv:
         parts.append(f"{drv} supportive")
     if drag:
@@ -232,6 +281,11 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     vpr_label_src = _volume_participation_for_digest_label(audit)
     ret1d = audit.get("return_1d_pct")
     atr_pct = audit.get("atr_14_pct")
+    adx_14 = audit.get("adx_14")
+    breakout_to_high = audit.get("breakout_20d_distance_pct_to_high")
+    breakout_above_low = audit.get("breakout_20d_distance_pct_above_low")
+    atr_ratio = audit.get("atr_14_over_atr_63")
+    cmf_label, cmf_val = _cmf_or_obv_for_digest(audit)
     next_week = audit.get("next_week_score")
     ema_dist = audit.get("ema_200_distance_pct")
     fundamental_status = str(audit.get("fundamental_status", "unavailable") or "unavailable")
@@ -248,25 +302,43 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     lines_out.append(f"{symbol} ({exchange}) — {_sell_signal_plain_english(str(sell_signal))}")
     nw_l = _horizon_score_label(next_week)
     lines_out.append(
-        "Scores · "
-        f"next week {_fmt_metric(next_week)} ({nw_l}) · "
-        f"intent {_fmt_metric(intent)} ({_equity_technical_label(intent)}) · "
-        f"1d {_fmt_metric(ret1d)}%"
+        f"{_metric_icon(next_week, bullish_above=55.0, bearish_below=45.0)} "
+        f"1W outlook: {_fmt_metric(next_week)} ({nw_l})"
+    )
+    lines_out.append(
+        f"{_metric_icon(intent, bullish_above=55.0, bearish_below=45.0)} "
+        f"Technical intent: {_fmt_metric(intent)} ({_equity_technical_label(intent)})"
+    )
+    lines_out.append(
+        f"{_metric_icon(adx_14, bullish_above=25.0, bearish_below=15.0)} "
+        f"Trend strength ADX14: {_fmt_metric(adx_14)}"
+    )
+    lines_out.append(
+        f"{_breakout_state_icon(breakout_to_high, breakout_above_low)} "
+        f"Breakout state (20D): to high {_fmt_metric(breakout_to_high)}% · above low {_fmt_metric(breakout_above_low)}%"
+    )
+    lines_out.append(
+        f"{_atr_regime_icon(atr_ratio)} "
+        f"Volatility regime ATR14/ATR63: {_fmt_metric(atr_ratio)}"
     )
 
-    tape_bits = [
-        f"z {_fmt_metric(z)} ({_z_label(z)})",
-        f"volume {_volume_participation_label(vpr_label_src)} (intent input)",
-        f"ATR {_fmt_metric(atr_pct)}%",
-    ]
+    tape_bits = [f"1D move {_fmt_metric(ret1d)}%", f"z-score {_fmt_metric(z)} ({_z_label(z)})"]
     if not math.isnan(_safe_float(ema_dist)):
-        tape_bits.insert(2, f"vs 200-day avg {_fmt_metric(ema_dist)}%")
-    lines_out.append("Tape · " + " · ".join(tape_bits))
+        tape_bits.append(f"vs EMA200 {_fmt_metric(ema_dist)}%")
+    tape_bits.append(
+        f"volume participation {_fmt_metric(vpr_label_src)}x ({_volume_participation_label(vpr_label_src)})"
+    )
+    tape_bits.append(f"ATR14 {_fmt_metric(atr_pct)}%")
+    lines_out.append("Tape snapshot: " + " · ".join(tape_bits))
+    lines_out.append(
+        f"{_metric_icon(cmf_val, bullish_above=0.05, bearish_below=-0.05)} "
+        f"Directional volume {cmf_label}: {_fmt_metric(cmf_val, 3)}"
+    )
 
     rank_bits: list[str] = []
     sp_int = audit.get("sector_pctile_effective_intent")
     if not math.isnan(_safe_float(sp_int)):
-        rank_bits.append(f"intent vs sector peers pctile {_fmt_metric(sp_int)}")
+        rank_bits.append(f"technical intent vs sector peers pctile {_fmt_metric(sp_int)}")
     sp_nw = audit.get("sector_pctile_next_week_score")
     if not math.isnan(_safe_float(sp_nw)):
         rank_bits.append(f"next-week vs sector pctile {_fmt_metric(sp_nw)}")
@@ -282,7 +354,7 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
 
     if not math.isnan(_safe_float(nf)):
         nd_l = _horizon_score_label(nf)
-        lines_out.append(f"Very short horizon: tomorrow ~{_fmt_metric(nf)} ({nd_l})")
+        lines_out.append(f"Very short horizon: 1D outlook ~{_fmt_metric(nf)} ({nd_l})")
 
     if sell_reasons:
         sr = "; ".join(str(x) for x in sell_reasons[:3])
@@ -369,14 +441,15 @@ def _format_symbol_metrics_line_verbose(result: dict[str, Any]) -> str:
     )
     zb = str(audit.get("z_score_blend") or "n/a")
     base = (
-        f"{symbol} ({exchange}) | techScore {_fmt_metric(intent)} [{_equity_technical_label(intent)}] "
-        f"| z {_fmt_metric(z)} ({_z_label(z)}; {zb}) | volPart raw {_fmt_metric(vpr, 3)} "
-        f"| score-input {_fmt_metric(vpr_score, 2)} [{_volume_participation_label(vpr_score)}]"
+        f"{symbol} ({exchange}) | techIntent {_fmt_metric(intent)} [{_equity_technical_label(intent)}] "
+        f"| z-score {_fmt_metric(z)} ({_z_label(z)}; std-dev from mean; {zb}) "
+        f"| volPart ratio {_fmt_metric(vpr, 3)}x (vs symbol baseline volume) "
+        f"| score-input {_fmt_metric(vpr_score, 2)} [{_volume_participation_label(vpr_score)}; used in techIntent]"
         f"{vpr_cap_suffix} "
-        f"| ret1d {_fmt_metric(ret1d)}% "
-        f"| ema200_delta {_fmt_metric(ema_dist)}% | atr14 {_fmt_metric(atr_pct)}% "
-        f"| nextDay {_fmt_metric(next_day)} ({_horizon_score_label(next_day)}) "
-        f"| nextWeek {_fmt_metric(next_week)} ({_horizon_score_label(next_week)}) "
+        f"| move1D {_fmt_metric(ret1d)}% "
+        f"| distVs200DTrend {_fmt_metric(ema_dist)}% | atr14 {_fmt_metric(atr_pct)}% "
+        f"| next1D {_fmt_metric(next_day)} ({_horizon_score_label(next_day)}) "
+        f"| next1W {_fmt_metric(next_week)} ({_horizon_score_label(next_week)}) "
         f"| sell {sell_signal} "
         f"| flags={flag_text} | rows {rows} "
         f"| exchange_used={exchange_used}{' (fallback)' if fallback_used else ''}"
@@ -764,7 +837,8 @@ def _prediction_reason_text(audit: dict[str, Any]) -> str:
         drags = ["none"]
 
     return (
-        f"confidence={confidence} | drivers={','.join(drivers[:3])} | drags={','.join(drags[:3])} | penalties={pen} "
+        f"confidence={confidence} (directional heuristic, not certainty) | "
+        f"drivers={','.join(drivers[:3])} | drags={','.join(drags[:3])} | penalties={pen} "
         f"| factors day[tech {_fmt_metric(day.get('tech_composite_term'))}, "
         f"ret {_fmt_metric(day.get('ret1d_term'))}, ema {_fmt_metric(day.get('ema_term'))}, "
         f"emaConf {_fmt_metric(day.get('ema_history_confidence'))}, atr-pen {_fmt_metric(day.get('atr_penalty'))}] "
@@ -1166,9 +1240,14 @@ def build_equity_live_audit(
 
     from breeze_client import fetch_equity_data, volume_participation_ratio
     from titan_engine import (
+        calculate_adx,
         calculate_atr,
+        calculate_atr_ratio,
+        calculate_breakout_20d_distances_pct,
+        calculate_cmf,
         calculate_ema,
         calculate_equity_technical_score,
+        calculate_obv_slope,
     )
 
     df = fetch_equity_data(
@@ -1214,6 +1293,12 @@ def build_equity_live_audit(
             "rel_return_10d_vs_nifty_pct": float("nan"),
             "rel_return_20d_vs_nifty_pct": float("nan"),
             "extreme_price_move_proxy": False,
+            "adx_14": float("nan"),
+            "breakout_20d_distance_pct_to_high": float("nan"),
+            "breakout_20d_distance_pct_above_low": float("nan"),
+            "atr_14_over_atr_63": float("nan"),
+            "cmf_20": float("nan"),
+            "obv_slope_20": float("nan"),
         }
         return skip, ""
     close_col = "close" if "close" in df.columns else df.columns[-1]
@@ -1253,6 +1338,11 @@ def build_equity_live_audit(
         else float("nan")
     )
     atr_14 = calculate_atr(df, window=14)
+    adx_14 = calculate_adx(df, window=14)
+    breakout_to_high, breakout_above_low = calculate_breakout_20d_distances_pct(df)
+    atr_14_over_atr_63 = calculate_atr_ratio(df, short_window=14, long_window=63)
+    cmf_20 = calculate_cmf(df, window=20)
+    obv_slope_20 = calculate_obv_slope(df, window=20)
     atr_14_pct = (
         (atr_14 / close_last) * 100.0
         if (not math.isnan(atr_14) and not math.isnan(close_last) and close_last != 0.0)
@@ -1311,6 +1401,12 @@ def build_equity_live_audit(
         "ema_200_distance_pct": ema_distance_pct,
         "atr_14": atr_14,
         "atr_14_pct": atr_14_pct,
+        "adx_14": adx_14,
+        "breakout_20d_distance_pct_to_high": breakout_to_high,
+        "breakout_20d_distance_pct_above_low": breakout_above_low,
+        "atr_14_over_atr_63": atr_14_over_atr_63,
+        "cmf_20": cmf_20,
+        "obv_slope_20": obv_slope_20,
         "atr_break_multiple": atr_break_multiple,
         "structural_break_proxy": (
             not math.isnan(atr_break_multiple) and atr_break_multiple >= 1.5
