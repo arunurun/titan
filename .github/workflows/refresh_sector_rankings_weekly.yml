@@ -43,7 +43,6 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           BREEZE_API_KEY: ${{ secrets.BREEZE_API_KEY }}
           BREEZE_SECRET: ${{ secrets.BREEZE_SECRET }}
-          BREEZE_SESSION_TOKEN: ${{ secrets.BREEZE_SESSION_TOKEN }}
           BREEZE_HIST_CALL_INTERVAL_SECONDS: "0.35"
         run: |
           TOPN="${{ github.event.inputs.top_n || '10' }}"
