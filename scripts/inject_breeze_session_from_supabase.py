@@ -10,6 +10,7 @@ Requires: SUPABASE_URL + SUPABASE_KEY (must be service_role JWT if RLS is on), t
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import secrets
@@ -44,13 +45,32 @@ def _append_github_env_multiline(name: str, value: str, path: str) -> None:
         f.write(f"{name}<<{delim}\n{value}\n{delim}\n")
 
 
+def _append_github_env_kv(name: str, value: str, path: str) -> None:
+    if "\n" in value or "\r" in value:
+        print(f"ERROR: {name} must not contain newlines", file=sys.stderr)
+        sys.exit(1)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(f"{name}={value}\n")
+
+
+def _token_fingerprint(token: str) -> str:
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()[:10]
+    return f"len={len(token)} sha256={digest}"
+
+
 def _write_token_to_github_env(token: str, source: str) -> int:
     gh_env = os.environ.get("GITHUB_ENV")
     if not gh_env:
         print("GITHUB_ENV not set; this script is intended for GitHub Actions.", file=sys.stderr)
         return 1
+    fingerprint = _token_fingerprint(token)
     _append_github_env_multiline("BREEZE_SESSION_TOKEN", token, gh_env)
-    print(f"Injected BREEZE_SESSION_TOKEN into GITHUB_ENV ({source}).")
+    _append_github_env_kv("BREEZE_SESSION_TOKEN_SOURCE", source, gh_env)
+    _append_github_env_kv("BREEZE_SESSION_TOKEN_FINGERPRINT", fingerprint, gh_env)
+    print(
+        "Injected BREEZE_SESSION_TOKEN into GITHUB_ENV "
+        f"(source={source}, {fingerprint})."
+    )
     return 0
 
 

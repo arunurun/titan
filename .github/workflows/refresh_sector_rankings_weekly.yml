@@ -35,7 +35,13 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          BREEZE_SESSION_TOKEN: ${{ secrets.BREEZE_SESSION_TOKEN }}
         run: python scripts/inject_breeze_session_from_supabase.py
+
+      - name: Show Breeze token source (safe)
+        run: |
+          echo "BREEZE_SESSION_TOKEN_SOURCE=${BREEZE_SESSION_TOKEN_SOURCE:-unknown}"
+          echo "BREEZE_SESSION_TOKEN_FINGERPRINT=${BREEZE_SESSION_TOKEN_FINGERPRINT:-unavailable}"
 
       - name: Refresh all sector rankings
         env:
@@ -43,7 +49,6 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           BREEZE_API_KEY: ${{ secrets.BREEZE_API_KEY }}
           BREEZE_SECRET: ${{ secrets.BREEZE_SECRET }}
-          BREEZE_SESSION_TOKEN: ${{ secrets.BREEZE_SESSION_TOKEN }}
           BREEZE_HIST_CALL_INTERVAL_SECONDS: "0.35"
         run: |
           TOPN="${{ github.event.inputs.top_n || '10' }}"
