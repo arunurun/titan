@@ -2,8 +2,11 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
+import threading
+import time
 
 from breeze_client import (
+    _rate_limited_historical_call,
     create_breeze_session,
     fetch_equity_data,
     fetch_nifty_data,
@@ -192,6 +195,69 @@ def test_fetch_equity_data_rate_limited_then_success_retries(mock_breeze_cls, mo
 
     assert len(df) == 1
     assert api.get_historical_data.call_count == 2
+
+
+def test_rate_limited_call_does_not_hold_lock_during_network(monkeypatch):
+    monkeypatch.setattr("breeze_client._min_hist_call_interval_seconds", lambda: 0.0)
+    monkeypatch.setattr("breeze_client._historical_call_timeout_seconds", lambda: 1.0)
+    monkeypatch.setattr("breeze_client._LAST_HIST_CALL_AT", 0.0)
+
+    class _FakeBreeze:
+        def __init__(self) -> None:
+            self.active = 0
+            self.max_active = 0
+            self.lock = threading.Lock()
+            self.unblock = threading.Event()
+
+        def get_historical_data(self, **_kwargs):
+            with self.lock:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            self.unblock.wait(timeout=0.5)
+            with self.lock:
+                self.active -= 1
+            return {"Success": [{"close": 1.0}]}
+
+    breeze = _FakeBreeze()
+    t1 = threading.Thread(target=lambda: _rate_limited_historical_call(breeze, interval="1day"))
+    t2 = threading.Thread(target=lambda: _rate_limited_historical_call(breeze, interval="1day"))
+    t1.start()
+    time.sleep(0.05)
+    t2.start()
+    time.sleep(0.05)
+    breeze.unblock.set()
+    t1.join(timeout=1.0)
+    t2.join(timeout=1.0)
+    assert breeze.max_active >= 2
+
+
+@patch("breeze_client.BreezeConnect")
+def test_fetch_equity_data_timeout_marks_hard_failure(mock_breeze_cls, monkeypatch):
+    monkeypatch.setattr(
+        "breeze_client.resolve_breeze_stock_code",
+        lambda sym, ex: sym.strip().upper(),
+    )
+    monkeypatch.setattr("breeze_client._min_hist_call_interval_seconds", lambda: 0.0)
+    monkeypatch.setattr("breeze_client._historical_call_timeout_seconds", lambda: 0.05)
+
+    api = MagicMock()
+
+    def _sleeping_call(**_kwargs):
+        time.sleep(0.2)
+        return {"Success": [{"close": 9.0}]}
+
+    api.get_historical_data.side_effect = _sleeping_call
+    mock_breeze_cls.return_value = api
+
+    with pytest.raises(RuntimeError, match="historical fetch timeout"):
+        fetch_equity_data(
+            make_cfg(),
+            "SLOW",
+            "NSE",
+            breeze=api,
+            max_retries=1,
+            allow_exchange_fallback=False,
+        )
 
 
 def test_volume_participation_ratio_matches_legacy_alias():
