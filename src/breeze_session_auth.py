@@ -45,6 +45,36 @@ def parse_api_session_from_input(raw: str) -> str:
     return text
 
 
+def validate_breeze_session_token(token: str, *, min_length: int = 8) -> str:
+    """
+    Strict token-shape guard used before persisting or fanning out refresh runs.
+
+    Rules:
+    - required and non-empty after trim
+    - must not be wrapped with matching quotes
+    - must not contain newlines
+    - conservative minimum length check
+    """
+    text = str(token or "").strip()
+    if not text:
+        raise ValueError("Breeze session token is required and cannot be empty.")
+
+    if ("\n" in text) or ("\r" in text):
+        raise ValueError("Breeze session token must be a single line (no newlines).")
+
+    if len(text) >= 2 and text[0] in ("'", '"') and text[-1] == text[0]:
+        raise ValueError(
+            "Breeze session token appears wrapped in quotes. Paste only the raw API_Session value."
+        )
+
+    if len(text) < int(min_length):
+        raise ValueError(
+            f"Breeze session token looks too short ({len(text)} chars). Paste a full API_Session value."
+        )
+
+    return text
+
+
 def upsert_env_var(env_path: Path, name: str, value: str) -> None:
     """Create or update NAME=value in a .env file; preserve other lines."""
     line_re = re.compile(rf"^{re.escape(name)}=")

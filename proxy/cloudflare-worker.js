@@ -549,6 +549,32 @@ function sanitizeRefreshRankingsInputs(inputObj) {
   return { top_n: top_n || "10" };
 }
 
+function sanitizeBreezeTokenInput(raw) {
+  const breezeTokenInput = toStringInput(raw);
+  if (!breezeTokenInput) {
+    throw new Error("breeze_token_input is required and cannot be empty");
+  }
+  if (breezeTokenInput.length > 5000) {
+    throw new Error("breeze_token_input is too long");
+  }
+  if (breezeTokenInput.includes("\n") || breezeTokenInput.includes("\r")) {
+    throw new Error("breeze_token_input must be single-line text (no newlines)");
+  }
+  if (
+    breezeTokenInput.length >= 2 &&
+    (
+      (breezeTokenInput.startsWith('"') && breezeTokenInput.endsWith('"')) ||
+      (breezeTokenInput.startsWith("'") && breezeTokenInput.endsWith("'"))
+    )
+  ) {
+    throw new Error("breeze_token_input appears wrapped in quotes; paste raw API_Session or full redirect URL");
+  }
+  if (breezeTokenInput.length < 8) {
+    throw new Error("breeze_token_input looks too short; paste full API_Session or full redirect URL");
+  }
+  return breezeTokenInput;
+}
+
 function sanitizeDispatchPayload(workflow, inputs) {
   if (workflow === "run_titan_now.yml") {
     return sanitizeRunTitanInputs(inputs);
@@ -557,13 +583,7 @@ function sanitizeDispatchPayload(workflow, inputs) {
     return sanitizeRefreshRankingsInputs(inputs);
   }
   if (workflow === "persist_breeze_token_manual.yml") {
-    const breezeTokenInput = toStringInput(inputs?.breeze_token_input);
-    if (!breezeTokenInput) {
-      throw new Error("breeze_token_input is required");
-    }
-    if (breezeTokenInput.length > 5000) {
-      throw new Error("breeze_token_input is too long");
-    }
+    const breezeTokenInput = sanitizeBreezeTokenInput(inputs?.breeze_token_input);
     return { breeze_token_input: breezeTokenInput };
   }
   return {};

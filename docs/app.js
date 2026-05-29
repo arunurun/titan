@@ -191,6 +191,27 @@ function classifyProxyError(status, responseText) {
   return "";
 }
 
+function validateBreezeTokenInputForPersist(rawValue) {
+  const tokenInput = String(rawValue || "").trim();
+  if (!tokenInput) throw new Error("Token input is required.");
+  if (tokenInput.length < 8) {
+    throw new Error("Token input looks too short. Paste full API_Session or full redirect URL.");
+  }
+  if (tokenInput.includes("\n") || tokenInput.includes("\r")) {
+    throw new Error("Token input must be single-line text (no newlines).");
+  }
+  if (
+    tokenInput.length >= 2 &&
+    (
+      (tokenInput.startsWith('"') && tokenInput.endsWith('"')) ||
+      (tokenInput.startsWith("'") && tokenInput.endsWith("'"))
+    )
+  ) {
+    throw new Error("Token input appears wrapped in quotes. Paste raw API_Session or full redirect URL.");
+  }
+  return tokenInput;
+}
+
 async function ghApi(path, method = "GET", body = null) {
   const { proxyBase } = cfg();
   const url = `${proxyBase}${path}`;
@@ -1078,8 +1099,7 @@ function wireEvents() {
     persistBtn.addEventListener("click", async () => {
       try {
         setWorking("Persist token");
-        const tokenInput = (el("tokenInput")?.value || "").trim();
-        if (!tokenInput) throw new Error("Token input is required.");
+        const tokenInput = validateBreezeTokenInputForPersist(el("tokenInput")?.value || "");
         await checkConnection();
         await dispatchWorkflow(WORKFLOWS.persist, { breeze_token_input: tokenInput });
       } catch (e) {

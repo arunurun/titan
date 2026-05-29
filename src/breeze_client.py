@@ -30,6 +30,11 @@ logging.getLogger("APILogger").setLevel(logging.INFO)
 _HIST_CALL_LOCK = threading.Lock()
 _LAST_HIST_CALL_AT = 0.0
 _MIN_HIST_CALL_INTERVAL_SECONDS = 0.75
+_HISTORICAL_CALL_TIMEOUT_SECONDS_DEFAULT = 25.0
+
+
+class BreezeHistoricalTimeoutError(RuntimeError):
+    """Raised when Breeze historical data call exceeds hard timeout."""
 
 
 def _min_hist_call_interval_seconds() -> float:
@@ -43,17 +48,67 @@ def _min_hist_call_interval_seconds() -> float:
     return max(0.0, v)
 
 
+def _historical_call_timeout_seconds() -> float:
+    raw = os.environ.get("BREEZE_HISTORICAL_CALL_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return _HISTORICAL_CALL_TIMEOUT_SECONDS_DEFAULT
+    try:
+        v = float(raw)
+    except ValueError:
+        return _HISTORICAL_CALL_TIMEOUT_SECONDS_DEFAULT
+    return max(0.0, v)
+
+
+def _call_historical_with_timeout(
+    breeze: BreezeConnect,
+    *,
+    timeout_seconds: float,
+    kwargs: dict[str, Any],
+) -> Any:
+    if timeout_seconds <= 0.0:
+        return breeze.get_historical_data(**kwargs)
+
+    result: dict[str, Any] = {}
+    error: dict[str, BaseException] = {}
+
+    def _invoke() -> None:
+        try:
+            result["value"] = breeze.get_historical_data(**kwargs)
+        except BaseException as exc:  # noqa: BLE001
+            error["exc"] = exc
+
+    # Daemon thread prevents a hung SDK call from blocking process shutdown.
+    t = threading.Thread(target=_invoke, daemon=True)
+    t.start()
+    t.join(timeout_seconds)
+    if t.is_alive():
+        raise BreezeHistoricalTimeoutError(
+            f"[Breeze] Historical data call timed out after {timeout_seconds:.1f}s"
+        )
+    if "exc" in error:
+        raise error["exc"]
+    return result.get("value")
+
+
 def _rate_limited_historical_call(breeze: BreezeConnect, **kwargs: Any) -> Any:
     global _LAST_HIST_CALL_AT
     interval = _min_hist_call_interval_seconds()
+    timeout_seconds = _historical_call_timeout_seconds()
+    wait = 0.0
     with _HIST_CALL_LOCK:
         now = time.monotonic()
-        wait = interval - (now - _LAST_HIST_CALL_AT)
-        if wait > 0:
-            time.sleep(wait)
-        raw = breeze.get_historical_data(**kwargs)
-        _LAST_HIST_CALL_AT = time.monotonic()
-    return raw
+        earliest = _LAST_HIST_CALL_AT + interval
+        scheduled = max(now, earliest)
+        wait = max(0.0, scheduled - now)
+        # Reserve this call slot before releasing lock so network call is never under lock.
+        _LAST_HIST_CALL_AT = scheduled
+    if wait > 0:
+        time.sleep(wait)
+    return _call_historical_with_timeout(
+        breeze,
+        timeout_seconds=timeout_seconds,
+        kwargs=kwargs,
+    )
 
 
 def create_breeze_session(config: _BreezeCredentials) -> BreezeConnect:
@@ -314,6 +369,8 @@ def fetch_equity_data(
                     return pd.DataFrame()
                 return pd.DataFrame(rows)
             except Exception as e:
+                if isinstance(e, BreezeHistoricalTimeoutError):
+                    raise RuntimeError(f"[Breeze] {label} historical fetch timeout") from e
                 last_err = e
                 logger.warning("Breeze fetch attempt %s for %s failed: %s", attempt + 1, label, e)
                 if attempt < max_retries:

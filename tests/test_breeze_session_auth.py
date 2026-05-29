@@ -4,6 +4,7 @@ from breeze_session_auth import (
     build_breeze_login_url,
     parse_api_session_from_input,
     upsert_env_var,
+    validate_breeze_session_token,
 )
 
 
@@ -39,3 +40,27 @@ def test_upsert_env_var(tmp_path):
     text = p.read_text(encoding="utf-8")
     assert "BREEZE_SESSION_TOKEN=newtok" in text
     assert "FOO=1" in text
+
+
+def test_validate_breeze_session_token_rejects_empty():
+    with pytest.raises(ValueError, match="required"):
+        validate_breeze_session_token("   ")
+
+
+def test_validate_breeze_session_token_rejects_wrapped_quotes():
+    with pytest.raises(ValueError, match="wrapped in quotes"):
+        validate_breeze_session_token('"abc1234567"')
+
+
+def test_validate_breeze_session_token_rejects_newline():
+    with pytest.raises(ValueError, match="single line"):
+        validate_breeze_session_token("abc\n1234567")
+
+
+def test_validate_breeze_session_token_rejects_short():
+    with pytest.raises(ValueError, match="too short"):
+        validate_breeze_session_token("1234567")
+
+
+def test_validate_breeze_session_token_accepts_valid():
+    assert validate_breeze_session_token("   abc1234567   ") == "abc1234567"
