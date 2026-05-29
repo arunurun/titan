@@ -5,7 +5,7 @@ const WORKFLOWS = {
   refreshRankings: "refresh_sector_rankings_weekly.yml",
 };
 const PROXY_BASE = "https://titan-proxy.arunjain-real.workers.dev";
-const SECTOR_OPTIONS = [
+const STATIC_SECTOR_OPTIONS = [
   "ai",
   "auto",
   "auto_ancillary",
@@ -31,6 +31,7 @@ const SECTOR_OPTIONS = [
   "telecom",
   "textiles",
 ];
+const EXCLUDED_DYNAMIC_SECTOR_IDS = new Set(["unknown", "non_equity"]);
 const RUN_MODES = new Set(["sector", "all_sectors", "custom"]);
 const TITAN_SCOPES = new Set(["full", "priority"]);
 /** Dispatched priority runs always use top 10 from sector_priority_rankings (single sector and all_sectors). */
@@ -86,7 +87,17 @@ function normalizeProxyBase(raw = PROXY_BASE) {
   parsed.search = "";
   parsed.hash = "";
   const parts = parsed.pathname.split("/").filter(Boolean);
-  const knownApiSuffixes = new Set(["health", "runs", "dispatch", "insights", "latest", "workflow-run", "github-run"]);
+  const knownApiSuffixes = new Set([
+    "health",
+    "runs",
+    "dispatch",
+    "insights",
+    "latest",
+    "workflow-run",
+    "github-run",
+    "sectors",
+    "active",
+  ]);
   while (parts.length && knownApiSuffixes.has(parts[parts.length - 1].toLowerCase())) {
     parts.pop();
   }
@@ -140,16 +151,73 @@ function setSectorModeUi(mode) {
 /** Matches Worker SECTOR_ID_RE for workflow + Supabase sector keys. */
 const SECTOR_INPUT_RE = /^[a-z0-9_]{1,64}$/;
 
-function initSectorOptions(selectId = "sectorId") {
+function buildSectorOptions(rawSectors) {
+  const source = Array.isArray(rawSectors) ? rawSectors : [];
+  const out = [];
+  const seen = new Set();
+  for (const sector of source) {
+    const sid = String(sector || "").trim().toLowerCase();
+    if (!sid || !SECTOR_INPUT_RE.test(sid) || EXCLUDED_DYNAMIC_SECTOR_IDS.has(sid)) continue;
+    if (seen.has(sid)) continue;
+    seen.add(sid);
+    out.push(sid);
+  }
+  return out;
+}
+
+function renderSectorOptions(selectId, sectorOptions, preferred = "defence") {
   const sectorEl = el(selectId);
-  if (!sectorEl) return;
+  if (!sectorEl) return false;
+  const available = buildSectorOptions(sectorOptions);
+  if (!available.length) return false;
+  const previous = String(sectorEl.value || "").trim().toLowerCase();
   sectorEl.innerHTML = "";
-  for (const sid of SECTOR_OPTIONS) {
+  for (const sid of available) {
     const opt = document.createElement("option");
     opt.value = sid;
     opt.textContent = sid;
-    if (sid === "defence") opt.selected = true;
     sectorEl.appendChild(opt);
+  }
+  const nextValue =
+    (previous && available.includes(previous) && previous) ||
+    (preferred && available.includes(preferred) && preferred) ||
+    available[0];
+  sectorEl.value = nextValue;
+  return true;
+}
+
+async function fetchActiveSectorsFromProxy() {
+  const data = await ghApi("/sectors/active");
+  if (!data || data.ok !== true || !Array.isArray(data.sectors)) {
+    throw new Error("Invalid /sectors/active response.");
+  }
+  const sectors = buildSectorOptions(data.sectors);
+  if (!sectors.length) {
+    throw new Error("Proxy returned empty sector list.");
+  }
+  return sectors;
+}
+
+function warnDynamicSectorFallback(selectId, reason) {
+  const msg = String(reason || "unknown error");
+  console.warn(`[Titan UI] Dynamic sector load failed for #${selectId}. Using static defaults.`, msg);
+  const current = String(statusEl?.textContent || "").trim();
+  if (
+    statusEl &&
+    (current === "" || current === "UI ready." || current === "Loading UI…" || current === "Loading…")
+  ) {
+    setStatus("UI ready.\nSector list fallback active (static defaults).");
+  }
+}
+
+async function initSectorOptions(selectId = "sectorId") {
+  const hasStatic = renderSectorOptions(selectId, STATIC_SECTOR_OPTIONS);
+  if (!hasStatic) return;
+  try {
+    const dynamicSectors = await fetchActiveSectorsFromProxy();
+    renderSectorOptions(selectId, dynamicSectors);
+  } catch (e) {
+    warnDynamicSectorFallback(selectId, e.message || e);
   }
 }
 
@@ -161,7 +229,7 @@ function classifyProxyError(status, responseText) {
   if (status === 404) {
     return (
       "404 from proxy endpoint.\n" +
-      "This URL does not expose Titan API routes (/health, /dispatch, /runs, /workflow-run/{id}, /insights/latest, /insights/github-run/{id}).\n" +
+      "This URL does not expose Titan API routes (/health, /dispatch, /runs, /workflow-run/{id}, /insights/latest, /insights/github-run/{id}, /sectors/active).\n" +
       "Use the backend Worker URL, not the UI page URL."
     );
   }
@@ -753,10 +821,10 @@ function initProxyLine() {
   }
 }
 
-function initInsightsPage() {
+async function initInsightsPage() {
   let lastWorkflowDetail = null;
   initProxyLine();
-  initSectorOptions("insightSectorId");
+  await initSectorOptions("insightSectorId");
   const params = new URLSearchParams(window.location.search || "");
   const qsSector = String(params.get("sector") || "").trim().toLowerCase();
   if (qsSector && SECTOR_INPUT_RE.test(qsSector)) {
@@ -919,7 +987,7 @@ function initInsightsPage() {
     });
   }
 
-  refreshRunList().catch((e) => {
+  await refreshRunList().catch((e) => {
     setStatus(`Could not load run list:\n${e.message}`);
   });
 }
@@ -1059,9 +1127,9 @@ function wireEvents() {
   }
 }
 
-function initStorage() {
+async function initStorage() {
   initProxyLine();
-  initSectorOptions("sectorId");
+  await initSectorOptions("sectorId");
   const runModeEl = el("runMode");
   if (runModeEl) {
     setSectorModeUi(runModeEl.value);
@@ -1072,10 +1140,14 @@ const UI_PAGE = document.body.getAttribute("data-page") || "control";
 
 try {
   if (UI_PAGE === "insights") {
-    initInsightsPage();
+    initInsightsPage().catch((e) => {
+      setStatus(`UI init failed:\n${e.message}`);
+    });
   } else {
     wireEvents();
-    initStorage();
+    initStorage().catch((e) => {
+      setStatus(`UI init failed:\n${e.message}`);
+    });
     setStatus("UI ready.");
   }
 } catch (e) {

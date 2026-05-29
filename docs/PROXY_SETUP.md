@@ -45,6 +45,7 @@ Then redeploy: `npx wrangler deploy`. In the UI, **Test connection** should show
 - After a digest run, open the Actions log and search for **`TITAN_LLM_DIGEST_MEMORY`** — you should see `persisted=True`.
 - **Test connection** in the UI shows **`llm_digest_memory rows (proxy)`** — should be ≥ 1 after a successful sector/custom digest.
 - The Worker exposes:
+  - **`GET /sectors/active`** — active sectors from `public.sector_catalog` for UI dropdowns (filters out `unknown` and `non_equity`).
   - **`GET /insights/latest?sector=<sector_id>`** — latest digest for that sector (no GitHub run filter).
   - **`GET /insights/github-run/<github_run_id>?sector=<sector_id>`** — digest for that workflow run and sector (`sector` required for `all_sectors` jobs).
 
@@ -69,7 +70,7 @@ Then redeploy: `npx wrangler deploy`. In the UI, **Test connection** should show
   - Cause: malformed `PROXY_BASE` value.
   - Fix: use full URL format like `https://your-worker.workers.dev`.
 
-The UI uses a hardcoded `PROXY_BASE` constant and no longer requires manual proxy URL entry.
+The UI uses a hardcoded `PROXY_BASE` constant and no longer requires manual proxy URL entry. It first tries loading sectors from `/sectors/active`; if that fails, it falls back to built-in static sector defaults and logs a warning.
 
 ## API contract used by UI
 
@@ -82,6 +83,9 @@ The UI uses a hardcoded `PROXY_BASE` constant and no longer requires manual prox
 - `GET /insights/latest?sector=<id>`
   - returns `{ "ok": true, "insight": null }` or `{ "ok": true, "insight": { "run_id", "sector", "recorded_at", "text" } }`
   - requires Worker secrets `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`
+- `GET /sectors/active`
+  - returns `{ "ok": true, "sectors": ["ai", ...], "count": <n> }`
+  - source: Supabase `public.sector_catalog` (`is_active=true`), excluding `unknown` and `non_equity`
 - `GET /insights/github-run/<numeric_github_run_id>?sector=<id>` (optional `sector` when workflow inputs already define it)
   - returns the same `insight` shape plus `github_run_number`, `workflow_mode`, and optional `note`
   - `400` with `code: "sector_required"` when the run is `all_sectors` and `sector` was not provided
