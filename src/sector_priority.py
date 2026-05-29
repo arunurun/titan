@@ -5,13 +5,17 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import re
 import urllib.parse
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
+import xml.etree.ElementTree as ET
 
 import pandas as pd
 from postgrest.exceptions import APIError
@@ -30,6 +34,105 @@ _MONEYCONTROL_SUGGEST_URL = (
     "https://www.moneycontrol.com/mccode/common/autosuggestion_solr.php?query={query}&type=1&format=json"
 )
 _SCREENER_SEARCH_URL = "https://www.screener.in/api/company/search/?q={query}"
+_DEFAULT_NEWS_FEEDS: tuple[str, ...] = (
+    "https://feeds.bbci.co.uk/news/world/rss.xml",
+    "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
+    "https://www.aljazeera.com/xml/rss/all.xml",
+)
+_NEWS_STALE_HOURS_DEFAULT = 36.0
+_NEWS_SNAPSHOT_TTL_HOURS_DEFAULT = 2.0
+_NEWS_FETCH_LIMIT_DEFAULT = 40
+_NEWS_BLEND_WEIGHT_DEFAULT = 3.5
+_NEWS_BLEND_CAP_DEFAULT = 3.0
+_NEWS_DRIVER_LIMIT_DEFAULT = 3
+_NEWS_SNAPSHOT_TABLE_DEFAULT = "global_news_snapshots"
+_SECTOR_THEME_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "ai": (
+        "artificial intelligence",
+        "ai chip",
+        "gpu",
+        "llm",
+        "machine learning",
+        "model training",
+        "semiconductor",
+    ),
+    "defence": (
+        "defence",
+        "defense",
+        "military",
+        "missile",
+        "aerospace",
+        "warship",
+        "procurement",
+        "border security",
+    ),
+    "data_centre": (
+        "data centre",
+        "data center",
+        "datacenter",
+        "cloud region",
+        "colocation",
+        "server farm",
+        "hyperscale",
+    ),
+    "electronics_ems": (
+        "electronics manufacturing",
+        "ems",
+        "contract manufacturing",
+        "pcb",
+        "assembly plant",
+    ),
+    "renewables_clean_energy": (
+        "solar",
+        "wind power",
+        "green hydrogen",
+        "renewable energy",
+        "battery storage",
+    ),
+    "railways_transport_infra": (
+        "railway",
+        "rolling stock",
+        "metro rail",
+        "freight corridor",
+        "transport infrastructure",
+    ),
+}
+_POSITIVE_NEWS_TERMS = {
+    "surge",
+    "expand",
+    "growth",
+    "wins",
+    "approval",
+    "record",
+    "upgrade",
+    "investment",
+    "funding",
+    "boost",
+}
+_NEGATIVE_NEWS_TERMS = {
+    "fall",
+    "drop",
+    "cuts",
+    "downgrade",
+    "probe",
+    "ban",
+    "risk",
+    "lawsuit",
+    "crisis",
+    "shortage",
+}
+_IMPACT_NEWS_TERMS = {
+    "tariff": 0.35,
+    "sanction": 0.45,
+    "policy": 0.25,
+    "regulation": 0.3,
+    "budget": 0.3,
+    "rate hike": 0.35,
+    "merger": 0.25,
+    "acquisition": 0.25,
+    "contract": 0.2,
+    "capex": 0.3,
+}
 
 
 def _safe_float(x: Any) -> float:
@@ -43,6 +146,510 @@ def _round_or_none(x: float, digits: int = 4) -> float | None:
     if math.isnan(x) or math.isinf(x):
         return None
     return round(x, digits)
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return min(high, max(low, value))
+
+
+def _news_fetch_limit() -> int:
+    raw = (str(os.environ.get("TITAN_NEWS_FETCH_LIMIT", "")) or "").strip()
+    if not raw:
+        return _NEWS_FETCH_LIMIT_DEFAULT
+    try:
+        return max(5, int(raw))
+    except ValueError:
+        return _NEWS_FETCH_LIMIT_DEFAULT
+
+
+def _news_max_age_hours() -> float:
+    raw = (str(os.environ.get("TITAN_NEWS_MAX_AGE_HOURS", "")) or "").strip()
+    if not raw:
+        return _NEWS_STALE_HOURS_DEFAULT
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        return _NEWS_STALE_HOURS_DEFAULT
+
+
+def _news_snapshot_ttl_hours() -> float:
+    raw = (str(os.environ.get("TITAN_NEWS_SNAPSHOT_TTL_HOURS", "")) or "").strip()
+    if not raw:
+        return _NEWS_SNAPSHOT_TTL_HOURS_DEFAULT
+    try:
+        return max(0.25, float(raw))
+    except ValueError:
+        return _NEWS_SNAPSHOT_TTL_HOURS_DEFAULT
+
+
+def _news_snapshot_table_name() -> str:
+    raw = (str(os.environ.get("TITAN_NEWS_SNAPSHOT_TABLE", "")) or "").strip()
+    if not raw:
+        return _NEWS_SNAPSHOT_TABLE_DEFAULT
+    return raw
+
+
+def _news_blend_weight() -> float:
+    raw = (str(os.environ.get("TITAN_NEWS_BLEND_WEIGHT", "")) or "").strip()
+    if not raw:
+        return _NEWS_BLEND_WEIGHT_DEFAULT
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return _NEWS_BLEND_WEIGHT_DEFAULT
+
+
+def _news_blend_cap() -> float:
+    raw = (str(os.environ.get("TITAN_NEWS_BLEND_CAP", "")) or "").strip()
+    if not raw:
+        return _NEWS_BLEND_CAP_DEFAULT
+    try:
+        return max(0.5, float(raw))
+    except ValueError:
+        return _NEWS_BLEND_CAP_DEFAULT
+
+
+def _news_driver_limit() -> int:
+    raw = (str(os.environ.get("TITAN_NEWS_DRIVER_LIMIT", "")) or "").strip()
+    if not raw:
+        return _NEWS_DRIVER_LIMIT_DEFAULT
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return _NEWS_DRIVER_LIMIT_DEFAULT
+
+
+def _configured_news_feeds() -> list[str]:
+    raw = (str(os.environ.get("TITAN_NEWS_FEEDS", "")) or "").strip()
+    if not raw:
+        return list(_DEFAULT_NEWS_FEEDS)
+    vals = [x.strip() for x in raw.split(",")]
+    return [x for x in vals if x]
+
+
+def _normalize_news_text(text: str) -> str:
+    t = re.sub(r"<[^>]+>", " ", str(text or ""))
+    t = re.sub(r"\s+", " ", t).strip().lower()
+    return t
+
+
+def _parse_news_timestamp(raw: str) -> datetime | None:
+    txt = str(raw or "").strip()
+    if not txt:
+        return None
+    try:
+        dt = parsedate_to_datetime(txt)
+        if dt is not None:
+            return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        pass
+    try:
+        dt = datetime.fromisoformat(txt.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _news_source_label(feed_url: str, channel_title: str | None) -> str:
+    c = str(channel_title or "").strip()
+    if c:
+        return c
+    host = urlparse(feed_url).netloc.strip().lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host or "unknown_source"
+
+
+def _parse_rss_feed_items(feed_url: str, raw: str) -> list[dict[str, Any]]:
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError:
+        return []
+    channel = root.find("./channel")
+    channel_title = channel.findtext("title") if channel is not None else None
+    source = _news_source_label(feed_url, channel_title)
+    out: list[dict[str, Any]] = []
+    rss_items = root.findall("./channel/item")
+    atom_items = root.findall(".//{http://www.w3.org/2005/Atom}entry")
+    if not rss_items and not atom_items:
+        atom_items = root.findall("./entry")
+    for item in rss_items:
+        title = str(item.findtext("title") or "").strip()
+        link = str(item.findtext("link") or "").strip()
+        description = str(item.findtext("description") or "").strip()
+        ts_raw = (
+            item.findtext("pubDate")
+            or item.findtext("published")
+            or item.findtext("updated")
+            or ""
+        )
+        ts = _parse_news_timestamp(ts_raw)
+        if not title or ts is None:
+            continue
+        out.append(
+            {
+                "title": title,
+                "url": link,
+                "summary": description,
+                "source": source,
+                "published_at": ts,
+            }
+        )
+    for item in atom_items:
+        title = str(item.findtext("{http://www.w3.org/2005/Atom}title") or item.findtext("title") or "").strip()
+        link = ""
+        atom_link = item.find("{http://www.w3.org/2005/Atom}link")
+        if atom_link is not None:
+            link = str(atom_link.attrib.get("href", "")).strip()
+        if not link:
+            legacy_link = item.find("link")
+            if legacy_link is not None:
+                link = str(legacy_link.attrib.get("href") or legacy_link.text or "").strip()
+        summary = str(
+            item.findtext("{http://www.w3.org/2005/Atom}summary")
+            or item.findtext("summary")
+            or item.findtext("{http://www.w3.org/2005/Atom}content")
+            or ""
+        ).strip()
+        ts_raw = (
+            item.findtext("{http://www.w3.org/2005/Atom}updated")
+            or item.findtext("{http://www.w3.org/2005/Atom}published")
+            or item.findtext("updated")
+            or item.findtext("published")
+            or ""
+        )
+        ts = _parse_news_timestamp(ts_raw)
+        if not title or ts is None:
+            continue
+        out.append(
+            {
+                "title": title,
+                "url": link,
+                "summary": summary,
+                "source": source,
+                "published_at": ts,
+            }
+        )
+    return out
+
+
+def fetch_latest_global_news(*, timeout_seconds: float = 12.0, now_utc: datetime | None = None) -> list[dict[str, Any]]:
+    now = now_utc or datetime.now(timezone.utc)
+    stale_cutoff = now - timedelta(hours=_news_max_age_hours())
+    max_items = _news_fetch_limit()
+    deduped: dict[str, dict[str, Any]] = {}
+    for feed in _configured_news_feeds():
+        raw, err = _http_get_text(feed, timeout_seconds=timeout_seconds)
+        if raw is None:
+            logger.info("Global news feed skipped url=%s reason=%s", feed, err)
+            continue
+        parsed = _parse_rss_feed_items(feed, raw)
+        for item in parsed:
+            ts = item.get("published_at")
+            if not isinstance(ts, datetime):
+                continue
+            if ts < stale_cutoff:
+                continue
+            title_key = _normalize_news_text(str(item.get("title", "")))
+            url_key = str(item.get("url", "")).strip().lower()
+            dedupe_key = f"{title_key}|{url_key}" if url_key else title_key
+            if not dedupe_key:
+                continue
+            existing = deduped.get(dedupe_key)
+            if existing is None or ts > existing.get("published_at", datetime.min.replace(tzinfo=timezone.utc)):
+                deduped[dedupe_key] = item
+    ordered = sorted(
+        deduped.values(),
+        key=lambda x: x.get("published_at", datetime.min.replace(tzinfo=timezone.utc)),
+        reverse=True,
+    )
+    out: list[dict[str, Any]] = []
+    for item in ordered[:max_items]:
+        out.append(
+            {
+                "title": str(item.get("title", "")).strip(),
+                "url": str(item.get("url", "")).strip(),
+                "summary": str(item.get("summary", "")).strip(),
+                "source": str(item.get("source", "unknown_source")).strip() or "unknown_source",
+                "published_at": item.get("published_at").isoformat(),
+            }
+        )
+    return out
+
+
+def _news_sentiment_score(text: str) -> float:
+    t = _normalize_news_text(text)
+    if not t:
+        return 0.0
+    pos_hits = sum(1 for k in _POSITIVE_NEWS_TERMS if k in t)
+    neg_hits = sum(1 for k in _NEGATIVE_NEWS_TERMS if k in t)
+    raw = (pos_hits - neg_hits) / max(2.0, pos_hits + neg_hits + 1.0)
+    return round(_clamp(raw, -1.0, 1.0), 4)
+
+
+def _news_impact_score(text: str) -> float:
+    t = _normalize_news_text(text)
+    base = 0.25
+    for term, delta in _IMPACT_NEWS_TERMS.items():
+        if term in t:
+            base += delta
+    if len(t) > 180:
+        base += 0.1
+    return round(_clamp(base, 0.05, 1.0), 4)
+
+
+def _news_confidence_score(item: dict[str, Any]) -> float:
+    source = str(item.get("source", "")).lower()
+    conf = 0.45
+    if source:
+        conf += 0.15
+    if str(item.get("url", "")).strip():
+        conf += 0.1
+    if "bbc" in source or "nyt" in source or "reuters" in source or "aljazeera" in source:
+        conf += 0.15
+    return round(_clamp(conf, 0.2, 1.0), 4)
+
+
+def _theme_hits_for_sector(text: str, sector_key: str) -> float:
+    terms = _SECTOR_THEME_KEYWORDS.get(sector_key.strip().lower(), ())
+    if not terms:
+        return 0.0
+    hits = sum(1 for t in terms if t in text)
+    if hits <= 0:
+        return 0.0
+    return round(min(2.0, 1.0 + (hits - 1) * 0.25), 4)
+
+
+def score_sector_news(news_items: list[dict[str, Any]], *, sector_key: str) -> dict[str, Any]:
+    drivers: list[dict[str, Any]] = []
+    contribution_total = 0.0
+    abs_weight_total = 0.0
+    sector = sector_key.strip().lower()
+    for item in news_items:
+        title = str(item.get("title", "")).strip()
+        summary = str(item.get("summary", "")).strip()
+        text = _normalize_news_text(f"{title} {summary}")
+        theme_weight = _theme_hits_for_sector(text, sector)
+        if theme_weight <= 0.0:
+            continue
+        sentiment = _news_sentiment_score(text)
+        impact = _news_impact_score(text)
+        confidence = _news_confidence_score(item)
+        contribution = theme_weight * sentiment * impact * confidence
+        abs_weight = theme_weight * impact
+        if contribution > 0.02:
+            direction = "tailwind"
+        elif contribution < -0.02:
+            direction = "headwind"
+        else:
+            direction = "neutral"
+        contribution_total += contribution
+        abs_weight_total += abs_weight
+        drivers.append(
+            {
+                "title": title,
+                "source": str(item.get("source", "")).strip() or "unknown_source",
+                "published_at": str(item.get("published_at", "")).strip(),
+                "sentiment": round(sentiment, 4),
+                "impact": round(impact, 4),
+                "confidence": round(confidence, 4),
+                "contribution": round(contribution, 4),
+                "url": str(item.get("url", "")).strip(),
+                "driver": title,
+                "affected_metric": "rank_score",
+                "affected_theme": sector,
+                "direction": direction,
+            }
+        )
+    normalized_score = 0.0 if abs_weight_total <= 0.0 else (contribution_total / abs_weight_total)
+    normalized_score = round(_clamp(normalized_score, -1.0, 1.0), 4)
+    drivers_sorted = sorted(drivers, key=lambda d: abs(_safe_float(d.get("contribution"))), reverse=True)
+    limit = _news_driver_limit()
+    top = drivers_sorted[:limit]
+    boosts = [d for d in top if _safe_float(d.get("contribution")) > 0]
+    drags = [d for d in top if _safe_float(d.get("contribution")) < 0]
+    conf = 0.0
+    if top:
+        conf = sum(max(0.0, _safe_float(d.get("confidence"))) for d in top) / len(top)
+    return {
+        "sector_key": sector,
+        "score": normalized_score,
+        "confidence": round(_clamp(conf, 0.0, 1.0), 4),
+        "drivers_top": top,
+        "drivers_boosting": boosts,
+        "drivers_dragging": drags,
+        "matched_items": len(drivers),
+    }
+
+
+def map_news_to_sector_scores(news_items: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for sector_key in sorted(_SECTOR_THEME_KEYWORDS.keys()):
+        out[sector_key] = score_sector_news(news_items, sector_key=sector_key)
+    return out
+
+
+def _news_blend_points(sector_news_score: float) -> float:
+    points = sector_news_score * _news_blend_weight()
+    return round(_clamp(points, -_news_blend_cap(), _news_blend_cap()), 4)
+
+
+def _to_utc_datetime(raw: Any) -> datetime | None:
+    txt = str(raw or "").strip()
+    if not txt:
+        return None
+    try:
+        dt = datetime.fromisoformat(txt.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _load_latest_news_snapshot(cfg: TitanConfig) -> dict[str, Any] | None:
+    client = create_client(cfg.supabase_url, cfg.supabase_key)
+    table_name = _news_snapshot_table_name()
+    try:
+        res = (
+            client.table(table_name)
+            .select("refreshed_at,item_count,fetch_status,refresh_error,news_items,sector_scores")
+            .order("refreshed_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+    except APIError as e:
+        payload = e.args[0] if e.args else {}
+        msg = payload.get("message", str(e)) if isinstance(payload, dict) else str(e)
+        logger.info("Global news snapshot read skipped (table missing or unavailable): %s", msg)
+        return None
+    except Exception as exc:
+        logger.info("Global news snapshot read skipped: %s", exc)
+        return None
+    rows = list(getattr(res, "data", None) or [])
+    if not rows or not isinstance(rows[0], dict):
+        return None
+    row = rows[0]
+    refreshed_at = _to_utc_datetime(row.get("refreshed_at"))
+    if refreshed_at is None:
+        return None
+    news_items = row.get("news_items")
+    if not isinstance(news_items, list):
+        news_items = []
+    sector_scores = row.get("sector_scores")
+    if not isinstance(sector_scores, dict):
+        sector_scores = map_news_to_sector_scores(news_items)
+    return {
+        "refreshed_at": refreshed_at.isoformat(),
+        "item_count": int(row.get("item_count") or len(news_items)),
+        "fetch_status": str(row.get("fetch_status") or "ok"),
+        "refresh_error": str(row.get("refresh_error") or "").strip(),
+        "news_items": news_items,
+        "sector_scores": sector_scores,
+    }
+
+
+def refresh_global_news_snapshot(
+    cfg: TitanConfig,
+    *,
+    timeout_seconds: float = 12.0,
+    now_utc: datetime | None = None,
+) -> dict[str, Any]:
+    now = now_utc or datetime.now(timezone.utc)
+    # Keep call signature stable for tests that monkeypatch fetch_latest_global_news without kwargs.
+    news_items = fetch_latest_global_news()
+    sector_scores = map_news_to_sector_scores(news_items)
+    row = {
+        "refreshed_at": now.isoformat(),
+        "item_count": int(len(news_items)),
+        "fetch_status": "ok" if news_items else "empty",
+        "refresh_error": "",
+        "news_items": news_items,
+        "sector_scores": sector_scores,
+    }
+    persisted = False
+    persist_reason = "disabled"
+    table_name = _news_snapshot_table_name()
+    try:
+        client = create_client(cfg.supabase_url, cfg.supabase_key)
+        client.table(table_name).insert(row).execute()
+        persisted = True
+        persist_reason = "ok"
+    except APIError as e:
+        payload = e.args[0] if e.args else {}
+        msg = payload.get("message", str(e)) if isinstance(payload, dict) else str(e)
+        persist_reason = "missing_table" if "could not find the table" in msg.lower() else "api_error"
+        logger.info("Global news snapshot persist skipped (%s): %s", persist_reason, msg)
+    except Exception as exc:
+        persist_reason = "unexpected"
+        logger.info("Global news snapshot persist skipped: %s", exc)
+    return {
+        "source": "refreshed",
+        "refreshed_at": row["refreshed_at"],
+        "item_count": row["item_count"],
+        "fetch_status": row["fetch_status"],
+        "refresh_error": row["refresh_error"],
+        "ttl_hours": _news_snapshot_ttl_hours(),
+        "age_minutes": 0.0,
+        "fresh": True,
+        "persisted": persisted,
+        "persist_reason": persist_reason,
+        "news_items": news_items,
+        "sector_scores": sector_scores,
+    }
+
+
+def resolve_global_news_snapshot(
+    cfg: TitanConfig,
+    *,
+    force_refresh: bool = False,
+    now_utc: datetime | None = None,
+) -> dict[str, Any]:
+    now = now_utc or datetime.now(timezone.utc)
+    ttl_hours = _news_snapshot_ttl_hours()
+    cached = _load_latest_news_snapshot(cfg)
+    if cached:
+        ref_dt = _to_utc_datetime(cached.get("refreshed_at"))
+        age_minutes = (
+            max(0.0, (now - ref_dt).total_seconds() / 60.0)
+            if isinstance(ref_dt, datetime)
+            else float("inf")
+        )
+        cached_out = {
+            "source": "cached",
+            "ttl_hours": ttl_hours,
+            "age_minutes": round(age_minutes, 3),
+            "fresh": bool(age_minutes <= (ttl_hours * 60.0)),
+            **cached,
+        }
+        if cached_out["fresh"] and not force_refresh:
+            return cached_out
+    else:
+        cached_out = None
+    try:
+        refreshed = refresh_global_news_snapshot(cfg, now_utc=now)
+        refreshed["fresh"] = True
+        refreshed["age_minutes"] = 0.0
+        return refreshed
+    except Exception as exc:
+        logger.warning("Global news refresh failed; attempting stale fallback: %s", exc)
+        if cached_out:
+            cached_out["source"] = "stale_fallback"
+            cached_out["fresh"] = False
+            cached_out["refresh_error"] = str(exc)
+            return cached_out
+        return {
+            "source": "unavailable",
+            "ttl_hours": ttl_hours,
+            "age_minutes": float("inf"),
+            "fresh": False,
+            "refreshed_at": None,
+            "item_count": 0,
+            "fetch_status": "error",
+            "refresh_error": str(exc),
+            "persisted": False,
+            "persist_reason": "not_attempted",
+            "news_items": [],
+            "sector_scores": {},
+        }
 
 
 def _bucket_from_market_cap_cr(market_cap_inr_cr: float | None) -> str:
@@ -328,6 +935,28 @@ def build_sector_rankings(
     breeze = create_breeze_session(cfg)
     as_of_date = datetime.now(IST).date().isoformat()
     prev_caps = _load_previous_market_caps(cfg, sector_key=sector_key)
+    snapshot = resolve_global_news_snapshot(cfg)
+    global_news = snapshot.get("news_items") if isinstance(snapshot.get("news_items"), list) else []
+    sector_news_scores = (
+        snapshot.get("sector_scores")
+        if isinstance(snapshot.get("sector_scores"), dict)
+        else map_news_to_sector_scores(global_news)
+    )
+    sector_news = sector_news_scores.get(
+        sector_key.strip().lower(),
+        {
+            "score": 0.0,
+            "confidence": 0.0,
+            "drivers_top": [],
+            "drivers_boosting": [],
+            "drivers_dragging": [],
+            "matched_items": 0,
+        },
+    )
+    sector_news_score = _safe_float(sector_news.get("score"))
+    if math.isnan(sector_news_score):
+        sector_news_score = 0.0
+    blend_points = _news_blend_points(sector_news_score)
     rows: list[dict[str, Any]] = []
     for inst in instruments:
         issues: list[str] = []
@@ -372,12 +1001,38 @@ def build_sector_rankings(
             issues.append("return_1m_missing")
         if math.isnan(absorption):
             issues.append("absorption_missing")
-        score = _score_from_features(
+        base_score = _score_from_features(
             bucket=bucket,
             ret_1w=ret_1w,
             ret_1m=ret_1m,
             absorption=absorption,
         )
+        score = round(base_score + blend_points, 4)
+        news_meta: dict[str, Any] = {
+            "fetched_count": len(global_news),
+            "snapshot_source": snapshot.get("source"),
+            "snapshot_refreshed_at": snapshot.get("refreshed_at"),
+            "snapshot_ttl_hours": snapshot.get("ttl_hours"),
+            "snapshot_age_minutes": snapshot.get("age_minutes"),
+            "snapshot_is_fresh": bool(snapshot.get("fresh")),
+            "snapshot_fetch_status": snapshot.get("fetch_status"),
+            "snapshot_refresh_error": snapshot.get("refresh_error"),
+            "matched_items": int(sector_news.get("matched_items") or 0),
+            "sector_news_score": round(sector_news_score, 4),
+            "blend_points": blend_points,
+            "blend_weight": _news_blend_weight(),
+            "blend_cap": _news_blend_cap(),
+            "confidence": round(_safe_float(sector_news.get("confidence")), 4),
+            "drivers_boosting": sector_news.get("drivers_boosting") or [],
+            "drivers_dragging": sector_news.get("drivers_dragging") or [],
+            "drivers_top": sector_news.get("drivers_top") or [],
+        }
+        if not global_news:
+            news_meta["reason"] = "news_unavailable"
+        elif int(sector_news.get("matched_items") or 0) <= 0:
+            news_meta["reason"] = "no_sector_news_match"
+        if snapshot.get("source") == "stale_fallback":
+            news_meta["reason"] = "stale_snapshot_fallback"
         rows.append(
             {
                 "sector_key": sector_key,
@@ -394,6 +1049,8 @@ def build_sector_rankings(
                     "market_cap_source": market_cap_source,
                     "rows_count": int(len(df)),
                     "issues": sorted(set(issues)),
+                    "technical_rank_score": base_score,
+                    "news": news_meta,
                 },
             }
         )
@@ -527,12 +1184,17 @@ def persist_daily_winners(
                     "return_1w_pct": row.get("return_1w_pct"),
                     "return_1m_pct": row.get("return_1m_pct"),
                     "absorption_ratio": row.get("absorption_ratio"),
+                    "technical_rank_score": meta.get("technical_rank_score"),
+                    "news_sector_score": ((meta.get("news") or {}).get("sector_news_score")),
+                    "news_blend_points": ((meta.get("news") or {}).get("blend_points")),
                 },
                 "issue_flags": issues,
                 "source_meta": {
                     "market_cap_source": meta.get("market_cap_source"),
                     "rows_count": meta.get("rows_count"),
                     "rank_in_sector": row.get("rank_in_sector"),
+                    "news_drivers_boosting": ((meta.get("news") or {}).get("drivers_boosting", []))[:3],
+                    "news_drivers_dragging": ((meta.get("news") or {}).get("drivers_dragging", []))[:3],
                 },
             }
         )

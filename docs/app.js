@@ -86,7 +86,18 @@ function normalizeProxyBase(raw = PROXY_BASE) {
   parsed.search = "";
   parsed.hash = "";
   const parts = parsed.pathname.split("/").filter(Boolean);
-  const knownApiSuffixes = new Set(["health", "runs", "dispatch", "insights", "latest", "workflow-run", "github-run"]);
+  const knownApiSuffixes = new Set([
+    "health",
+    "runs",
+    "dispatch",
+    "insights",
+    "latest",
+    "workflow-run",
+    "github-run",
+    "news",
+    "status",
+    "refresh",
+  ]);
   while (parts.length && knownApiSuffixes.has(parts[parts.length - 1].toLowerCase())) {
     parts.pop();
   }
@@ -161,7 +172,7 @@ function classifyProxyError(status, responseText) {
   if (status === 404) {
     return (
       "404 from proxy endpoint.\n" +
-      "This URL does not expose Titan API routes (/health, /dispatch, /runs, /workflow-run/{id}, /insights/latest, /insights/github-run/{id}).\n" +
+      "This URL does not expose Titan API routes (/health, /dispatch, /runs, /workflow-run/{id}, /insights/latest, /insights/github-run/{id}, /news/status, /news/refresh).\n" +
       "Use the backend Worker URL, not the UI page URL."
     );
   }
@@ -236,6 +247,43 @@ async function dispatchWorkflow(filename, inputs = {}, statusSuffix = "") {
   await ghApi("/dispatch", "POST", { workflow: filename, ref: "main", inputs });
   const extra = statusSuffix ? `\n\n${statusSuffix}` : "";
   setStatus(`Dispatched ${filename} successfully.${extra}`);
+}
+
+function renderGlobalNewsFreshness(statusPayload) {
+  const host = el("globalNewsFreshness");
+  if (!host) return;
+  const ttl = Number(statusPayload?.ttl_hours || 2);
+  const age = statusPayload?.age_minutes;
+  const snap = statusPayload?.snapshot || null;
+  const fresh = statusPayload?.fresh === true;
+  if (!snap) {
+    host.textContent = `Global news snapshot: none found yet (TTL ${ttl}h). Tap "Refresh Global News".`;
+    return;
+  }
+  const ageTxt = Number.isFinite(Number(age)) ? `${Number(age).toFixed(1)} min` : "n/a";
+  const refreshed = snap.refreshed_at || "n/a";
+  const status = snap.fetch_status || "unknown";
+  host.textContent =
+    `Global news snapshot: ${fresh ? "fresh" : "stale"} | age ${ageTxt} | refreshed ${refreshed} | ` +
+    `items ${snap.item_count ?? "?"} | status ${status}`;
+}
+
+async function fetchGlobalNewsStatus() {
+  const data = await ghApi("/news/status");
+  if (!data || data.ok !== true) {
+    throw new Error("Unexpected response from /news/status.");
+  }
+  renderGlobalNewsFreshness(data);
+  return data;
+}
+
+async function refreshGlobalNewsSnapshot() {
+  const data = await ghApi("/news/refresh", "POST", {});
+  if (!data || data.ok !== true) {
+    throw new Error("Unexpected response from /news/refresh.");
+  }
+  const status = await fetchGlobalNewsStatus();
+  return { refresh: data, status };
 }
 
 function parseCustomSymbols(raw) {
@@ -965,6 +1013,17 @@ function wireEvents() {
         const modeLabel = inputs.mode === "custom" ? "custom symbol analysis" : `${inputs.mode} analysis`;
         setWorking(`Dispatch Run Titan (${modeLabel})`);
         await checkConnection();
+        let freshnessNote = "";
+        try {
+          const news = await fetchGlobalNewsStatus();
+          if (news && news.fresh !== true) {
+            freshnessNote =
+              "Global news snapshot is stale; ranking path will attempt refresh and gracefully fallback if feeds fail.";
+          }
+        } catch (_e) {
+          freshnessNote =
+            "Could not read global-news freshness; run pipeline will attempt refresh/fallback automatically.";
+        }
         let suffix = "";
         if (inputs.mode === "sector") {
           suffix = `When the GitHub Action completes, open **Past runs & insights** and load that run’s digest.`;
@@ -974,9 +1033,29 @@ function wireEvents() {
           suffix =
             "When the job completes, open **Past runs & insights**, pick the run, choose a sector, then load digest.";
         }
+        if (freshnessNote) {
+          suffix = suffix ? `${suffix}\n${freshnessNote}` : freshnessNote;
+        }
         await dispatchWorkflow(WORKFLOWS.runTitan, inputs, suffix);
       } catch (e) {
         setStatus(`Run Titan dispatch failed:\n${e.message}`);
+      }
+    });
+  }
+
+  const refreshGlobalNewsBtn = el("refreshGlobalNewsBtn");
+  if (refreshGlobalNewsBtn) {
+    refreshGlobalNewsBtn.addEventListener("click", async () => {
+      try {
+        setWorking("Refresh global news snapshot");
+        const out = await refreshGlobalNewsSnapshot();
+        setStatus(
+          `Global news refreshed.\nRefreshed at: ${out.refresh.refreshed_at || "n/a"}\n` +
+            `Fetched items: ${out.refresh.item_count ?? "?"}\n` +
+            `Fresh now: ${out.status.fresh === true ? "yes" : "no"}`,
+        );
+      } catch (e) {
+        setStatus(`Global news refresh failed:\n${e.message}`);
       }
     });
   }
@@ -1066,6 +1145,12 @@ function initStorage() {
   if (runModeEl) {
     setSectorModeUi(runModeEl.value);
   }
+  fetchGlobalNewsStatus().catch((e) => {
+    const host = el("globalNewsFreshness");
+    if (host) {
+      host.textContent = `Global news snapshot status unavailable: ${e.message}`;
+    }
+  });
 }
 
 const UI_PAGE = document.body.getAttribute("data-page") || "control";

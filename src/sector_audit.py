@@ -6,6 +6,8 @@ import logging
 import math
 import os
 import threading
+import time
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from statistics import median
@@ -48,6 +50,8 @@ ABSORPTION_CAP_MIN_HISTORY = PARTICIPATION_CAP_MIN_HISTORY
 ABSORPTION_CAP_LOOKBACK = PARTICIPATION_CAP_LOOKBACK
 ABSORPTION_CAP_PERCENTILE = PARTICIPATION_CAP_PERCENTILE
 ABSORPTION_CAP_MAX = PARTICIPATION_CAP_MAX
+_SECTOR_HEARTBEAT_SECONDS_DEFAULT = 30.0
+_SECTOR_NO_PROGRESS_TIMEOUT_SECONDS_DEFAULT = 180.0
 
 
 def _fmt_metric(x: Any, digits: int = 2) -> str:
@@ -272,6 +276,51 @@ def _prediction_brief_line(audit: dict[str, Any]) -> str:
     return " · ".join(parts)
 
 
+def _infer_news_affected_metric(audit: dict[str, Any]) -> str:
+    breakdown = audit.get("prediction_breakdown")
+    if not isinstance(breakdown, dict):
+        return "technical intent"
+    week = breakdown.get("week", {}) if isinstance(breakdown.get("week"), dict) else {}
+    candidates = [
+        ("trend", abs(_safe_float(week.get("ema_term")))),
+        ("momentum 1D", abs(_safe_float(week.get("ret1d_term")))),
+        ("momentum 5D", abs(_safe_float(week.get("ret5d_term")))),
+        ("benchmark relative 5D", abs(_safe_float(week.get("rel5_term")))),
+        ("volatility", abs(_safe_float(week.get("atr_penalty")))),
+        ("tape blend", abs(_safe_float(week.get("tech_composite_term")))),
+    ]
+    ranked = [(name, v) for name, v in candidates if not math.isnan(v)]
+    if not ranked:
+        return "technical intent"
+    ranked.sort(key=lambda x: x[1], reverse=True)
+    return ranked[0][0]
+
+
+def _news_correlation_line(audit: dict[str, Any]) -> str:
+    corr = audit.get("news_correlation")
+    if not isinstance(corr, dict):
+        return ""
+    driver = str(corr.get("driver") or "").strip()
+    metric = str(corr.get("affected_metric") or "").strip()
+    theme = str(corr.get("affected_theme") or "").strip()
+    direction = str(corr.get("direction") or "").strip().lower()
+    conf = _safe_float(corr.get("confidence"))
+    if not driver or not metric:
+        return ""
+    if direction == "tailwind":
+        dir_label = "tailwind"
+    elif direction == "headwind":
+        dir_label = "headwind"
+    else:
+        dir_label = "neutral"
+    conf_txt = _fmt_metric(conf) if not math.isnan(conf) else "n/a"
+    theme_txt = theme if theme else "global macro"
+    return (
+        f"Global news relation: driver={driver} · theme={theme_txt} · "
+        f"affected_metric={metric} · direction={dir_label} · confidence={conf_txt}"
+    )
+
+
 def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     symbol = result["symbol"]
     exchange = result["exchange"]
@@ -363,6 +412,10 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     pred = _prediction_brief_line(audit)
     if pred:
         lines_out.append(pred)
+
+    news_rel = _news_correlation_line(audit)
+    if news_rel:
+        lines_out.append(news_rel)
 
     flag_simple = _digest_flags_simple(audit)
     if flag_simple:
@@ -457,9 +510,11 @@ def _format_symbol_metrics_line_verbose(result: dict[str, Any]) -> str:
     sell_reason_text = (
         f" ({'; '.join(str(x) for x in sell_reasons[:2])})" if sell_reasons else ""
     )
+    news_rel = _news_correlation_line(audit)
     return (
         f"{base} | support={support_tag} | fundamentals={fundamental_text} "
         f"| sellReason={sell_signal}{sell_reason_text} | {_prediction_reason_text(audit)}"
+        + (f" | {news_rel}" if news_rel else "")
     )
 
 
@@ -579,11 +634,36 @@ def _classify_error_code(error: Any) -> str:
     msg = str(error or "").lower()
     if _is_skipped_no_data_error(msg):
         return "no_data_skipped"
+    if "historical fetch timeout" in msg:
+        return "data_fetch_timeout"
+    if "no-progress watchdog timeout" in msg:
+        return "sector_no_progress_watchdog"
     if "historical fetch failed after retries" in msg:
         return "data_fetch_failed"
     if "session token expired" in msg or "auth/permission" in msg:
         return "auth_or_session"
     return "runtime_error"
+
+
+def _sector_heartbeat_seconds() -> float:
+    raw = (os.environ.get("TITAN_SECTOR_HEARTBEAT_SECONDS") or "").strip()
+    if not raw:
+        return _SECTOR_HEARTBEAT_SECONDS_DEFAULT
+    try:
+        return max(5.0, float(raw))
+    except ValueError:
+        return _SECTOR_HEARTBEAT_SECONDS_DEFAULT
+
+
+def _sector_no_progress_timeout_seconds() -> float:
+    raw = (os.environ.get("TITAN_SECTOR_NO_PROGRESS_TIMEOUT_SECONDS") or "").strip()
+    if not raw:
+        return _SECTOR_NO_PROGRESS_TIMEOUT_SECONDS_DEFAULT
+    try:
+        # Keep sane lower-bound to avoid false positives on normal API jitter.
+        return max(20.0, float(raw))
+    except ValueError:
+        return _SECTOR_NO_PROGRESS_TIMEOUT_SECONDS_DEFAULT
 
 
 def _normalize_participation_for_scoring(participation_raw: float) -> float:
@@ -1046,6 +1126,64 @@ def _apply_event_guardrails(ok_results: list[dict[str, Any]]) -> int:
         a["event_guardrail_applied"] = True
         adjusted += 1
     return adjusted
+
+
+def _apply_global_news_correlation(
+    cfg: TitanConfig,
+    *,
+    sector_id: str,
+    ok_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    try:
+        from sector_priority import resolve_global_news_snapshot
+    except Exception:
+        return {"applied": False, "reason": "news_module_unavailable"}
+    snapshot = resolve_global_news_snapshot(cfg)
+    scores = snapshot.get("sector_scores")
+    if not isinstance(scores, dict):
+        return {"applied": False, "reason": "news_scores_unavailable", "snapshot": snapshot}
+    sector_news = scores.get(str(sector_id).strip().lower())
+    if not isinstance(sector_news, dict):
+        return {"applied": False, "reason": "sector_news_missing", "snapshot": snapshot}
+    score = _safe_float(sector_news.get("score"))
+    confidence = _safe_float(sector_news.get("confidence"))
+    drivers = sector_news.get("drivers_top")
+    top_driver = drivers[0] if isinstance(drivers, list) and drivers else {}
+    if not isinstance(top_driver, dict):
+        top_driver = {}
+    if math.isnan(score):
+        score = 0.0
+    if score > 0.02:
+        direction = "tailwind"
+    elif score < -0.02:
+        direction = "headwind"
+    else:
+        direction = "neutral"
+    driver_text = str(top_driver.get("driver") or top_driver.get("title") or "").strip()
+    if not driver_text:
+        driver_text = "Global macro flow"
+    source = str(top_driver.get("source") or "").strip()
+    if source:
+        driver_text = f"{driver_text} ({source})"
+    applied = 0
+    for r in ok_results:
+        audit = r.get("audit")
+        if not isinstance(audit, dict):
+            continue
+        audit["news_correlation"] = {
+            "driver": driver_text,
+            "affected_metric": _infer_news_affected_metric(audit),
+            "affected_theme": str(sector_id).strip().lower(),
+            "direction": direction,
+            "confidence": None if math.isnan(confidence) else round(confidence, 4),
+        }
+        applied += 1
+    return {
+        "applied": bool(applied),
+        "applied_count": applied,
+        "snapshot": snapshot,
+        "sector_news_score": round(score, 4),
+    }
 
 
 def _liquidity_floor_inr() -> float:
@@ -1648,18 +1786,79 @@ def run_sector_live(
 
     results: list[dict[str, Any]] = []
     worker = _process_one_metrics if digest else _process_one
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    heartbeat_seconds = _sector_heartbeat_seconds()
+    no_progress_timeout_seconds = max(
+        heartbeat_seconds,
+        _sector_no_progress_timeout_seconds(),
+    )
+    watchdog_triggered = False
+
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
         future_map = {
             pool.submit(worker, cfg, sector_id, inst, event_snapshot=event_snapshot): inst
             for inst in instruments
         }
-        for fut in as_completed(future_map):
+        pending = set(future_map.keys())
+        completed = 0
+        last_progress_at = time.monotonic()
+        last_heartbeat_at = 0.0
+        while pending:
+            now = time.monotonic()
+            if (now - last_heartbeat_at) >= heartbeat_seconds:
+                pending_preview = ", ".join(
+                    f"{future_map[f].symbol}:{future_map[f].exchange}"
+                    for f in list(pending)[:5]
+                ) or "none"
+                logger.info(
+                    "[Sector] Heartbeat sector=%s done=%s pending=%s no_progress_for=%.1fs "
+                    "workers=%s digest=%s pending_preview=%s",
+                    sector_id,
+                    completed,
+                    len(pending),
+                    now - last_progress_at,
+                    workers,
+                    digest,
+                    pending_preview,
+                )
+                last_heartbeat_at = now
+            try:
+                fut = next(as_completed(pending, timeout=heartbeat_seconds))
+            except FutureTimeoutError:
+                since_progress = time.monotonic() - last_progress_at
+                if since_progress < no_progress_timeout_seconds:
+                    continue
+                watchdog_triggered = True
+                msg = (
+                    f"[Sector] no-progress watchdog timeout after {since_progress:.1f}s "
+                    f"(threshold={no_progress_timeout_seconds:.1f}s)"
+                )
+                logger.error("%s; aborting %s pending futures", msg, len(pending))
+                for pf in list(pending):
+                    inst = future_map[pf]
+                    pf.cancel()
+                    err_row: dict[str, Any] = {
+                        "ok": False,
+                        "symbol": inst.symbol,
+                        "exchange": inst.exchange,
+                        "error": msg,
+                        "error_code": "sector_no_progress_watchdog",
+                    }
+                    if digest:
+                        err_row["audit"] = None
+                    else:
+                        err_row["post"] = ""
+                    results.append(err_row)
+                pending.clear()
+                break
+
+            pending.discard(fut)
             inst = future_map[fut]
             try:
                 results.append(fut.result())
             except Exception as e:
                 logger.exception("Sector instrument failed: %s %s", inst.symbol, inst.exchange)
-                err_row: dict[str, Any] = {
+                err_row = {
                     "ok": False,
                     "symbol": inst.symbol,
                     "exchange": inst.exchange,
@@ -1671,6 +1870,10 @@ def run_sector_live(
                 else:
                     err_row["post"] = ""
                 results.append(err_row)
+            completed += 1
+            last_progress_at = time.monotonic()
+    finally:
+        pool.shutdown(wait=not watchdog_triggered, cancel_futures=watchdog_triggered)
 
     if hasattr(_THREAD_LOCAL, "sector_benchmark_ohlc"):
         delattr(_THREAD_LOCAL, "sector_benchmark_ohlc")
@@ -1701,6 +1904,7 @@ def run_sector_live(
         for r in ok_results:
             _refresh_symbol_scoring_outputs(r["audit"])
         _apply_sector_cross_section(ok_results, score_percentiles=True)
+        news_corr_meta = _apply_global_news_correlation(cfg, sector_id=sector_id, ok_results=ok_results)
         quality_gate = _prediction_quality_gate(ok_results, total_count=len(results))
         audits = [r["audit"] for r in ok_results]
         persist_meta = persist_sector_run_analytics(
@@ -1761,6 +1965,17 @@ def run_sector_live(
             f"vs 30d {_fmt_metric(dlt.get('avg_effective_intent_vs_30d') if isinstance(dlt, dict) else None)})",
             f"Breadth above EMA200: {_fmt_metric(today.get('breadth_above_ema200_pct') if isinstance(today, dict) else None)}%",
             f"Volume participation breadth (VPR>1): {_fmt_metric(today.get('pct_absorption_gt_1') if isinstance(today, dict) else None)}%",
+            (
+                "Global news snapshot: "
+                f"{str((news_corr_meta.get('snapshot') or {}).get('source') or 'n/a')} | "
+                f"fresh={bool((news_corr_meta.get('snapshot') or {}).get('fresh'))} | "
+                f"age_min={_fmt_metric((news_corr_meta.get('snapshot') or {}).get('age_minutes'))} | "
+                f"refreshed={str((news_corr_meta.get('snapshot') or {}).get('refreshed_at') or 'n/a')}"
+            ),
+            (
+                f"Global news score ({sector_id}): {_fmt_metric(news_corr_meta.get('sector_news_score'))} "
+                f"| correlation_applied={news_corr_meta.get('applied_count', 0)} symbols"
+            ),
             "",
             "--- Movement summary ---",
         ]

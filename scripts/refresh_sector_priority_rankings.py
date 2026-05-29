@@ -36,6 +36,7 @@ def main() -> int:
         instruments=instruments,
         top_n=max(1, int(args.top_n)),
     )
+    sector_news = (((rows[0].get("meta") or {}).get("news")) if rows else {}) or {}
     persisted = persist_sector_rankings(cfg, rows)
     top = [r for r in rows if r.get("is_priority")]
     issue_counts: dict[str, int] = {}
@@ -63,6 +64,14 @@ def main() -> int:
         "rows": len(rows),
         "priority_count": len(top),
         "top_symbols": [f"{r['symbol']}({r['exchange']})" for r in top[: args.top_n]],
+        "sector_news": {
+            "sector_news_score": sector_news.get("sector_news_score"),
+            "blend_points": sector_news.get("blend_points"),
+            "confidence": sector_news.get("confidence"),
+            "drivers_boosting": sector_news.get("drivers_boosting", [])[:3],
+            "drivers_dragging": sector_news.get("drivers_dragging", [])[:3],
+            "reason": sector_news.get("reason"),
+        },
         "persist": persisted,
         "issue_summary": issue_counts,
         "issue_samples": issue_samples,

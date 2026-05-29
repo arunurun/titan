@@ -267,11 +267,12 @@ def test_portfolio_email_digest_includes_sizing_tape_and_multi_drivers():
     )
     assert "Risk = Titan risk points" in body
     assert "Tape |" in body
+    assert "TechIntent | 1W |" in body
     assert "Curr ₹" in body
     lines = [ln for ln in body.splitlines() if ln.startswith("ALPHA ") or ln.startswith("BETA ")]
     assert len(lines) == 2
     assert "EXIT RISK" in lines[0]
-    assert "1d -12.3%" in lines[0] and "z -1.25" in lines[0]
+    assert "1D move -12.3%" in lines[0] and "z-score -1.25" in lines[0]
     assert "8.8" in lines[0]  # risk score 8.75 → one decimal
     assert "nextWeek weak" in lines[0] and "1d return weak" in lines[0]
     assert "| 50.0% |" in lines[0] or lines[0].count("50.0") >= 1  # book weight shares

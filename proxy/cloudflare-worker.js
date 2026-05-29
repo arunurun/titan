@@ -22,9 +22,342 @@ const TITAN_SCOPES = new Set(["full", "priority"]);
 const ALLOWED_EXCHANGES = new Set(["NSE", "BSE"]);
 const SYMBOL_RE = /^[A-Z0-9&._-]{1,25}$/;
 const SECTOR_ID_RE = /^[a-z0-9_]{1,64}$/;
+const NEWS_FETCH_LIMIT_DEFAULT = 40;
+const NEWS_MAX_AGE_HOURS_DEFAULT = 36;
+const NEWS_TTL_HOURS_DEFAULT = 2;
+const NEWS_SNAPSHOT_TABLE_DEFAULT = "global_news_snapshots";
+const NEWS_FEEDS_DEFAULT = [
+  "https://feeds.bbci.co.uk/news/world/rss.xml",
+  "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
+  "https://www.aljazeera.com/xml/rss/all.xml",
+];
+const NEWS_THEME_KEYWORDS = {
+  ai: ["artificial intelligence", "ai chip", "gpu", "llm", "machine learning", "semiconductor"],
+  defence: ["defence", "defense", "military", "missile", "aerospace", "procurement", "border security"],
+  data_centre: ["data centre", "data center", "datacenter", "cloud region", "colocation", "hyperscale"],
+  electronics_ems: ["electronics manufacturing", "ems", "contract manufacturing", "pcb", "assembly plant"],
+  renewables_clean_energy: ["solar", "wind power", "green hydrogen", "renewable energy", "battery storage"],
+  railways_transport_infra: ["railway", "rolling stock", "metro rail", "freight corridor", "transport infrastructure"],
+};
+const POSITIVE_NEWS_TERMS = ["surge", "expand", "growth", "wins", "approval", "record", "upgrade", "investment", "funding", "boost"];
+const NEGATIVE_NEWS_TERMS = ["fall", "drop", "cuts", "downgrade", "probe", "ban", "risk", "lawsuit", "crisis", "shortage"];
+const IMPACT_NEWS_TERMS = {
+  tariff: 0.35,
+  sanction: 0.45,
+  policy: 0.25,
+  regulation: 0.3,
+  budget: 0.3,
+  "rate hike": 0.35,
+  merger: 0.25,
+  acquisition: 0.25,
+  contract: 0.2,
+  capex: 0.3,
+};
 
 function toStringInput(v) {
   return typeof v === "string" ? v.trim() : "";
+}
+
+function clamp(value, low, high) {
+  return Math.min(high, Math.max(low, value));
+}
+
+function envFloat(env, key, fallback, minValue) {
+  const raw = toStringInput(env[key]);
+  if (!raw) return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(minValue, n);
+}
+
+function envInt(env, key, fallback, minValue) {
+  const raw = toStringInput(env[key]);
+  if (!raw) return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(minValue, Math.trunc(n));
+}
+
+function newsSnapshotTable(env) {
+  return toStringInput(env.TITAN_NEWS_SNAPSHOT_TABLE) || NEWS_SNAPSHOT_TABLE_DEFAULT;
+}
+
+function newsSnapshotTtlHours(env) {
+  return envFloat(env, "TITAN_NEWS_SNAPSHOT_TTL_HOURS", NEWS_TTL_HOURS_DEFAULT, 0.25);
+}
+
+function configuredNewsFeeds(env) {
+  const raw = toStringInput(env.TITAN_NEWS_FEEDS);
+  if (!raw) return [...NEWS_FEEDS_DEFAULT];
+  return raw.split(",").map((x) => x.trim()).filter(Boolean);
+}
+
+function normalizeNewsText(text) {
+  return String(text || "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function parseNewsDate(raw) {
+  const txt = toStringInput(raw);
+  if (!txt) return null;
+  const ms = Date.parse(txt);
+  if (Number.isNaN(ms)) return null;
+  return new Date(ms);
+}
+
+function rssTagValue(blob, tagName) {
+  const re = new RegExp(`<${tagName}[^>]*>([\\s\\S]*?)</${tagName}>`, "i");
+  const m = re.exec(blob);
+  return m ? m[1].replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1").trim() : "";
+}
+
+function parseRssLikeItems(feedUrl, xmlRaw) {
+  const out = [];
+  const source = rssTagValue(xmlRaw, "title") || (() => {
+    try {
+      const u = new URL(feedUrl);
+      return u.hostname.replace(/^www\./i, "");
+    } catch (_e) {
+      return "unknown_source";
+    }
+  })();
+  const itemRe = /<(item|entry)\b[\s\S]*?<\/\1>/gi;
+  const blocks = String(xmlRaw || "").match(itemRe) || [];
+  for (const block of blocks) {
+    const title = rssTagValue(block, "title");
+    const summary = rssTagValue(block, "description") || rssTagValue(block, "summary") || rssTagValue(block, "content");
+    let url = rssTagValue(block, "link");
+    if (!url) {
+      const lm = /<link[^>]*href="([^"]+)"/i.exec(block);
+      if (lm && lm[1]) url = lm[1].trim();
+    }
+    const tsRaw = rssTagValue(block, "pubDate") || rssTagValue(block, "published") || rssTagValue(block, "updated");
+    const ts = parseNewsDate(tsRaw);
+    if (!title || !ts) continue;
+    out.push({
+      title,
+      summary,
+      url,
+      source: source || "unknown_source",
+      published_at: ts.toISOString(),
+    });
+  }
+  return out;
+}
+
+function scoreNewsSentiment(text) {
+  const t = normalizeNewsText(text);
+  if (!t) return 0;
+  const pos = POSITIVE_NEWS_TERMS.filter((k) => t.includes(k)).length;
+  const neg = NEGATIVE_NEWS_TERMS.filter((k) => t.includes(k)).length;
+  return clamp((pos - neg) / Math.max(2, pos + neg + 1), -1, 1);
+}
+
+function scoreNewsImpact(text) {
+  const t = normalizeNewsText(text);
+  let base = 0.25;
+  for (const [term, delta] of Object.entries(IMPACT_NEWS_TERMS)) {
+    if (t.includes(term)) base += delta;
+  }
+  if (t.length > 180) base += 0.1;
+  return clamp(base, 0.05, 1);
+}
+
+function scoreNewsConfidence(item) {
+  const source = String(item?.source || "").toLowerCase();
+  let conf = 0.45;
+  if (source) conf += 0.15;
+  if (String(item?.url || "").trim()) conf += 0.1;
+  if (source.includes("bbc") || source.includes("nyt") || source.includes("reuters") || source.includes("aljazeera")) conf += 0.15;
+  return clamp(conf, 0.2, 1);
+}
+
+function themeHits(text, sectorKey) {
+  const terms = NEWS_THEME_KEYWORDS[sectorKey] || [];
+  if (!terms.length) return 0;
+  const hits = terms.filter((k) => text.includes(k)).length;
+  if (hits <= 0) return 0;
+  return Math.min(2, 1 + (hits - 1) * 0.25);
+}
+
+function scoreSectorNews(newsItems, sectorKey) {
+  const drivers = [];
+  let contributionTotal = 0;
+  let absWeightTotal = 0;
+  for (const item of newsItems || []) {
+    const title = toStringInput(item.title);
+    const summary = toStringInput(item.summary);
+    const text = normalizeNewsText(`${title} ${summary}`);
+    const themeWeight = themeHits(text, sectorKey);
+    if (themeWeight <= 0) continue;
+    const sentiment = scoreNewsSentiment(text);
+    const impact = scoreNewsImpact(text);
+    const confidence = scoreNewsConfidence(item);
+    const contribution = themeWeight * sentiment * impact * confidence;
+    const absWeight = themeWeight * impact;
+    contributionTotal += contribution;
+    absWeightTotal += absWeight;
+    const direction = contribution > 0.02 ? "tailwind" : contribution < -0.02 ? "headwind" : "neutral";
+    drivers.push({
+      title,
+      source: toStringInput(item.source) || "unknown_source",
+      published_at: toStringInput(item.published_at),
+      sentiment: Number(sentiment.toFixed(4)),
+      impact: Number(impact.toFixed(4)),
+      confidence: Number(confidence.toFixed(4)),
+      contribution: Number(contribution.toFixed(4)),
+      url: toStringInput(item.url),
+      driver: title,
+      affected_metric: "rank_score",
+      affected_theme: sectorKey,
+      direction,
+    });
+  }
+  const score = absWeightTotal > 0 ? clamp(contributionTotal / absWeightTotal, -1, 1) : 0;
+  const sorted = drivers.sort((a, b) => Math.abs(Number(b.contribution || 0)) - Math.abs(Number(a.contribution || 0)));
+  const top = sorted.slice(0, envInt({ TITAN_NEWS_DRIVER_LIMIT: undefined }, "TITAN_NEWS_DRIVER_LIMIT", 3, 1));
+  const boosting = top.filter((d) => Number(d.contribution || 0) > 0);
+  const dragging = top.filter((d) => Number(d.contribution || 0) < 0);
+  const conf = top.length ? top.reduce((acc, d) => acc + Number(d.confidence || 0), 0) / top.length : 0;
+  return {
+    sector_key: sectorKey,
+    score: Number(score.toFixed(4)),
+    confidence: Number(clamp(conf, 0, 1).toFixed(4)),
+    drivers_top: top,
+    drivers_boosting: boosting,
+    drivers_dragging: dragging,
+    matched_items: drivers.length,
+  };
+}
+
+function mapNewsScores(newsItems) {
+  const out = {};
+  for (const key of Object.keys(NEWS_THEME_KEYWORDS).sort()) {
+    out[key] = scoreSectorNews(newsItems, key);
+  }
+  return out;
+}
+
+async function supabaseSelect(env, queryPath) {
+  const base = String(env.SUPABASE_URL || "").trim().replace(/\/+$/, "");
+  const key = String(env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
+  const url = `${base}/rest/v1/${newsSnapshotTable(env)}${queryPath}`;
+  const res = await fetch(url, {
+    headers: {
+      apikey: key,
+      Authorization: `Bearer ${key}`,
+      Accept: "application/json",
+    },
+  });
+  const txt = await res.text();
+  if (!res.ok) throw new Error(`Supabase REST ${res.status}: ${txt.slice(0, 400)}`);
+  return txt ? JSON.parse(txt) : [];
+}
+
+async function supabaseInsert(env, row) {
+  const base = String(env.SUPABASE_URL || "").trim().replace(/\/+$/, "");
+  const key = String(env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
+  const url = `${base}/rest/v1/${newsSnapshotTable(env)}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      apikey: key,
+      Authorization: `Bearer ${key}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      Prefer: "return=minimal",
+    },
+    body: JSON.stringify(row),
+  });
+  const txt = await res.text();
+  if (!res.ok) throw new Error(`Supabase REST ${res.status}: ${txt.slice(0, 400)}`);
+}
+
+function requireSupabaseForNews(env) {
+  const base = String(env.SUPABASE_URL || "").trim();
+  const key = String(env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
+  if (!base || !key) {
+    throw new Error("Missing worker secrets SUPABASE_URL and/or SUPABASE_SERVICE_ROLE_KEY for news snapshot routes");
+  }
+}
+
+async function refreshNewsSnapshot(env) {
+  requireSupabaseForNews(env);
+  const now = new Date();
+  const staleCutoff = new Date(now.getTime() - envFloat(env, "TITAN_NEWS_MAX_AGE_HOURS", NEWS_MAX_AGE_HOURS_DEFAULT, 1) * 3600 * 1000);
+  const maxItems = envInt(env, "TITAN_NEWS_FETCH_LIMIT", NEWS_FETCH_LIMIT_DEFAULT, 5);
+  const deduped = new Map();
+  for (const feed of configuredNewsFeeds(env)) {
+    let raw = "";
+    try {
+      const res = await fetch(feed, { cf: { cacheTtl: 60 } });
+      raw = await res.text();
+      if (!res.ok) continue;
+    } catch (_e) {
+      continue;
+    }
+    const parsed = parseRssLikeItems(feed, raw);
+    for (const item of parsed) {
+      const ts = parseNewsDate(item.published_at);
+      if (!ts || ts < staleCutoff) continue;
+      const titleKey = normalizeNewsText(item.title);
+      const urlKey = toStringInput(item.url).toLowerCase();
+      const key = `${titleKey}|${urlKey}`;
+      if (!titleKey) continue;
+      const existing = deduped.get(key);
+      if (!existing || String(existing.published_at) < String(item.published_at)) deduped.set(key, item);
+    }
+  }
+  const newsItems = Array.from(deduped.values())
+    .sort((a, b) => String(b.published_at).localeCompare(String(a.published_at)))
+    .slice(0, maxItems);
+  const scores = mapNewsScores(newsItems);
+  const row = {
+    refreshed_at: now.toISOString(),
+    item_count: newsItems.length,
+    fetch_status: newsItems.length ? "ok" : "empty",
+    refresh_error: "",
+    news_items: newsItems,
+    sector_scores: scores,
+  };
+  await supabaseInsert(env, row);
+  return row;
+}
+
+async function latestNewsSnapshotStatus(env) {
+  requireSupabaseForNews(env);
+  const rows = await supabaseSelect(
+    env,
+    "?select=refreshed_at,item_count,fetch_status,refresh_error&order=refreshed_at.desc&limit=1",
+  );
+  const ttlHours = newsSnapshotTtlHours(env);
+  if (!Array.isArray(rows) || !rows.length) {
+    return {
+      ok: true,
+      snapshot: null,
+      ttl_hours: ttlHours,
+      fresh: false,
+      age_minutes: null,
+    };
+  }
+  const row = rows[0] || {};
+  const refreshed = parseNewsDate(row.refreshed_at);
+  const ageMinutes = refreshed ? Math.max(0, (Date.now() - refreshed.getTime()) / 60000) : null;
+  return {
+    ok: true,
+    snapshot: {
+      refreshed_at: toStringInput(row.refreshed_at),
+      item_count: Number(row.item_count || 0),
+      fetch_status: toStringInput(row.fetch_status) || "unknown",
+      refresh_error: toStringInput(row.refresh_error),
+    },
+    ttl_hours: ttlHours,
+    fresh: ageMinutes != null ? ageMinutes <= ttlHours * 60 : false,
+    age_minutes: ageMinutes != null ? Number(ageMinutes.toFixed(3)) : null,
+  };
 }
 
 function parseBoundedInt(raw, field, { min = 1, max = 500 } = {}) {
@@ -624,7 +957,28 @@ export default {
           has_supabase_insights: supabaseUrl && supabaseKey,
           digest_memory_rows,
           digest_memory_count_error,
+          has_news_snapshot: supabaseUrl && supabaseKey,
+          news_snapshot_ttl_hours: newsSnapshotTtlHours(env),
         });
+      }
+
+      if (request.method === "POST" && path === "/news/refresh") {
+        const snap = await refreshNewsSnapshot(env);
+        const status = await latestNewsSnapshotStatus(env);
+        return json({
+          ok: true,
+          refreshed_at: snap.refreshed_at,
+          item_count: snap.item_count,
+          fetch_status: snap.fetch_status,
+          ttl_hours: status.ttl_hours,
+          fresh: status.fresh,
+          age_minutes: status.age_minutes,
+        });
+      }
+
+      if (isGetLike && path === "/news/status") {
+        const status = await latestNewsSnapshotStatus(env);
+        return json(status);
       }
 
       const ghRunInsightMatch = path.match(/^\/insights\/github-run\/(\d{1,20})$/);
