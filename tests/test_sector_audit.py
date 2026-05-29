@@ -109,6 +109,34 @@ def test_symbol_digest_default_shows_neutral_na_for_missing_new_metrics(monkeypa
     assert "🟡➡ Directional volume CMF20: n/a" in text
 
 
+def test_symbol_digest_includes_global_news_correlation_line(monkeypatch):
+    monkeypatch.delenv("TITAN_DIGEST_VERBOSE_SYMBOLS", raising=False)
+    from sector_audit import _format_symbol_metrics_line
+
+    audit = {
+        "effective_intent_score": 58.0,
+        "z_score": 1.1,
+        "volume_participation_ratio": 1.2,
+        "return_1d_pct": 0.9,
+        "atr_14_pct": 2.1,
+        "next_week_score": 60.2,
+        "sell_signal": "hold",
+        "sell_signal_reasons": ["monitor trend"],
+        "prediction_breakdown": {"week": {}, "day": {}, "penalties": []},
+        "news_correlation": {
+            "driver": "AI chip investment surge (FeedX)",
+            "affected_metric": "momentum 5D",
+            "affected_theme": "ai",
+            "direction": "tailwind",
+            "confidence": 0.73,
+        },
+    }
+    text = _format_symbol_metrics_line({"symbol": "HAL", "exchange": "NSE", "audit": audit})
+    assert "Global news relation:" in text
+    assert "affected_metric=momentum 5D" in text
+    assert "direction=tailwind" in text
+
+
 def test_symbol_digest_verbose_restores_legacy_line(monkeypatch):
     monkeypatch.setenv("TITAN_DIGEST_VERBOSE_SYMBOLS", "1")
     from sector_audit import _format_symbol_metrics_line
@@ -655,3 +683,13 @@ def test_apply_sector_cross_section_two_phase_orders_next_week_percentile():
     p0 = ok[0]["audit"]["sector_pctile_next_week_score"]
     p1 = ok[1]["audit"]["sector_pctile_next_week_score"]
     assert p0 < p1
+
+
+def test_classify_error_code_timeout_variants():
+    from sector_audit import _classify_error_code
+
+    assert _classify_error_code("[Breeze] HAL (NSE) historical fetch timeout") == "data_fetch_timeout"
+    assert (
+        _classify_error_code("[Sector] no-progress watchdog timeout after 45.0s")
+        == "sector_no_progress_watchdog"
+    )

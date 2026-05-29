@@ -10,9 +10,16 @@ import argparse
 import json
 import subprocess
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+HEARTBEAT_SECONDS = 60.0
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 def main() -> int:
@@ -49,8 +56,13 @@ def main() -> int:
     results: list[dict[str, object]] = []
     failed: list[str] = []
 
-    for sector in sectors:
-        proc = subprocess.run(
+    for idx, sector in enumerate(sectors, start=1):
+        sector_started = time.perf_counter()
+        print(
+            f"[{_utc_now_iso()}] [{idx}/{len(sectors)}] sector={sector} started top_n={top_n}",
+            flush=True,
+        )
+        proc = subprocess.Popen(
             [
                 sys.executable,
                 str(script),
@@ -61,19 +73,33 @@ def main() -> int:
             ],
             cwd=ROOT,
             text=True,
-            capture_output=True,
         )
-        ok = proc.returncode == 0
+        next_heartbeat = time.perf_counter() + HEARTBEAT_SECONDS
+        while proc.poll() is None:
+            now = time.perf_counter()
+            if now >= next_heartbeat:
+                elapsed = now - sector_started
+                print(
+                    f"[{_utc_now_iso()}] [{idx}/{len(sectors)}] heartbeat sector={sector} elapsed_s={elapsed:.1f}",
+                    flush=True,
+                )
+                next_heartbeat = now + HEARTBEAT_SECONDS
+            time.sleep(1.0)
+        exit_code = int(proc.returncode or 0)
+        ok = exit_code == 0
         if not ok:
             failed.append(sector)
-        out = (proc.stdout or "").strip()
+        elapsed_total = time.perf_counter() - sector_started
+        print(
+            f"[{_utc_now_iso()}] [{idx}/{len(sectors)}] sector={sector} finished exit_code={exit_code} elapsed_s={elapsed_total:.1f}",
+            flush=True,
+        )
         results.append(
             {
                 "sector": sector,
                 "ok": ok,
-                "exit_code": proc.returncode,
-                "stdout_tail": out[-2000:] if out else "",
-                "stderr_tail": (proc.stderr or "")[-1000:],
+                "exit_code": exit_code,
+                "elapsed_seconds": round(elapsed_total, 2),
             }
         )
 

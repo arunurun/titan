@@ -1,5 +1,7 @@
 from types import SimpleNamespace
+from datetime import datetime, timedelta, timezone
 
+import pandas as pd
 from postgrest.exceptions import APIError
 
 from config_loader import TitanConfig
@@ -326,4 +328,215 @@ def test_persist_daily_winners_repeated_runs_are_idempotent(monkeypatch):
     assert first["persisted"] is True
     assert second["persisted"] is True
     assert len(state) == 1
+
+
+def test_fetch_latest_global_news_dedupes_and_drops_stale(monkeypatch):
+    from sector_priority import fetch_latest_global_news
+
+    monkeypatch.setenv("TITAN_NEWS_FEEDS", "https://feed-a.local/rss,https://feed-b.local/rss")
+    monkeypatch.setenv("TITAN_NEWS_MAX_AGE_HOURS", "48")
+    monkeypatch.setenv("TITAN_NEWS_FETCH_LIMIT", "20")
+
+    feed_a = """<rss><channel><title>Feed A</title>
+    <item><title>AI chip demand surges on cloud capex</title><link>https://x/a1</link>
+    <pubDate>Tue, 02 Jan 2026 08:00:00 GMT</pubDate><description>Strong expansion signal</description></item>
+    <item><title>Old stale headline</title><link>https://x/stale</link>
+    <pubDate>Mon, 01 Dec 2025 08:00:00 GMT</pubDate><description>old</description></item>
+    </channel></rss>"""
+    feed_b = """<rss><channel><title>Feed B</title>
+    <item><title>AI chip demand surges on cloud capex</title><link>https://x/a1</link>
+    <pubDate>Tue, 02 Jan 2026 09:00:00 GMT</pubDate><description>Duplicate newer copy</description></item>
+    </channel></rss>"""
+
+    def _fake_get(url, timeout_seconds=12.0):
+        if "feed-a" in url:
+            return feed_a, None
+        if "feed-b" in url:
+            return feed_b, None
+        return None, "not_found"
+
+    monkeypatch.setattr("sector_priority._http_get_text", _fake_get)
+    items = fetch_latest_global_news(now_utc=datetime(2026, 1, 3, 0, 0, tzinfo=timezone.utc))
+    assert len(items) == 1
+    assert items[0]["title"].startswith("AI chip demand")
+    assert items[0]["source"] == "Feed B"
+
+
+def test_map_news_to_sector_scores_includes_data_centre():
+    from sector_priority import map_news_to_sector_scores
+
+    news_items = [
+        {
+            "title": "Hyperscale data center investment surge",
+            "summary": "Cloud region capex expands and contract wins accelerate",
+            "source": "TestWire",
+            "url": "https://x/news1",
+            "published_at": "2026-01-02T10:00:00+00:00",
+        },
+        {
+            "title": "Missile procurement faces downgrade risk",
+            "summary": "Defence budget cuts trigger uncertainty",
+            "source": "TestWire",
+            "url": "https://x/news2",
+            "published_at": "2026-01-02T11:00:00+00:00",
+        },
+    ]
+    scores = map_news_to_sector_scores(news_items)
+    assert scores["data_centre"]["matched_items"] >= 1
+    assert scores["data_centre"]["score"] > 0
+    assert scores["defence"]["matched_items"] >= 1
+    assert scores["defence"]["score"] < 0
+
+
+def test_build_sector_rankings_news_blend_bounded(monkeypatch):
+    from sector_priority import build_sector_rankings
+    from sector_registry import SectorInstrument
+
+    monkeypatch.setenv("TITAN_NEWS_BLEND_WEIGHT", "10")
+    monkeypatch.setenv("TITAN_NEWS_BLEND_CAP", "1.5")
+    monkeypatch.setattr("breeze_client.create_breeze_session", lambda _cfg: object())
+    monkeypatch.setattr(
+        "sector_priority.fetch_equity_data",
+        lambda *_args, **_kwargs: pd.DataFrame({"close": [10, 11, 12, 13, 14, 15], "volume": [100] * 6}),
+    )
+    monkeypatch.setattr("sector_priority.fetch_nse_market_cap_inr_cr", lambda _sym: (12000.0, "nse_quote_rupees"))
+    monkeypatch.setattr("sector_priority.fetch_moneycontrol_market_cap_inr_cr", lambda _sym: (None, "x"))
+    monkeypatch.setattr("sector_priority.fetch_screener_market_cap_inr_cr", lambda _sym: (None, "x"))
+    monkeypatch.setattr("sector_priority.fetch_yahoo_market_cap_inr_cr", lambda _s, _e: (None, "x"))
+    monkeypatch.setattr("sector_priority._load_previous_market_caps", lambda cfg, sector_key: {})
+    monkeypatch.setattr(
+        "sector_priority.fetch_latest_global_news",
+        lambda: [
+            {
+                "title": "AI model training investment surge",
+                "summary": "Cloud capex growth",
+                "source": "FeedX",
+                "url": "https://x",
+                "published_at": "2026-01-02T10:00:00+00:00",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "sector_priority.map_news_to_sector_scores",
+        lambda _items: {
+            "ai": {
+                "score": 1.0,
+                "confidence": 0.9,
+                "matched_items": 1,
+                "drivers_top": [{"title": "AI model training investment surge", "contribution": 0.5}],
+                "drivers_boosting": [{"title": "AI model training investment surge", "contribution": 0.5}],
+                "drivers_dragging": [],
+            }
+        },
+    )
+
+    rows = build_sector_rankings(
+        make_cfg(),
+        sector_key="ai",
+        instruments=[SectorInstrument("AAA", "NSE"), SectorInstrument("BBB", "NSE")],
+        top_n=2,
+    )
+    assert len(rows) == 2
+    for row in rows:
+        meta = row["meta"]
+        news = meta["news"]
+        assert news["blend_points"] == 1.5
+        assert round(row["rank_score"] - meta["technical_rank_score"], 4) == 1.5
+        assert news["drivers_boosting"]
+
+
+def test_build_sector_rankings_news_fallback_when_unavailable(monkeypatch):
+    from sector_priority import build_sector_rankings
+    from sector_registry import SectorInstrument
+
+    monkeypatch.setattr("breeze_client.create_breeze_session", lambda _cfg: object())
+    monkeypatch.setattr(
+        "sector_priority.fetch_equity_data",
+        lambda *_args, **_kwargs: pd.DataFrame({"close": [10, 11, 12, 13, 14, 15], "volume": [100] * 6}),
+    )
+    monkeypatch.setattr("sector_priority.fetch_nse_market_cap_inr_cr", lambda _sym: (12000.0, "nse_quote_rupees"))
+    monkeypatch.setattr("sector_priority.fetch_moneycontrol_market_cap_inr_cr", lambda _sym: (None, "x"))
+    monkeypatch.setattr("sector_priority.fetch_screener_market_cap_inr_cr", lambda _sym: (None, "x"))
+    monkeypatch.setattr("sector_priority.fetch_yahoo_market_cap_inr_cr", lambda _s, _e: (None, "x"))
+    monkeypatch.setattr("sector_priority._load_previous_market_caps", lambda cfg, sector_key: {})
+    monkeypatch.setattr("sector_priority.fetch_latest_global_news", lambda: [])
+    rows = build_sector_rankings(
+        make_cfg(),
+        sector_key="ai",
+        instruments=[SectorInstrument("AAA", "NSE")],
+        top_n=1,
+    )
+    news = rows[0]["meta"]["news"]
+    assert news["blend_points"] == 0.0
+    assert news["reason"] == "news_unavailable"
+
+
+def test_score_sector_news_exposes_correlation_fields():
+    from sector_priority import score_sector_news
+
+    out = score_sector_news(
+        [
+            {
+                "title": "AI chip investment surge",
+                "summary": "Cloud capex expansion and growth",
+                "source": "FeedX",
+                "url": "https://x/news",
+                "published_at": "2026-01-02T10:00:00+00:00",
+            }
+        ],
+        sector_key="ai",
+    )
+    assert out["drivers_top"]
+    d = out["drivers_top"][0]
+    assert d["driver"] == "AI chip investment surge"
+    assert d["affected_metric"] == "rank_score"
+    assert d["affected_theme"] == "ai"
+    assert d["direction"] in ("tailwind", "neutral", "headwind")
+
+
+def test_resolve_global_news_snapshot_uses_cached_when_fresh(monkeypatch):
+    from sector_priority import resolve_global_news_snapshot
+
+    now = datetime(2026, 1, 3, 0, 0, tzinfo=timezone.utc)
+    cached = {
+        "refreshed_at": (now - timedelta(minutes=30)).isoformat(),
+        "item_count": 1,
+        "fetch_status": "ok",
+        "refresh_error": "",
+        "news_items": [{"title": "cached"}],
+        "sector_scores": {"ai": {"score": 0.3, "matched_items": 1}},
+    }
+    monkeypatch.setattr("sector_priority._load_latest_news_snapshot", lambda _cfg: cached)
+    monkeypatch.setattr(
+        "sector_priority.refresh_global_news_snapshot",
+        lambda _cfg, now_utc=None: (_ for _ in ()).throw(AssertionError("should not refresh")),
+    )
+    out = resolve_global_news_snapshot(make_cfg(), now_utc=now)
+    assert out["source"] == "cached"
+    assert out["fresh"] is True
+    assert out["item_count"] == 1
+
+
+def test_resolve_global_news_snapshot_stale_refresh_failure_falls_back(monkeypatch):
+    from sector_priority import resolve_global_news_snapshot
+
+    now = datetime(2026, 1, 3, 0, 0, tzinfo=timezone.utc)
+    cached = {
+        "refreshed_at": (now - timedelta(hours=5)).isoformat(),
+        "item_count": 2,
+        "fetch_status": "ok",
+        "refresh_error": "",
+        "news_items": [{"title": "stale"}],
+        "sector_scores": {"ai": {"score": -0.2, "matched_items": 1}},
+    }
+    monkeypatch.setattr("sector_priority._load_latest_news_snapshot", lambda _cfg: cached)
+
+    def _boom(_cfg, now_utc=None, timeout_seconds=12.0):
+        raise RuntimeError("feed timeout")
+
+    monkeypatch.setattr("sector_priority.refresh_global_news_snapshot", _boom)
+    out = resolve_global_news_snapshot(make_cfg(), now_utc=now)
+    assert out["source"] == "stale_fallback"
+    assert out["fresh"] is False
+    assert "feed timeout" in (out.get("refresh_error") or "")
 

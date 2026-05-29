@@ -980,9 +980,9 @@ def _format_tape_cell(row: dict[str, Any]) -> str:
     z = _portfolio_numeric(row.get("z_score"))
     parts: list[str] = []
     if d1 is not None:
-        parts.append(f"1d {_format_pct_signed(d1)}")
+        parts.append(f"1D move {_format_pct_signed(d1)}")
     if z is not None:
-        parts.append(f"z {z:+.2f}")
+        parts.append(f"z-score {z:+.2f}")
     return " · ".join(parts) if parts else "—"
 
 
@@ -1149,7 +1149,7 @@ def portfolio_email_digest_plaintext(
     nw = summary.get("portfolio_weighted_next_week_score")
     wi = summary.get("portfolio_weighted_intent_score")
     if isinstance(nw, (int, float)) and isinstance(wi, (int, float)):
-        out.append(f"Qty-weighted scores — next week: {nw} | intent: {wi}")
+        out.append(f"Qty-weighted scores — 1W outlook: {nw} | technical intent: {wi}")
 
     gemini_brief = _try_portfolio_gemini_brief(
         source=source,
@@ -1205,10 +1205,11 @@ def portfolio_email_digest_plaintext(
     out.append(
         "Legends: Book % = share of summed current value across analyzed rows this run "
         "(concentration in what you submitted, not necessarily your full broker account). "
-        "Risk = Titan risk points (≥7 → exit, ≥4 → trim). Tape = last-session % vs peer z-score.",
+        "Risk = Titan risk points (≥7 → exit, ≥4 → trim). "
+        "Tape = 1D move % with z-score (std-dev from mean).",
     )
     out.append(
-        "SYMBOL | Titan | Curr ₹ | Book % | Unrl % | Tape | Intent | NextWk | Risk | Drivers",
+        "SYMBOL | Titan | Curr ₹ | Book % | Unrl % | Tape | TechIntent | 1W | Risk | Drivers",
     )
     prio = {"exit_risk": 0, "trim": 1, "hold": 2, "buy_more": 3}
 
