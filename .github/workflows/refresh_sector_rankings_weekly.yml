@@ -47,7 +47,9 @@ jobs:
           GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
           GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
           BREEZE_HIST_CALL_INTERVAL_SECONDS: "0.35"
+          PYTHONUNBUFFERED: "1"
         run: |
           TOPN="${{ github.event.inputs.top_n || '10' }}"
           if [ -z "$TOPN" ]; then TOPN=10; fi
-          python scripts/refresh_all_sector_rankings.py --top-n "$TOPN" --exclude-sectors unknown,non_equity
+          echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Starting weekly sector refresh on branch ${GITHUB_REF_NAME} with top_n=${TOPN}"
+          python -u scripts/refresh_all_sector_rankings.py --top-n "$TOPN" --exclude-sectors unknown,non_equity
