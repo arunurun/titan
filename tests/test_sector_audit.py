@@ -33,6 +33,11 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
         "return_1d_pct": -4.28,
         "ema_200_distance_pct": 47.29,
         "atr_14_pct": 3.42,
+        "adx_14": 22.6,
+        "breakout_20d_distance_pct_to_high": -0.8,
+        "breakout_20d_distance_pct_above_low": 9.4,
+        "atr_14_over_atr_63": 1.12,
+        "cmf_20": 0.11,
         "next_day_score": 49.77,
         "next_week_score": 51.84,
         "sell_signal": "trim",
@@ -69,12 +74,39 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
     assert "techScore" not in text
     assert "WELCORP (NSE)" in text
     assert "TRIM" in text or "trim" in text.lower()
-    assert "next week" in text.lower()
+    assert "1w outlook" in text.lower()
     assert "neutral band" in text.lower()
-    assert "intent input" in text.lower()
+    assert "🟢⬆" in text or "🟡➡" in text or "🔴⬇" in text
+    assert "trend strength adx14" in text.lower()
+    assert "breakout state (20d)" in text.lower()
+    assert "volatility regime atr14/atr63" in text.lower()
+    assert "directional volume cmf20" in text.lower()
+    assert "tape snapshot" in text.lower()
     assert "Why this action" in text
     assert "\n" in text
-    assert "Sector / benchmark" in text
+    assert "model read confidence" in text.lower()
+
+
+def test_symbol_digest_default_shows_neutral_na_for_missing_new_metrics(monkeypatch):
+    monkeypatch.delenv("TITAN_DIGEST_VERBOSE_SYMBOLS", raising=False)
+    from sector_audit import _format_symbol_metrics_line
+
+    audit = {
+        "effective_intent_score": 50.0,
+        "z_score": 0.8,
+        "volume_participation_ratio": 1.1,
+        "return_1d_pct": -0.5,
+        "atr_14_pct": 2.0,
+        "next_week_score": 51.0,
+        "sell_signal": "hold",
+        "sell_signal_reasons": ["monitor trend strength"],
+        "prediction_breakdown": {"week": {}, "day": {}, "penalties": []},
+    }
+    text = _format_symbol_metrics_line({"symbol": "HAL", "exchange": "NSE", "audit": audit})
+    assert "🟡➡ Trend strength ADX14: n/a" in text
+    assert "🟡➡ Breakout state (20D): to high n/a% · above low n/a%" in text
+    assert "🟡➡ Volatility regime ATR14/ATR63: n/a" in text
+    assert "🟡➡ Directional volume CMF20: n/a" in text
 
 
 def test_symbol_digest_verbose_restores_legacy_line(monkeypatch):
@@ -103,7 +135,7 @@ def test_symbol_digest_verbose_restores_legacy_line(monkeypatch):
         "prediction_breakdown": {"week": {}, "day": {}, "penalties": []},
     }
     text = _format_symbol_metrics_line({"symbol": "WELCORP", "exchange": "NSE", "audit": audit})
-    assert "techScore" in text
+    assert "techIntent" in text
     assert "score-input" in text
 
 
@@ -147,6 +179,10 @@ def test_build_equity_live_audit_success(monkeypatch):
     assert "return_1d_pct" in audit
     assert "ema_200_distance_pct" in audit
     assert "atr_14_pct" in audit
+    assert "adx_14" in audit
+    assert "breakout_20d_distance_pct_to_high" in audit
+    assert "atr_14_over_atr_63" in audit
+    assert "cmf_20" in audit
     assert "effective_intent_score" in audit
     assert audit.get("z_score_blend") == "20d_only"
     assert "high_volume_down_day_proxy" in audit
