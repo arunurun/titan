@@ -63,7 +63,7 @@ def run_reconcile_report(
     - sends report-only email output
     """
     with _reconcile_mode_guard():
-        cfg = load_config(require_breeze=False)
+        cfg = load_config(require_breeze=False, require_gemini=False)
         scope_label = _summarize_scope(all_stocks=all_stocks, sector=sector)
         summary: dict[str, Any] = {}
         digest_text = ""

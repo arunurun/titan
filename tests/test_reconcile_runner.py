@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -7,8 +8,9 @@ from unittest.mock import MagicMock
 def test_reconcile_runner_builds_report_and_emails(monkeypatch):
     import reconcile_runner as rr
 
-    def _fake_load_config(*, require_breeze=True):
+    def _fake_load_config(*, require_breeze=True, require_gemini=True):
         assert require_breeze is False
+        assert require_gemini is False
         return SimpleNamespace(supabase_url="https://example.supabase.co", supabase_key="service-key")
 
     monkeypatch.setattr(
@@ -44,8 +46,9 @@ def test_reconcile_runner_does_not_invoke_breeze(monkeypatch):
     import breeze_client
     import reconcile_runner as rr
 
-    def _fake_load_config(*, require_breeze=True):
+    def _fake_load_config(*, require_breeze=True, require_gemini=True):
         assert require_breeze is False
+        assert require_gemini is False
         return SimpleNamespace(supabase_url="https://example.supabase.co", supabase_key="service-key")
 
     monkeypatch.setattr(
@@ -72,3 +75,36 @@ def test_reconcile_runner_does_not_invoke_breeze(monkeypatch):
     monkeypatch.setattr(breeze_client, "create_breeze_session", mock_breeze)
     rr.run_reconcile_report(sector="defence", all_stocks=False, backfill_days=0)
     mock_breeze.assert_not_called()
+
+
+def test_reconcile_runner_passes_without_breeze_or_gemini(monkeypatch, tmp_path):
+    import reconcile_runner as rr
+    from config_loader import load_config as real_load_config
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "SUPABASE_URL=https://example.supabase.co\nSUPABASE_KEY=service-key\n",
+        encoding="utf-8",
+    )
+
+    for k in list(os.environ.keys()):
+        if k.startswith("BREEZE") or k.startswith("GEMINI") or k.startswith("SUPABASE"):
+            monkeypatch.delenv(k, raising=False)
+
+    def _real_loader_with_tmp_env(*, require_breeze=True, require_gemini=True):
+        return real_load_config(
+            env_file,
+            require_breeze=require_breeze,
+            require_gemini=require_gemini,
+        )
+
+    monkeypatch.setattr(rr, "load_config", _real_loader_with_tmp_env)
+    out = rr.run_reconcile_report(
+        sector=None,
+        all_stocks=True,
+        backfill_days=0,
+        generate_report=False,
+    )
+    assert out["scope"] == "all-stocks"
+    assert out["summary"] == {}
+    assert out["digest_text"] == ""
