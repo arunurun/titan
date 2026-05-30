@@ -765,6 +765,12 @@ def test_run_sector_live_digest_one_gemini_call(mock_load, mock_metrics, mock_em
     assert "One combined post" in body
     assert "Per-symbol metrics" in body
     assert "Risk overlays" in body
+    assert "Long-term trend breadth (stocks above 200-day Exponential Moving Average):" in body
+    assert "Volume participation breadth (stocks with above-average traded volume):" in body
+    assert "Event-based risk adjustments applied:" in body
+    assert "Macro risk filters: not applied (macro market snapshot unavailable)" in body
+    assert "Average next-week score for top 5 ranked stocks:" in body
+    assert "Score gap between highest-ranked and lowest-ranked stock:" in body
 
 
 @patch("email_notify.send_success_post_email")
@@ -833,7 +839,7 @@ def test_run_sector_live_macro_guardrail_applied(mock_load, mock_metrics, mock_e
                                 )
 
     body = mock_email.call_args[0][0]
-    assert "Macro guardrail applied: yes" in body
+    assert "Macro risk filters: applied" in body
     assert "--- EOD Reconcile (Decision-first) ---" not in body
 
 

@@ -2480,8 +2480,8 @@ def run_sector_live(
             f"Avg effective intent: {_fmt_metric(today.get('avg_effective_intent_score') if isinstance(today, dict) else None)} "
             f"(vs 7d {_fmt_metric(dlt.get('avg_effective_intent_vs_7d') if isinstance(dlt, dict) else None)}, "
             f"vs 30d {_fmt_metric(dlt.get('avg_effective_intent_vs_30d') if isinstance(dlt, dict) else None)})",
-            f"Breadth above EMA200: {_fmt_metric(today.get('breadth_above_ema200_pct') if isinstance(today, dict) else None)}%",
-            f"Volume participation breadth (VPR>1): {_fmt_metric(today.get('pct_absorption_gt_1') if isinstance(today, dict) else None)}%",
+            f"Long-term trend breadth (stocks above 200-day Exponential Moving Average): {_fmt_metric(today.get('breadth_above_ema200_pct') if isinstance(today, dict) else None)}%",
+            f"Volume participation breadth (stocks with above-average traded volume): {_fmt_metric(today.get('pct_absorption_gt_1') if isinstance(today, dict) else None)}%",
             (
                 "Global news snapshot: "
                 f"{str((news_corr_meta.get('snapshot') or {}).get('source') or 'n/a')} | "
@@ -2538,8 +2538,12 @@ def run_sector_live(
             "--- Risk overlays ---",
             f"Cluster breadth red ratio (<= -1% day): {_fmt_metric(red_ratio * 100.0)}%",
             f"Cluster bullish downgrades applied: {cluster_downgrades}",
-            f"Event-risk adjustments applied: {event_adjustments}",
-            f"Macro guardrail applied: {'yes' if macro_applied else 'no'} ({macro_reason})",
+            f"Event-based risk adjustments applied: {event_adjustments}",
+            (
+                "Macro risk filters: not applied (macro market snapshot unavailable)"
+                if (not macro_applied and str(macro_reason).strip().lower() == "macro snapshot not provided")
+                else f"Macro risk filters: {'applied' if macro_applied else 'not applied'} ({macro_reason})"
+            ),
             (
                 "Quality checks: "
                 + (", ".join(qc_warnings) if qc_warnings else "ok")
@@ -2559,8 +2563,8 @@ def run_sector_live(
                 f"Gate status: {'PASS' if quality_gate['passed'] else 'FAIL'}",
                 f"Successful symbols: {quality_gate['ok_count']}/{quality_gate['total_count']} ({_fmt_metric(quality_gate['coverage_ratio'] * 100.0)}%)",
                 f"Scored symbols coverage: {_fmt_metric(quality_gate['scored_ratio'] * 100.0)}%",
-                f"Top-5 nextWeek mean: {_fmt_metric(quality_gate['top5_next_week_mean'])}",
-                f"Signal spread (top-bottom nextWeek): {_fmt_metric(quality_gate['spread_top_bottom'])}",
+                f"Average next-week score for top 5 ranked stocks: {_fmt_metric(quality_gate['top5_next_week_mean'])}",
+                f"Score gap between highest-ranked and lowest-ranked stock: {_fmt_metric(quality_gate['spread_top_bottom'])}",
                 (
                     "Gate reasons: none"
                     if quality_gate["passed"]
