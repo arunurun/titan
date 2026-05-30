@@ -80,16 +80,28 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
     assert "neutral band" in text.lower()
     assert "🟢⬆" in text or "🟡➡" in text or "🔴⬇" in text
     assert "trend regime (14d)" in text.lower()
+    assert "rule: adx<20 sideways" in text.lower()
     assert "source: +di" in text.lower()
     assert "20d range position" in text.lower()
+    assert "thresholds: near-high >=-1%, near-low <=1%" in text.lower()
     assert "volatility vs 3m baseline" in text.lower()
     assert "money flow trend (20d)" in text.lower()
+    assert "bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution" in text
+    assert "sector-relative rank" in text.lower()
+    assert "(leader >=67, average 34-66, laggard <=33)" in text
+    assert "very short horizon: 1d outlook" in text.lower()
     assert "distance above long-term trend (ema200)" in text.lower()
     assert "typical daily swing (atr14)" in text.lower()
+    assert "bands: <2.0 calm, 2.0-4.0 moderate, >4.0 elevated" in text
     assert "tape snapshot" in text.lower()
+    assert "bands: >=+1 strong up, -1 to +1 muted, <=-1 weak" in text
+    assert "bands: >=1.5 high, 1.0-1.49 above-avg, 0.7-0.99 below-avg, <0.7 thin" in text
+    assert "bands: >=70 strong, 55-69 constructive, 45-54 neutral, 35-44 caution, <35 defensive" in text
+    assert "bands: >=70 high-long, 55-69 moderate-long, 45-54 neutral, 30-44 defensive, <30 high-defensive" in text
     assert "Why this action" in text
     assert "\n" in text
     assert "model read confidence" in text.lower()
+    assert "bands: >=70 high, 55-69 medium, <55 low" in text
 
 
 def test_symbol_digest_default_shows_neutral_na_for_missing_new_metrics(monkeypatch):
@@ -108,8 +120,14 @@ def test_symbol_digest_default_shows_neutral_na_for_missing_new_metrics(monkeypa
         "prediction_breakdown": {"week": {}, "day": {}, "penalties": []},
     }
     text = _format_symbol_metrics_line({"symbol": "HAL", "exchange": "NSE", "audit": audit})
-    assert "🟡➡ Trend regime (14D): Sideways (ADX n/a; n/a; source: direction source unavailable)" in text
-    assert "🟡➡ 20D Range Position: n/a% to 20D high · n/a% above 20D low (range context unavailable)" in text
+    assert (
+        "🟡➡ Trend regime (14D): Sideways (ADX n/a; n/a; source: direction source unavailable; "
+        "rule: ADX<20 Sideways, else +DI>-DI Buy trend / -DI>+DI Sell trend)" in text
+    )
+    assert (
+        "🟡➡ 20D Range Position: n/a% to 20D high · n/a% above 20D low "
+        "(range context unavailable; thresholds: near-high >=-1%, near-low <=1%)" in text
+    )
     assert "🟡➡ Volatility vs 3M baseline: n/ax (n/a; bands: <0.90 low, 0.90-1.10 normal, >1.10 high)" in text
     assert (
         "🟡➡ Money flow trend (20D): n/a "
@@ -143,6 +161,7 @@ def test_symbol_digest_includes_global_news_correlation_line(monkeypatch):
     assert "Global news relation:" in text
     assert "affected_metric=momentum 5D" in text
     assert "direction=tailwind" in text
+    assert "bands: >=0.75 high, 0.50-0.74 medium, <0.50 low" in text
 
 
 def test_symbol_digest_verbose_restores_legacy_line(monkeypatch):

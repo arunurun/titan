@@ -144,6 +144,10 @@ def _horizon_score_label(score: Any) -> str:
     return "defensive tilt"
 
 
+def _horizon_score_bands_text() -> str:
+    return "bands: >=70 strong, 55-69 constructive, 45-54 neutral, 35-44 caution, <35 defensive"
+
+
 def _metric_icon(v: Any, *, bullish_above: float, bearish_below: float) -> str:
     f = _safe_float(v)
     if math.isnan(f):
@@ -338,7 +342,10 @@ def _prediction_brief_line(audit: dict[str, Any]) -> str:
     drv = drivers[0] if drivers else None
     drag = drags[0] if drags else None
 
-    parts = [f"Model read confidence: {confidence} (directional heuristic, not a guarantee)"]
+    parts = [
+        "Model read confidence: "
+        f"{confidence} (bands: >=70 high, 55-69 medium, <55 low; directional heuristic, not a guarantee)"
+    ]
     if drv:
         parts.append(f"{drv} supportive")
     if drag:
@@ -386,10 +393,19 @@ def _news_correlation_line(audit: dict[str, Any]) -> str:
     else:
         dir_label = "neutral"
     conf_txt = _fmt_metric(conf) if not math.isnan(conf) else "n/a"
+    if math.isnan(conf):
+        conf_band = "n/a"
+    elif conf >= 0.75:
+        conf_band = "high"
+    elif conf >= 0.50:
+        conf_band = "medium"
+    else:
+        conf_band = "low"
     theme_txt = theme if theme else "global macro"
     return (
         f"Global news relation: driver={driver} · theme={theme_txt} · "
-        f"affected_metric={metric} · direction={dir_label} · confidence={conf_txt}"
+        f"affected_metric={metric} · direction={dir_label} · confidence={conf_txt} "
+        f"({conf_band}; bands: >=0.75 high, 0.50-0.74 medium, <0.50 low)"
     )
 
 
@@ -426,11 +442,12 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     nw_l = _horizon_score_label(next_week)
     lines_out.append(
         f"{_metric_icon(next_week, bullish_above=55.0, bearish_below=45.0)} "
-        f"1W outlook: {_fmt_metric(next_week)} ({nw_l})"
+        f"1W outlook: {_fmt_metric(next_week)} ({nw_l}; {_horizon_score_bands_text()})"
     )
     lines_out.append(
         f"{_metric_icon(intent, bullish_above=55.0, bearish_below=45.0)} "
-        f"Technical intent: {_fmt_metric(intent)} ({_equity_technical_label(intent)})"
+        f"Technical intent: {_fmt_metric(intent)} "
+        f"({_equity_technical_label(intent)}; bands: >=70 high-long, 55-69 moderate-long, 45-54 neutral, 30-44 defensive, <30 high-defensive)"
     )
     trend_regime = _trend_regime_label(adx_14, plus_di_14, minus_di_14)
     trend_source = (
@@ -441,13 +458,14 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     lines_out.append(
         f"{_metric_icon(adx_14, bullish_above=25.0, bearish_below=15.0)} "
         f"Trend regime (14D): {trend_regime} "
-        f"(ADX {_fmt_metric(adx_14)}; {_adx_strength_band(adx_14)}; source: {trend_source})"
+        f"(ADX {_fmt_metric(adx_14)}; {_adx_strength_band(adx_14)}; source: {trend_source}; "
+        f"rule: ADX<20 Sideways, else +DI>-DI Buy trend / -DI>+DI Sell trend)"
     )
     lines_out.append(
         f"{_breakout_state_icon(breakout_to_high, breakout_above_low)} "
         f"20D Range Position: {_fmt_metric(breakout_to_high)}% to 20D high · "
         f"{_fmt_metric(breakout_above_low)}% above 20D low "
-        f"({_range_position_context(breakout_to_high, breakout_above_low)})"
+        f"({_range_position_context(breakout_to_high, breakout_above_low)}; thresholds: near-high >=-1%, near-low <=1%)"
     )
     lines_out.append(
         f"{_atr_regime_icon(atr_ratio)} "
@@ -455,13 +473,23 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
         f"({_atr_ratio_band(atr_ratio)}; bands: <0.90 low, 0.90-1.10 normal, >1.10 high)"
     )
 
-    tape_bits = [f"1D move {_fmt_metric(ret1d)}%", f"z-score {_fmt_metric(z)} ({_z_label(z)})"]
+    tape_bits = [
+        f"1D move {_fmt_metric(ret1d)}% (bands: >=+1 strong up, -1 to +1 muted, <=-1 weak)",
+        f"z-score {_fmt_metric(z)} ({_z_label(z)}; bands: >=+2 / +1 to +2 / -1 to +1 / -2 to -1 / <=-2)",
+    ]
     if not math.isnan(_safe_float(ema_dist)):
-        tape_bits.append(f"Distance above long-term trend (EMA200) {_fmt_metric(ema_dist)}%")
+        tape_bits.append(
+            f"Distance above long-term trend (EMA200) {_fmt_metric(ema_dist)}% "
+            f"(bands: >+5 stretched above trend, -5 to +5 near trend, <-5 below trend)"
+        )
     tape_bits.append(
-        f"volume participation {_fmt_metric(vpr_label_src)}x ({_volume_participation_label(vpr_label_src)})"
+        f"volume participation {_fmt_metric(vpr_label_src)}x "
+        f"({_volume_participation_label(vpr_label_src)}; bands: >=1.5 high, 1.0-1.49 above-avg, 0.7-0.99 below-avg, <0.7 thin)"
     )
-    tape_bits.append(f"Typical daily swing (ATR14) {_fmt_metric(atr_pct)}%")
+    tape_bits.append(
+        f"Typical daily swing (ATR14) {_fmt_metric(atr_pct)}% "
+        f"(bands: <2.0 calm, 2.0-4.0 moderate, >4.0 elevated)"
+    )
     lines_out.append("Tape snapshot: " + " · ".join(tape_bits))
     lines_out.append(
         f"{_metric_icon(cmf_val, bullish_above=0.05, bearish_below=-0.05)} "
@@ -497,7 +525,9 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
 
     if not math.isnan(_safe_float(nf)):
         nd_l = _horizon_score_label(nf)
-        lines_out.append(f"Very short horizon: 1D outlook ~{_fmt_metric(nf)} ({nd_l})")
+        lines_out.append(
+            f"Very short horizon: 1D outlook ~{_fmt_metric(nf)} ({nd_l}; {_horizon_score_bands_text()})"
+        )
 
     if sell_reasons:
         sr = "; ".join(str(x) for x in sell_reasons[:3])
