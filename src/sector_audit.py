@@ -592,6 +592,10 @@ def _news_correlation_line(audit: dict[str, Any]) -> str:
     theme = str(corr.get("affected_theme") or "").strip()
     direction = str(corr.get("direction") or "").strip().lower()
     conf = _safe_float(corr.get("confidence"))
+    driver_source = str(corr.get("driver_source") or "").strip().lower() or "macro"
+    stock_news_fetched_raw = _safe_float(corr.get("stock_news_fetched_count"))
+    stock_news_fetched_count = 0 if math.isnan(stock_news_fetched_raw) else int(stock_news_fetched_raw)
+    coverage_status = str(corr.get("stock_news_coverage") or "").strip().lower() or "unknown"
     fallback_label = str(corr.get("fallback_label") or "").strip()
     if not driver or not metric:
         return ""
@@ -611,10 +615,24 @@ def _news_correlation_line(audit: dict[str, Any]) -> str:
     else:
         conf_band = "low"
     theme_txt = theme if theme else "global macro"
+    if driver_source == "stock":
+        return (
+            f"Stock news relation: stock_driver={driver} · theme={theme_txt} · "
+            f"affected_metric={metric} · direction={dir_label} · confidence={conf_txt} "
+            f"({conf_band}; bands: >=0.75 high, 0.50-0.74 medium, <0.50 low) · "
+            f"stock_news_fetched_count={stock_news_fetched_count} · coverage={coverage_status}"
+        )
+    fallback_reason = "stock_headlines_missing_using_macro_context"
+    if coverage_status == "not_covered":
+        fallback_reason = "stock_news_not_fetched_for_symbol_using_macro_context"
+    elif fallback_label:
+        fallback_reason = fallback_label.replace("sector_specific_match_missing_", "")
     return (
-        f"Global news relation: driver={driver} · theme={theme_txt} · "
+        f"Macro fallback relation: macro_driver={driver} · theme={theme_txt} · "
         f"affected_metric={metric} · direction={dir_label} · confidence={conf_txt} "
-        f"({conf_band}; bands: >=0.75 high, 0.50-0.74 medium, <0.50 low)"
+        f"({conf_band}; bands: >=0.75 high, 0.50-0.74 medium, <0.50 low) · "
+        f"fallback_reason={fallback_reason} · stock_news_fetched_count={stock_news_fetched_count} "
+        f"· coverage={coverage_status}"
         + (f" · fallback={fallback_label}" if fallback_label else "")
     )
 
@@ -1572,7 +1590,6 @@ def _apply_global_news_correlation(
         from sector_priority import (
             correlate_stock_news_with_macro,
             fetch_stock_news_for_symbol,
-            load_priority_instruments,
             resolve_global_news_snapshot,
         )
     except Exception:
@@ -1581,30 +1598,13 @@ def _apply_global_news_correlation(
         return {"applied": False, "reason": "no_results"}
     snapshot = resolve_global_news_snapshot(cfg)
     sector_key = str(sector_id).strip().lower()
-    top_n = _stock_news_coverage_top_n()
-    try:
-        priority = load_priority_instruments(cfg, sector_key=sector_key, top_n=top_n)
-    except Exception:
-        priority = []
-    coverage_pairs = {
-        (str(inst.symbol).strip().upper(), str(inst.exchange).strip().upper())
-        for inst in priority
-        if str(inst.symbol).strip() and str(inst.exchange).strip()
-    }
-    if not coverage_pairs:
-        ranked_local = sorted(
-            [r for r in ok_results if isinstance(r.get("audit"), dict)],
-            key=lambda r: _safe_float((r.get("audit") or {}).get("effective_intent_score", (r.get("audit") or {}).get("intent_score"))),
-            reverse=True,
-        )
-        for row in ranked_local[:top_n]:
-            audit = row.get("audit") if isinstance(row.get("audit"), dict) else {}
-            coverage_pairs.add(
-                (
-                    str(audit.get("symbol") or row.get("symbol") or "").strip().upper(),
-                    str(audit.get("exchange") or row.get("exchange") or "").strip().upper(),
-                )
-            )
+    coverage_pairs: set[tuple[str, str]] = set()
+    for row in ok_results:
+        audit = row.get("audit") if isinstance(row.get("audit"), dict) else {}
+        symbol = str(audit.get("symbol") or row.get("symbol") or "").strip().upper()
+        exchange = str(audit.get("exchange") or row.get("exchange") or "").strip().upper()
+        if symbol and exchange in ("NSE", "BSE"):
+            coverage_pairs.add((symbol, exchange))
     stock_news_by_symbol: dict[tuple[str, str], dict[str, Any]] = {}
     for symbol, exchange in coverage_pairs:
         if not symbol or exchange not in ("NSE", "BSE"):
@@ -1636,6 +1636,7 @@ def _apply_global_news_correlation(
         stock_news_meta = stock_news_by_symbol.get((symbol, exchange), {})
         stock_news_items = stock_news_meta.get("items")
         stock_news_items = stock_news_items if isinstance(stock_news_items, list) else []
+        coverage_status = "fetched" if (symbol, exchange) in stock_news_by_symbol else "not_covered"
         corr = correlate_stock_news_with_macro(
             symbol=symbol,
             sector_key=sector_key,
@@ -1645,6 +1646,7 @@ def _apply_global_news_correlation(
         fallback_label = str(corr.get("fallback_label") or "").strip()
         if fallback_label:
             fallback_count += 1
+        driver_source = "stock" if stock_news_items and not fallback_label else "macro"
         audit["news_correlation"] = {
             "driver": str(corr.get("driver") or "Global macro flow"),
             "affected_metric": _infer_news_affected_metric(audit),
@@ -1657,6 +1659,10 @@ def _apply_global_news_correlation(
             ),
             "evidence": corr.get("evidence") if isinstance(corr.get("evidence"), dict) else {},
             "fallback_label": fallback_label,
+            "driver_source": driver_source,
+            "stock_news_fetched_count": len(stock_news_items),
+            "stock_news_coverage": coverage_status,
+            "used_macro_fallback": bool(fallback_label) or not stock_news_items,
             "stock_news": {
                 "fetched_count": len(stock_news_items),
                 "query_used": str(stock_news_meta.get("query_used") or "").strip(),

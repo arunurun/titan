@@ -160,6 +160,9 @@ def test_symbol_digest_includes_global_news_correlation_line(monkeypatch):
             "affected_theme": "ai",
             "direction": "tailwind",
             "confidence": 0.73,
+            "driver_source": "stock",
+            "stock_news_fetched_count": 2,
+            "stock_news_coverage": "fetched",
             "evidence": {
                 "net_news_impact_score": 0.2142,
                 "net_news_impact_direction": "tailwind",
@@ -179,9 +182,12 @@ def test_symbol_digest_includes_global_news_correlation_line(monkeypatch):
         },
     }
     text = _format_symbol_metrics_line({"symbol": "HAL", "exchange": "NSE", "audit": audit})
-    assert "Global news relation:" in text
+    assert "Stock news relation:" in text
+    assert "stock_driver=AI chip investment surge (FeedX)" in text
     assert "affected_metric=momentum 5D" in text
     assert "direction=tailwind" in text
+    assert "stock_news_fetched_count=2" in text
+    assert "coverage=fetched" in text
     assert "bands: >=0.75 high, 0.50-0.74 medium, <0.50 low" in text
     assert "News evidence: net_news_impact_score=0.2142" in text
     assert "source=Reuters" in text
@@ -191,7 +197,6 @@ def test_symbol_digest_includes_global_news_correlation_line(monkeypatch):
 
 def test_apply_global_news_correlation_uses_explicit_fallback_when_sector_missing(monkeypatch):
     from sector_audit import _apply_global_news_correlation
-    from sector_registry import SectorInstrument
 
     snapshot = {
         "source": "cached",
@@ -221,7 +226,6 @@ def test_apply_global_news_correlation_uses_explicit_fallback_when_sector_missin
         },
     }
     monkeypatch.setattr("sector_priority.resolve_global_news_snapshot", lambda _cfg: snapshot)
-    monkeypatch.setattr("sector_priority.load_priority_instruments", lambda _cfg, sector_key, top_n=None: [SectorInstrument("HAL", "NSE")])
     monkeypatch.setattr(
         "sector_priority.fetch_stock_news_for_symbol",
         lambda _cfg, symbol, exchange, timeout_seconds=10.0, now_utc=None: {
@@ -240,6 +244,10 @@ def test_apply_global_news_correlation_uses_explicit_fallback_when_sector_missin
     assert meta["applied"] is True
     assert "fallback_label" in corr
     assert "sector_specific_match_missing_using_global_market_driver" == corr["fallback_label"]
+    assert corr["driver_source"] == "macro"
+    assert corr["stock_news_fetched_count"] == 0
+    assert corr["stock_news_coverage"] == "not_covered"
+    assert corr["used_macro_fallback"] is True
     assert corr["confidence"] < 0.5
 
 
@@ -263,11 +271,15 @@ def test_symbol_digest_news_line_present_with_fallback_label(monkeypatch):
             "affected_theme": "ai",
             "direction": "neutral",
             "confidence": 0.32,
+            "driver_source": "macro",
+            "stock_news_fetched_count": 0,
+            "stock_news_coverage": "fetched",
             "fallback_label": "sector_specific_match_missing_using_global_market_driver",
         },
     }
     text = _format_symbol_metrics_line({"symbol": "HAL", "exchange": "NSE", "audit": audit})
-    assert "Global news relation:" in text
+    assert "Macro fallback relation:" in text
+    assert "fallback_reason=using_global_market_driver" in text
     assert "fallback=sector_specific_match_missing_using_global_market_driver" in text
 
 
@@ -276,7 +288,6 @@ def test_apply_global_news_correlation_sets_line_for_all_audits_when_snapshot_em
 
     snapshot = {"source": "unavailable", "news_items": [], "sector_scores": {}}
     monkeypatch.setattr("sector_priority.resolve_global_news_snapshot", lambda _cfg: snapshot)
-    monkeypatch.setattr("sector_priority.load_priority_instruments", lambda _cfg, sector_key, top_n=None: [])
     monkeypatch.setattr(
         "sector_priority.fetch_stock_news_for_symbol",
         lambda _cfg, symbol, exchange, timeout_seconds=10.0, now_utc=None: {
@@ -297,7 +308,7 @@ def test_apply_global_news_correlation_sets_line_for_all_audits_when_snapshot_em
     assert meta["applied"] is True
     for row in ok_results:
         line = _news_correlation_line(row["audit"])
-        assert "Global news relation:" in line
+        assert "Macro fallback relation:" in line
         assert "fallback=sector_specific_match_missing_no_market_driver" in line
 
 
@@ -496,7 +507,6 @@ def test_apply_global_news_correlation_produces_symbol_specific_lines(monkeypatc
         },
     }
     monkeypatch.setattr("sector_priority.resolve_global_news_snapshot", lambda _cfg: snapshot)
-    monkeypatch.setattr("sector_priority.load_priority_instruments", lambda _cfg, sector_key, top_n=None: [])
 
     def _fake_stock_news(_cfg, symbol, exchange, timeout_seconds=10.0, now_utc=None):
         headline = "HAL wins engine contract" if symbol == "HAL" else "BEL secures radar export order"
@@ -527,6 +537,8 @@ def test_apply_global_news_correlation_produces_symbol_specific_lines(monkeypatc
     assert meta["applied"] is True
     hal_line = _news_correlation_line(ok_results[0]["audit"])
     bel_line = _news_correlation_line(ok_results[1]["audit"])
+    assert "Stock news relation:" in hal_line
+    assert "Stock news relation:" in bel_line
     assert "HAL wins engine contract" in hal_line
     assert "BEL secures radar export order" in bel_line
     assert hal_line != bel_line
