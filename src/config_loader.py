@@ -127,8 +127,14 @@ def try_parse_gemini_api_keys_from_env(
         return ()
 
 
-def load_config(env_path: str | Path | None = None) -> TitanConfig:
-    """Read required variables from the environment."""
+def load_config(
+    env_path: str | Path | None = None, *, require_breeze: bool = True
+) -> TitanConfig:
+    """Read required variables from the environment.
+
+    Set ``require_breeze=False`` for Supabase-only reconcile paths that do not
+    perform live market execution.
+    """
     _load_dotenv_file(env_path, override=False)
 
     def req(name: str) -> str:
@@ -137,10 +143,15 @@ def load_config(env_path: str | Path | None = None) -> TitanConfig:
             raise ValueError(f"Missing or empty required environment variable: {name}")
         return v
 
+    def opt(name: str) -> str:
+        return os.environ.get(name, "").strip()
+
     return TitanConfig(
-        breeze_api_key=req("BREEZE_API_KEY"),
-        breeze_secret=req("BREEZE_SECRET"),
-        breeze_session_token=req("BREEZE_SESSION_TOKEN"),
+        breeze_api_key=req("BREEZE_API_KEY") if require_breeze else opt("BREEZE_API_KEY"),
+        breeze_secret=req("BREEZE_SECRET") if require_breeze else opt("BREEZE_SECRET"),
+        breeze_session_token=req("BREEZE_SESSION_TOKEN")
+        if require_breeze
+        else opt("BREEZE_SESSION_TOKEN"),
         gemini_api_keys=parse_gemini_api_keys_from_env(),
         supabase_url=req("SUPABASE_URL"),
         supabase_key=req("SUPABASE_KEY"),

@@ -7,10 +7,14 @@ from unittest.mock import MagicMock
 def test_reconcile_runner_builds_report_and_emails(monkeypatch):
     import reconcile_runner as rr
 
+    def _fake_load_config(*, require_breeze=True):
+        assert require_breeze is False
+        return SimpleNamespace(supabase_url="https://example.supabase.co", supabase_key="service-key")
+
     monkeypatch.setattr(
         rr,
         "load_config",
-        lambda: SimpleNamespace(supabase_url="https://example.supabase.co", supabase_key="service-key"),
+        _fake_load_config,
     )
     monkeypatch.setattr(
         rr,
@@ -40,10 +44,14 @@ def test_reconcile_runner_does_not_invoke_breeze(monkeypatch):
     import breeze_client
     import reconcile_runner as rr
 
+    def _fake_load_config(*, require_breeze=True):
+        assert require_breeze is False
+        return SimpleNamespace(supabase_url="https://example.supabase.co", supabase_key="service-key")
+
     monkeypatch.setattr(
         rr,
         "load_config",
-        lambda: SimpleNamespace(supabase_url="https://example.supabase.co", supabase_key="service-key"),
+        _fake_load_config,
     )
     monkeypatch.setattr(
         rr,
