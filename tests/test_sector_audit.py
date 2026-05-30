@@ -634,6 +634,149 @@ def test_apply_global_news_correlation_records_alias_fallback(monkeypatch):
     assert stock_meta["alias_used"] == "Hindustan Aeronautics"
 
 
+def test_news_evidence_line_shows_stock_fetch_error(monkeypatch):
+    monkeypatch.delenv("TITAN_DIGEST_VERBOSE_SYMBOLS", raising=False)
+    from sector_audit import _format_symbol_metrics_line
+
+    audit = {
+        "effective_intent_score": 48.0,
+        "z_score": -0.5,
+        "volume_participation_ratio": 0.9,
+        "return_1d_pct": -0.2,
+        "atr_14_pct": 2.4,
+        "next_week_score": 47.1,
+        "sell_signal": "hold",
+        "sell_signal_reasons": ["monitor trend"],
+        "prediction_breakdown": {"week": {}, "day": {}, "penalties": []},
+        "news_correlation": {
+            "driver": "Global chip policy update (Reuters)",
+            "affected_metric": "trend",
+            "affected_theme": "defence",
+            "direction": "neutral",
+            "confidence": 0.32,
+            "driver_source": "macro",
+            "stock_news_fetched_count": 0,
+            "stock_news_coverage": "empty:empty_feed",
+            "fallback_label": "sector_specific_match_missing_using_global_market_driver",
+            "stock_news": {
+                "fetched_count": 0,
+                "query_used": "HAL",
+                "alias_used": "",
+                "alias_fallback_used": False,
+                "fetch_error": "empty_feed",
+            },
+            "evidence": {
+                "net_news_impact_score": 0.01,
+                "net_news_impact_direction": "neutral",
+                "stock_fetch_error": "empty_feed",
+                "top_headlines": {
+                    "global": [
+                        {
+                            "headline": "Defence exports rise",
+                            "source": "Reuters",
+                            "published_at": "2026-05-30T08:00:00+00:00",
+                            "impact_contribution_score": 0.12,
+                        }
+                    ],
+                    "local": [],
+                    "market": [],
+                    "stock": [],
+                },
+            },
+        },
+    }
+    text = _format_symbol_metrics_line({"symbol": "HAL", "exchange": "NSE", "audit": audit})
+    assert "stock=none (fetch_error=empty_feed; query=HAL)" in text
+    assert "stock_fetch_error=empty_feed" in text
+
+
+def test_apply_global_news_correlation_empty_feed_records_reason(monkeypatch):
+    from sector_audit import _apply_global_news_correlation, _news_evidence_line
+
+    snapshot = {
+        "source": "cached",
+        "sector_scores": {
+            "defence": {
+                "score": 0.1,
+                "confidence": 0.7,
+                "drivers_top": [
+                    {
+                        "title": "Defence demand rises",
+                        "source": "Reuters",
+                        "published_at": "2026-05-30T08:00:00+00:00",
+                        "contribution": 0.08,
+                    }
+                ],
+            }
+        },
+    }
+    monkeypatch.setattr("sector_priority.resolve_global_news_snapshot", lambda _cfg: snapshot)
+    monkeypatch.setattr(
+        "sector_priority.fetch_stock_news_for_symbol",
+        lambda _cfg, symbol, exchange, timeout_seconds=10.0, now_utc=None: {
+            "symbol": symbol,
+            "exchange": exchange,
+            "items": [],
+            "query_used": symbol,
+            "alias_used": "",
+            "fallback_used": False,
+            "error": "empty_feed",
+        },
+    )
+    ok_results = [
+        {
+            "symbol": "HAL",
+            "exchange": "NSE",
+            "audit": {"symbol": "HAL", "exchange": "NSE", "prediction_breakdown": {"week": {"ema_term": 1.0}}},
+        }
+    ]
+    meta = _apply_global_news_correlation(make_cfg(), sector_id="defence", ok_results=ok_results)
+    corr = ok_results[0]["audit"]["news_correlation"]
+    assert meta["applied"] is True
+    assert corr["stock_news_coverage"] == "empty:empty_feed"
+    assert corr["stock_news"]["fetch_error"] == "empty_feed"
+    assert corr["evidence"]["stock_fetch_error"] == "empty_feed"
+    evidence_line = _news_evidence_line(ok_results[0]["audit"])
+    assert "stock=none (fetch_error=empty_feed; query=HAL)" in evidence_line
+
+
+def test_apply_global_news_correlation_missing_helpers_shows_reason_in_evidence(monkeypatch):
+    from sector_audit import _apply_global_news_correlation, _news_evidence_line
+
+    snapshot = {
+        "source": "cached",
+        "sector_scores": {
+            "defence": {
+                "score": 0.19,
+                "confidence": 0.67,
+                "drivers_top": [
+                    {
+                        "title": "Global defence exports rise",
+                        "source": "Reuters",
+                        "published_at": "2026-05-30T08:30:00+00:00",
+                        "contribution": 0.17,
+                    }
+                ],
+            }
+        },
+    }
+    monkeypatch.setattr("sector_priority.resolve_global_news_snapshot", lambda _cfg: snapshot)
+    monkeypatch.delattr("sector_priority.fetch_stock_news_for_symbol", raising=False)
+    monkeypatch.delattr("sector_priority.correlate_stock_news_with_macro", raising=False)
+    ok_results = [
+        {
+            "symbol": "HAL",
+            "exchange": "NSE",
+            "audit": {"symbol": "HAL", "exchange": "NSE", "prediction_breakdown": {"week": {"ema_term": 1.2}}},
+        }
+    ]
+    _apply_global_news_correlation(make_cfg(), sector_id="defence", ok_results=ok_results)
+    corr = ok_results[0]["audit"]["news_correlation"]
+    assert corr["stock_news_coverage"] == "helper_unavailable"
+    evidence_line = _news_evidence_line(ok_results[0]["audit"])
+    assert "stock=none (fetch_error=helper_unavailable)" in evidence_line
+
+
 def test_build_equity_live_audit_records_exchange_fallback_metadata(monkeypatch):
     from sector_audit import build_equity_live_audit
 

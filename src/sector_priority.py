@@ -437,8 +437,10 @@ def _stock_news_query_candidates(*, symbol: str, aliases: list[str]) -> list[str
             continue
         if q not in out:
             out.append(q)
-    if sym and f"{sym} stock" not in out:
-        out.append(f"{sym} stock")
+    for suffix in (" stock", " NSE", " share"):
+        candidate = f"{sym}{suffix}".strip()
+        if sym and candidate not in out:
+            out.append(candidate)
     return out
 
 

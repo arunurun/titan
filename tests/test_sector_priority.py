@@ -448,6 +448,17 @@ def test_correlate_stock_news_with_macro_prefers_stock_driver():
     assert set(["global", "local", "market", "stock"]).issubset(set(top.keys()))
 
 
+def test_stock_news_query_candidates_include_nse_suffix():
+    from sector_priority import _stock_news_query_candidates
+
+    queries = _stock_news_query_candidates(symbol="HAL", aliases=["Hindustan Aeronautics"])
+    assert "HAL" in queries
+    assert "HAL stock" in queries
+    assert "HAL NSE" in queries
+    assert "HAL share" in queries
+    assert "Hindustan Aeronautics" in queries
+
+
 def test_map_news_to_sector_scores_includes_data_centre():
     from sector_priority import map_news_to_sector_scores
 
