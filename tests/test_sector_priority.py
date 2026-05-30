@@ -742,6 +742,66 @@ def test_fetch_stock_news_uses_simple_fallback_when_primary_empty(monkeypatch):
     assert "stock India" in out["query_used"] or "Hindustan" in out["query_used"]
 
 
+def test_fetch_stock_news_retries_simple_fallback_when_primary_filtered(monkeypatch):
+    from sector_priority import fetch_stock_news_for_symbol
+
+    class _Query:
+        def select(self, _fields):
+            return self
+
+        def eq(self, _k, _v):
+            return self
+
+        def limit(self, _n):
+            return self
+
+        def execute(self):
+            return SimpleNamespace(
+                data=[{"symbol": "HAL", "instrument_name": "Hindustan Aeronautics", "breeze_stock_code": "HAL"}]
+            )
+
+    class _Client:
+        def table(self, _name):
+            return _Query()
+
+    monkeypatch.setattr("sector_priority.create_client", lambda _u, _k: _Client())
+    monkeypatch.setattr(
+        "sector_priority.fetch_nse_bulk_block_deals",
+        lambda *_args, **_kwargs: {"items": [], "error": "nse_empty"},
+    )
+    monkeypatch.setattr(
+        "sector_priority.fetch_nse_corporate_announcements",
+        lambda *_args, **_kwargs: {"items": [], "error": "nse_empty"},
+    )
+
+    listicle_rss = """<rss><channel><title>Google News</title>
+    <item><title>5 stocks to buy today including HAL</title><link>https://x/list</link>
+    <pubDate>Tue, 02 Jan 2026 09:00:00 GMT</pubDate><description>Broker picks</description></item>
+    </channel></rss>"""
+    good_rss = """<rss><channel><title>Google News</title>
+    <item><title>Hindustan Aeronautics wins export order</title><link>https://x/hal</link>
+    <pubDate>Tue, 02 Jan 2026 09:00:00 GMT</pubDate><description>Order win</description></item>
+    </channel></rss>"""
+
+    def _fake_get(url, timeout_seconds=10.0):
+        if "when%3A7d" in url or "when:7d" in url:
+            return listicle_rss, None
+        if "stock+India" in url or "Hindustan" in url:
+            return good_rss, None
+        return "<rss><channel><title>Google News</title></channel></rss>", None
+
+    monkeypatch.setattr("sector_priority._http_get_text", _fake_get)
+    out = fetch_stock_news_for_symbol(
+        make_cfg(),
+        symbol="HAL",
+        exchange="NSE",
+        now_utc=datetime(2026, 1, 3, 0, 0, tzinfo=timezone.utc),
+    )
+    assert out["items"]
+    assert out["fallback_used"] is True
+    assert "export order" in out["items"][0]["title"]
+
+
 def test_map_news_to_sector_scores_includes_data_centre():
     from sector_priority import map_news_to_sector_scores
 

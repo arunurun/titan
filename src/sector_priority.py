@@ -1046,6 +1046,49 @@ def _resolve_stock_news_fetch_error(
     return last_error or "empty_feed"
 
 
+def _finalize_stock_news_batch(
+    raw_items: list[dict[str, Any]],
+    *,
+    symbol: str,
+    aliases: list[str],
+    now: datetime,
+    max_items: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
+    normalized = _dedupe_recent_news_items(raw_items, now_utc=now, limit=max_items)
+    filter_input: list[dict[str, Any]] = []
+    for item in normalized:
+        ts_raw = item.get("published_at")
+        ts = _parse_news_timestamp(str(ts_raw)) if not isinstance(ts_raw, datetime) else ts_raw
+        filter_input.append(
+            {
+                **item,
+                "published_at": ts if ts is not None else now,
+            }
+        )
+    filtered_items, filter_meta = _filter_stock_news_items(
+        symbol=symbol,
+        aliases=aliases,
+        items=filter_input,
+    )
+    final_items: list[dict[str, Any]] = []
+    for item in filtered_items[:max_items]:
+        ts = item.get("published_at")
+        if isinstance(ts, datetime):
+            ts_out = ts.isoformat()
+        else:
+            ts_out = str(ts or "").strip()
+        final_items.append(
+            {
+                "title": str(item.get("title", "")).strip(),
+                "url": str(item.get("url", "")).strip(),
+                "summary": str(item.get("summary", "")).strip(),
+                "source": str(item.get("source", "unknown_source")).strip() or "unknown_source",
+                "published_at": ts_out,
+            }
+        )
+    return final_items, filter_meta, filter_input
+
+
 def fetch_stock_news_for_symbol(
     cfg: TitanConfig,
     *,
@@ -1092,6 +1135,7 @@ def fetch_stock_news_for_symbol(
         timeout_seconds=timeout_seconds,
         symbol=sym,
     )
+    primary_google_items = list(google_items)
     if google_items:
         google_rss_found = True
         raw_items.extend(google_items)
@@ -1112,38 +1156,47 @@ def fetch_stock_news_for_symbol(
             last_error = ""
         elif fb_error:
             last_error = fb_error
-    normalized = _dedupe_recent_news_items(raw_items, now_utc=now, limit=max_items)
-    filter_input: list[dict[str, Any]] = []
-    for item in normalized:
-        ts_raw = item.get("published_at")
-        ts = _parse_news_timestamp(str(ts_raw)) if not isinstance(ts_raw, datetime) else ts_raw
-        filter_input.append(
-            {
-                **item,
-                "published_at": ts if ts is not None else now,
-            }
-        )
-    filtered_items, filter_meta = _filter_stock_news_items(
+    final_items, filter_meta, filter_input = _finalize_stock_news_batch(
+        raw_items,
         symbol=sym,
         aliases=aliases,
-        items=filter_input,
+        now=now,
+        max_items=max_items,
     )
-    final_items: list[dict[str, Any]] = []
-    for item in filtered_items[:max_items]:
-        ts = item.get("published_at")
-        if isinstance(ts, datetime):
-            ts_out = ts.isoformat()
-        else:
-            ts_out = str(ts or "").strip()
-        final_items.append(
-            {
-                "title": str(item.get("title", "")).strip(),
-                "url": str(item.get("url", "")).strip(),
-                "summary": str(item.get("summary", "")).strip(),
-                "source": str(item.get("source", "unknown_source")).strip() or "unknown_source",
-                "published_at": ts_out,
-            }
+    if (
+        not final_items
+        and primary_google_items
+        and fallback_queries
+        and not query_fallback_used
+    ):
+        nse_only = [
+            item
+            for item in raw_items
+            if str(item.get("source") or "").strip().lower() in _STOCK_NEWS_NSE_SOURCES
+        ]
+        fallback_items, fb_query, fb_alias, fb_error = _fetch_google_news_rss_items(
+            fallback_queries,
+            timeout_seconds=timeout_seconds,
+            symbol=sym,
         )
+        if fallback_items:
+            google_rss_found = True
+            query_fallback_used = True
+            raw_items = nse_only + fallback_items
+            if fb_query:
+                used_query = fb_query
+            if fb_alias:
+                used_alias = fb_alias
+            last_error = ""
+            final_items, filter_meta, filter_input = _finalize_stock_news_batch(
+                raw_items,
+                symbol=sym,
+                aliases=aliases,
+                now=now,
+                max_items=max_items,
+            )
+        elif fb_error and not last_error:
+            last_error = fb_error
     fetch_error = _resolve_stock_news_fetch_error(
         final_items=final_items,
         pre_filter_count=len(filter_input),
