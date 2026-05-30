@@ -1,0 +1,109 @@
+Hello AJ! hope you are doing well.
+
+# Workflow (Mandatory)
+
+These instructions are mandatory for all agent tasks in this workspace.
+
+## Branching and Git
+
+- Never commit directly on `main`.
+- Always create/use a feature branch for implementation work.
+- Test relevant changes before requesting merge.
+- Merge to `main` only after explicit user confirmation.
+
+## Commit and Push Approval
+
+- Before any commit/push, share:
+  - files changed
+  - concise change summary
+  - tests run and outcomes
+- Proceed with commit/push only after explicit user approval.
+
+## Documentation Sync
+
+- Keep `main` changes in sync with:
+  - https://docs.google.com/document/d/1HHevbz7fVpbRZqDNCtVKrrEB6SQad88yIot2TKtnvhw/edit?tab=t.0
+- For meaningful code changes, update `docs/TITAN_FRAMEWORK_DEEP_DIVE.md` and run doc sync:
+  - `python scripts/sync_markdown_to_gdoc.py`
+- If credentials are unavailable, report that as a blocker and provide exact next steps.
+
+## Planning and Execution
+
+- Before direct code edits, provide a checklist of action items.
+- Execute tasks step-by-step against the checklist and keep progress explicit.
+
+## Quality Gate
+
+- Double-check proposals before presenting them.
+- Validate assumptions against code and tests.
+- Prefer safe, reversible changes; call out risk and edge cases clearly.
+
+## Fallback and Failure Behavior
+
+- Do not silently hide missing required data/sources behind fallback logic unless the user approved that behavior.
+- When a fallback path is used, log and communicate it explicitly with reason and impact.
+- For blocker conditions, fail fast with exact root cause and next-step remediation.
+
+## Deploy and Release Gate
+
+- Before any deploy, provide a pre-deploy checklist:
+  - branch and target environment
+  - exact files changed
+  - tests run and outcomes
+  - schema/data migration impact
+  - rollback plan
+  - documentation sync status
+- After deploy, provide live verification evidence (endpoint/output checks and run URL if applicable).
+
+## Data and Schema Safety
+
+- Any Supabase/DB schema change must include:
+  - idempotent migration SQL
+  - backward compatibility note
+  - validation query
+  - rollback query (when feasible)
+- Never run destructive data operations without explicit user approval.
+
+## Secrets and Security
+
+- Never print secret/token values in logs or responses.
+- Never commit credential files (JSON keys, .env secrets, private tokens).
+- Use secret names and storage locations, never raw secret values.
+
+## Observability
+
+- For runtime-impacting features, add explicit log markers for:
+  - success
+  - fallback path
+  - failure cause
+- Ensure logs are actionable and include context keys (sector, run_id, mode) where relevant.
+
+## Runtime Verification Standard
+
+- For workflow/runtime changes, run at least one real execution path and capture:
+  - run URL
+  - success/failure state
+  - key evidence lines confirming intended behavior
+
+## User-Facing Output Standards
+
+- Every user-facing metric summary should include:
+  - what it means
+  - threshold/band context
+  - caveat where confidence is heuristic/probabilistic
+- Avoid internal-only jargon without explanation.
+
+## Working Tree and Conflict Handling
+
+- If unexpected local changes are present, pause and confirm with the user before editing related files.
+- Do not revert or overwrite unrelated local modifications.
+
+## Definition of Done
+
+- A task is done only when all applicable items are complete:
+  - implementation
+  - tests
+  - deploy (if requested)
+  - live verification
+  - documentation sync
+  - user confirmation for commit/push/merge actions
