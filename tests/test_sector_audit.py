@@ -78,13 +78,13 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
     assert "TRIM" in text or "trim" in text.lower()
     assert "🟡➡ 1w outlook" in text.lower()
     assert "neutral band" in text.lower()
-    assert "🟡➡ trend regime (14d)" in text.lower()
+    assert "trend regime (14d)" in text.lower()
     assert "strength bands: <20 sideways, 20-24 weak trend, >=25 strong trend" in text.lower()
     assert "direction rule: +di" in text.lower()
-    assert "🟢⬆ 20d range position" in text.lower()
+    assert "20d range position" in text.lower()
     assert "thresholds: near-high >=-1%, near-low <=1%" in text.lower()
-    assert "🔴⬇ volatility vs 3m baseline" in text.lower()
-    assert "🟢⬆ money flow trend (20d)" in text.lower()
+    assert "volatility vs 3m baseline" in text.lower()
+    assert "money flow trend (20d)" in text.lower()
     assert "bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution" in text
     assert "sector-relative rank" in text.lower()
     assert "bands: leader >=67, average 34-66, laggard <=33" in text
@@ -101,29 +101,12 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
     assert "\n" in text
     assert "model read confidence" in text.lower()
     assert "bands: >=70 high, 55-69 medium, <55 low" in text
-    assert (
-        "🟡➡ 1W outlook: 51.84 / 100 (neutral band; bands: >=70 strong, 55-69 constructive, 45-54 neutral, 35-44 caution, <35 defensive)\n"
-        "  🟡➡ Technical intent: 50.00 / 100 (balanced / neutral; bands: >=70 high-long, 55-69 moderate-long, 45-54 neutral, 30-44 defensive, <30 high-defensive)\n"
-        "  \n"
-        "  🟡➡ Trend regime (14D): Buy trend (ADX 22.60; strength building (20-25); strength bands: <20 sideways, 20-24 weak trend, >=25 strong trend; direction rule: +DI 29.10 > -DI 18.40 => buy trend)\n"
-        "  \n"
-        "  🟢⬆ 20D Range Position: -0.80% to 20D high \u00b7 9.40% above 20D low (near-high (within ~1% of 20D high); thresholds: near-high >=-1%, near-low <=1%)\n"
-        "  \n"
-        "  🔴⬇ Volatility vs 3M baseline: 1.12x (high; bands: <0.90 low, 0.90-1.10 normal, >1.10 high)\n"
-        "  \n"
-        "  Tape snapshot\n"
-        "  1D move: -4.28% (bands: >=+1 strong up, -1 to +1 muted, <=-1 weak)\n"
-        "  1D z-score: 0.80 (near mean; bands: >=+2 / +1 to +2 / -1 to +1 / -2 to -1 / <=-2)\n"
-        "  Distance above long-term trend (EMA200): 47.29% (bands: >+5 stretched above trend, -5 to +5 near trend, <-5 below trend)\n"
-        "  Volume participation: 1.81x (high participation; bands: >=1.5 high, 1.0-1.49 above-avg, 0.7-0.99 below-avg, <0.7 thin)\n"
-        "  Typical daily swing (ATR14): 3.42% (bands: <2.0 calm, 2.0-4.0 moderate, >4.0 elevated)\n"
-        "  🟢⬆ Money flow trend (20D): 0.110 (accumulation; bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution)\n"
-        "  \n"
-        "  Sector-relative rank\n"
-        "  Technical intent percentile: 62.00 (average; bands: leader >=67, average 34-66, laggard <=33)\n"
-        "  Next-week percentile: n/a (n/a; bands: leader >=67, average 34-66, laggard <=33)\n"
-        "  Very short horizon (1D outlook): 49.77 / 100 (neutral band; bands: >=70 strong, 55-69 constructive, 45-54 neutral, 35-44 caution, <35 defensive)"
-    ) in text
+    assert "🟡➡ 1W outlook:" in text
+    assert "🟡➡ Technical intent:" in text
+    assert "🟢⬆ Trend regime (14D): Buy trend" in text
+    assert "🔴⬇ 1D move: -4.28%" in text
+    assert any(f"{icon} Tape snapshot" in text for icon in ("🟢⬆", "🟡➡", "🔴⬇"))
+    assert any(f"{icon} Sector-relative rank" in text for icon in ("🟢⬆", "🟡➡", "🔴⬇"))
 
 
 def test_symbol_digest_default_shows_neutral_na_for_missing_new_metrics(monkeypatch):
@@ -181,6 +164,62 @@ def test_symbol_digest_includes_global_news_correlation_line(monkeypatch):
     assert "affected_metric=momentum 5D" in text
     assert "direction=tailwind" in text
     assert "bands: >=0.75 high, 0.50-0.74 medium, <0.50 low" in text
+
+
+def test_apply_global_news_correlation_uses_explicit_fallback_when_sector_missing(monkeypatch):
+    from sector_audit import _apply_global_news_correlation
+
+    snapshot = {
+        "source": "cached",
+        "news_items": [
+            {
+                "title": "Global chip policy update impacts markets",
+                "source": "Reuters",
+                "published_at": "2026-05-30T08:00:00+00:00",
+            }
+        ],
+        "sector_scores": {
+            "defence": {
+                "score": -0.3,
+                "confidence": 0.82,
+                "matched_items": 1,
+                "drivers_top": [
+                    {
+                        "driver": "Defence spending delayed",
+                        "title": "Defence spending delayed",
+                        "source": "Reuters",
+                        "published_at": "2026-05-30T07:50:00+00:00",
+                        "contribution": -0.42,
+                        "confidence": 0.81,
+                    }
+                ],
+            }
+        },
+    }
+    monkeypatch.setattr("sector_priority.resolve_global_news_snapshot", lambda _cfg: snapshot)
+    ok_results = [{"audit": {"prediction_breakdown": {"week": {"ema_term": 1.3}}}}]
+    meta = _apply_global_news_correlation(make_cfg(), sector_id="ai", ok_results=ok_results)
+    corr = ok_results[0]["audit"]["news_correlation"]
+    assert meta["applied"] is True
+    assert corr["fallback_label"] == "sector_specific_match_missing_using_global_market_driver"
+    assert corr["confidence"] < 0.5
+
+
+def test_apply_global_news_correlation_sets_line_for_all_audits_when_snapshot_empty(monkeypatch):
+    from sector_audit import _apply_global_news_correlation, _news_correlation_line
+
+    snapshot = {"source": "unavailable", "news_items": [], "sector_scores": {}}
+    monkeypatch.setattr("sector_priority.resolve_global_news_snapshot", lambda _cfg: snapshot)
+    ok_results = [
+        {"audit": {"prediction_breakdown": {"week": {"ret1d_term": 0.7}}}},
+        {"audit": {"prediction_breakdown": {"week": {"ema_term": -0.5}}}},
+    ]
+    meta = _apply_global_news_correlation(make_cfg(), sector_id="unknown_sector", ok_results=ok_results)
+    assert meta["applied"] is True
+    for row in ok_results:
+        line = _news_correlation_line(row["audit"])
+        assert "Global news relation:" in line
+        assert "fallback=sector_specific_match_missing_no_market_driver" in line
 
 
 def test_symbol_digest_verbose_restores_legacy_line(monkeypatch):

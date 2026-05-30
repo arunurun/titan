@@ -187,6 +187,71 @@ def _atr_regime_icon(ratio: Any) -> str:
     return "🟡➡"
 
 
+def _state_for_metric(v: Any, *, bullish_above: float, bearish_below: float) -> int:
+    f = _safe_float(v)
+    if math.isnan(f):
+        return 0
+    if f >= bullish_above:
+        return 1
+    if f <= bearish_below:
+        return -1
+    return 0
+
+
+def _tape_snapshot_icon(audit: dict[str, Any]) -> str:
+    states: list[int] = []
+    states.append(_state_for_metric(audit.get("return_1d_pct"), bullish_above=1.0, bearish_below=-1.0))
+    states.append(_state_for_metric(audit.get("z_score"), bullish_above=1.0, bearish_below=-1.0))
+    states.append(
+        _state_for_metric(audit.get("ema_200_distance_pct"), bullish_above=5.0, bearish_below=-5.0)
+    )
+    states.append(
+        _state_for_metric(
+            _volume_participation_for_digest_label(audit),
+            bullish_above=1.5,
+            bearish_below=0.7,
+        )
+    )
+    atr_pct = _safe_float(audit.get("atr_14_pct"))
+    if not math.isnan(atr_pct):
+        if atr_pct < 2.0:
+            states.append(1)
+        elif atr_pct > 4.0:
+            states.append(-1)
+        else:
+            states.append(0)
+    states.append(_state_for_metric(audit.get("cmf_20"), bullish_above=0.05, bearish_below=-0.05))
+    if not states:
+        return "🟡➡"
+    avg = sum(states) / len(states)
+    if avg >= 0.25:
+        return "🟢⬆"
+    if avg <= -0.25:
+        return "🔴⬇"
+    return "🟡➡"
+
+
+def _sector_relative_rank_icon(audit: dict[str, Any]) -> str:
+    states = [
+        _state_for_metric(
+            audit.get("sector_pctile_effective_intent"),
+            bullish_above=67.0,
+            bearish_below=33.0,
+        ),
+        _state_for_metric(
+            audit.get("sector_pctile_next_week_score"),
+            bullish_above=67.0,
+            bearish_below=33.0,
+        ),
+    ]
+    avg = sum(states) / len(states)
+    if avg >= 0.5:
+        return "🟢⬆"
+    if avg <= -0.5:
+        return "🔴⬇"
+    return "🟡➡"
+
+
 def _adx_strength_band(adx_val: Any) -> str:
     adx = _safe_float(adx_val)
     if math.isnan(adx):
@@ -384,6 +449,7 @@ def _news_correlation_line(audit: dict[str, Any]) -> str:
     theme = str(corr.get("affected_theme") or "").strip()
     direction = str(corr.get("direction") or "").strip().lower()
     conf = _safe_float(corr.get("confidence"))
+    fallback_label = str(corr.get("fallback_label") or "").strip()
     if not driver or not metric:
         return ""
     if direction == "tailwind":
@@ -406,6 +472,7 @@ def _news_correlation_line(audit: dict[str, Any]) -> str:
         f"Global news relation: driver={driver} · theme={theme_txt} · "
         f"affected_metric={metric} · direction={dir_label} · confidence={conf_txt} "
         f"({conf_band}; bands: >=0.75 high, 0.50-0.74 medium, <0.50 low)"
+        + (f" · fallback={fallback_label}" if fallback_label else "")
     )
 
 
@@ -466,7 +533,11 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
             )
     else:
         direction_rule = "direction source unavailable"
-    trend_icon = _metric_icon(adx_14, bullish_above=25.0, bearish_below=15.0)
+    trend_icon = "🟡➡"
+    if trend_regime == "Buy trend":
+        trend_icon = "🟢⬆"
+    elif trend_regime == "Sell trend":
+        trend_icon = "🔴⬇"
     range_icon = _breakout_state_icon(breakout_to_high, breakout_above_low)
     atr_icon = _atr_regime_icon(atr_ratio)
     lines_out.append(
@@ -486,25 +557,36 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
         f"({_atr_ratio_band(atr_ratio)}; bands: <0.90 low, 0.90-1.10 normal, >1.10 high)"
     )
     lines_out.append("")
-    lines_out.append("Tape snapshot")
+    lines_out.append(f"{_tape_snapshot_icon(audit)} Tape snapshot")
     lines_out.append(
+        f"{_metric_icon(ret1d, bullish_above=1.0, bearish_below=-1.0)} "
         f"1D move: {_fmt_metric(ret1d)}% "
         f"(bands: >=+1 strong up, -1 to +1 muted, <=-1 weak)"
     )
     lines_out.append(
+        f"{_metric_icon(z, bullish_above=1.0, bearish_below=-1.0)} "
         f"1D z-score: {_fmt_metric(z)} "
         f"({_z_label(z)}; bands: >=+2 / +1 to +2 / -1 to +1 / -2 to -1 / <=-2)"
     )
     lines_out.append(
+        f"{_metric_icon(ema_dist, bullish_above=5.0, bearish_below=-5.0)} "
         f"Distance above long-term trend (EMA200): {_fmt_metric(ema_dist)}% "
         f"(bands: >+5 stretched above trend, -5 to +5 near trend, <-5 below trend)"
     )
     lines_out.append(
+        f"{_metric_icon(vpr_label_src, bullish_above=1.5, bearish_below=0.7)} "
         f"Volume participation: {_fmt_metric(vpr_label_src)}x "
         f"({_volume_participation_label(vpr_label_src)}; bands: >=1.5 high, 1.0-1.49 above-avg, 0.7-0.99 below-avg, <0.7 thin)"
     )
+    atr_icon_tape = "🟡➡"
+    atr_v = _safe_float(atr_pct)
+    if not math.isnan(atr_v):
+        if atr_v < 2.0:
+            atr_icon_tape = "🟢⬆"
+        elif atr_v > 4.0:
+            atr_icon_tape = "🔴⬇"
     lines_out.append(
-        f"Typical daily swing (ATR14): {_fmt_metric(atr_pct)}% "
+        f"{atr_icon_tape} Typical daily swing (ATR14): {_fmt_metric(atr_pct)}% "
         f"(bands: <2.0 calm, 2.0-4.0 moderate, >4.0 elevated)"
     )
     cmf_icon = _metric_icon(cmf_val, bullish_above=0.05, bearish_below=-0.05)
@@ -515,19 +597,22 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     )
     lines_out.append("")
 
-    lines_out.append("Sector-relative rank")
+    lines_out.append(f"{_sector_relative_rank_icon(audit)} Sector-relative rank")
     sp_int = audit.get("sector_pctile_effective_intent")
     lines_out.append(
+        f"{_metric_icon(sp_int, bullish_above=67.0, bearish_below=33.0)} "
         f"Technical intent percentile: {_fmt_metric(sp_int)} "
         f"({_sector_rank_band(sp_int)}; bands: leader >=67, average 34-66, laggard <=33)"
     )
     sp_nw = audit.get("sector_pctile_next_week_score")
     lines_out.append(
+        f"{_metric_icon(sp_nw, bullish_above=67.0, bearish_below=33.0)} "
         f"Next-week percentile: {_fmt_metric(sp_nw)} "
         f"({_sector_rank_band(sp_nw)}; bands: leader >=67, average 34-66, laggard <=33)"
     )
     nd_l = _horizon_score_label(nf)
     lines_out.append(
+        f"{_metric_icon(nf, bullish_above=55.0, bearish_below=45.0)} "
         f"Very short horizon (1D outlook): {_fmt_metric(nf)} / 100 "
         f"({nd_l}; {_horizon_score_bands_text()})"
     )
@@ -1267,17 +1352,68 @@ def _apply_global_news_correlation(
         return {"applied": False, "reason": "news_module_unavailable"}
     snapshot = resolve_global_news_snapshot(cfg)
     scores = snapshot.get("sector_scores")
-    if not isinstance(scores, dict):
-        return {"applied": False, "reason": "news_scores_unavailable", "snapshot": snapshot}
-    sector_news = scores.get(str(sector_id).strip().lower())
-    if not isinstance(sector_news, dict):
-        return {"applied": False, "reason": "sector_news_missing", "snapshot": snapshot}
+    scores = scores if isinstance(scores, dict) else {}
+    sector_key = str(sector_id).strip().lower()
+    sector_news = scores.get(sector_key)
+    sector_news = sector_news if isinstance(sector_news, dict) else {}
     score = _safe_float(sector_news.get("score"))
     confidence = _safe_float(sector_news.get("confidence"))
+    matched_items = int(sector_news.get("matched_items") or 0)
     drivers = sector_news.get("drivers_top")
-    top_driver = drivers[0] if isinstance(drivers, list) and drivers else {}
-    if not isinstance(top_driver, dict):
-        top_driver = {}
+    drivers_list = [d for d in (drivers if isinstance(drivers, list) else []) if isinstance(d, dict)]
+    fallback_label = ""
+
+    if matched_items <= 0 or not drivers_list:
+        candidates: list[dict[str, Any]] = []
+        for score_row in scores.values():
+            if not isinstance(score_row, dict):
+                continue
+            dtop = score_row.get("drivers_top")
+            if not isinstance(dtop, list):
+                continue
+            candidates.extend(d for d in dtop if isinstance(d, dict))
+        if candidates:
+            drivers_list = sorted(
+                candidates,
+                key=lambda d: abs(_safe_float(d.get("contribution"))),
+                reverse=True,
+            )
+            top = drivers_list[0]
+            top_contrib = _safe_float(top.get("contribution"))
+            score = top_contrib if not math.isnan(top_contrib) else 0.0
+            top_conf = _safe_float(top.get("confidence"))
+            if math.isnan(top_conf):
+                top_conf = 0.35
+            confidence = min(0.49, top_conf)
+            source = str(top.get("source") or "").lower()
+            scope = "local" if any(k in source for k in ("india", "nse", "bse", "moneycontrol")) else "global"
+            fallback_label = f"sector_specific_match_missing_using_{scope}_market_driver"
+        else:
+            news_items = snapshot.get("news_items")
+            news_items = news_items if isinstance(news_items, list) else []
+            if news_items and isinstance(news_items[0], dict):
+                first = news_items[0]
+                title = str(first.get("title") or "").strip() or "Global market headlines"
+                source = str(first.get("source") or "").strip() or "unknown_source"
+                drivers_list = [{"title": title, "driver": title, "source": source, "contribution": 0.0}]
+                score = 0.0
+                confidence = 0.3
+                scope = "local" if "india" in source.lower() else "global"
+                fallback_label = f"sector_specific_match_missing_using_{scope}_market_driver"
+            else:
+                drivers_list = [
+                    {
+                        "title": "No recent market driver available",
+                        "driver": "No recent market driver available",
+                        "source": "snapshot_unavailable",
+                        "contribution": 0.0,
+                    }
+                ]
+                score = 0.0
+                confidence = 0.2
+                fallback_label = "sector_specific_match_missing_no_market_driver"
+
+    top_driver = drivers_list[0] if drivers_list else {}
     if math.isnan(score):
         score = 0.0
     if score > 0.02:
@@ -1303,6 +1439,7 @@ def _apply_global_news_correlation(
             "affected_theme": str(sector_id).strip().lower(),
             "direction": direction,
             "confidence": None if math.isnan(confidence) else round(confidence, 4),
+            "fallback_label": fallback_label,
         }
         applied += 1
     return {
@@ -1310,6 +1447,7 @@ def _apply_global_news_correlation(
         "applied_count": applied,
         "snapshot": snapshot,
         "sector_news_score": round(score, 4),
+        "fallback_label": fallback_label,
     }
 
 
