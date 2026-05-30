@@ -104,6 +104,9 @@ TEMPLATE = """
         background: var(--g-blue);
       }
       button:hover { filter: brightness(0.95); }
+      button.btn-reconcile { background: var(--g-green); }
+      details { margin-top: 10px; }
+      details summary { cursor: pointer; color: var(--muted); font-size: 0.92rem; }
       .ok { color: var(--g-green); font-weight: bold; }
       .warn { color: #c26401; font-weight: bold; }
       .err { color: var(--g-red); font-weight: bold; }
@@ -180,12 +183,13 @@ TEMPLATE = """
     </div>
 
     <div class="card">
-      <h3>Run Reconcile Report (Supabase-only)</h3>
+      <h3>Run Reconcile Now</h3>
+      <p class="hint">Manual post-market reconcile. Run after daily Titan analysis has populated Supabase for several sessions (typically ~1 week). Sends one report-only email; no per-stock analysis.</p>
       <form method="post" action="/run-reconcile">
         <label>Reconcile scope</label>
         <select name="reconcile_scope">
+          <option value="sector" {% if reconcile_scope == "sector" %}selected{% endif %}>Single sector (recommended)</option>
           <option value="all-stocks" {% if reconcile_scope == "all-stocks" %}selected{% endif %}>All stocks</option>
-          <option value="sector" {% if reconcile_scope == "sector" %}selected{% endif %}>Single sector</option>
         </select>
         <label>Sector ID (when scope = sector)</label>
         <select name="reconcile_sector_id">
@@ -193,12 +197,15 @@ TEMPLATE = """
             <option value="{{ sid }}" {% if reconcile_selected_sector == sid %}selected{% endif %}>{{ sid }}</option>
           {% endfor %}
         </select>
-        <label>Backfill days (optional)</label>
-        <input name="reconcile_backfill_days" value="{{ reconcile_backfill_days or '0' }}" />
-        <label><input type="checkbox" name="reconcile_backfill_only" {% if reconcile_backfill_only %}checked{% endif %} /> Backfill only (skip report generation)</label>
-        <button type="submit">Run Reconcile</button>
+        <details>
+          <summary>Advanced options</summary>
+          <label>Backfill days (optional)</label>
+          <input name="reconcile_backfill_days" value="{{ reconcile_backfill_days or '0' }}" />
+          <label><input type="checkbox" name="reconcile_backfill_only" {% if reconcile_backfill_only %}checked{% endif %} /> Backfill only (skip report email)</label>
+        </details>
+        <button type="submit" class="btn-reconcile">Run Reconcile Now</button>
       </form>
-      <p class="hint">Uses Supabase analytics tables only. Breeze/market fetch is blocked in reconcile mode.</p>
+      <p class="hint">Supabase-only: Breeze and live market fetch are blocked in reconcile mode.</p>
     </div>
 
     <div class="card">
@@ -419,7 +426,7 @@ def _render_page(**kwargs):
     if selected_sector not in sectors:
         selected_sector = sectors[0] if sectors else "defence"
     run_mode = str(kwargs.pop("run_mode", None) or "sector")
-    reconcile_scope = str(kwargs.pop("reconcile_scope", None) or "all-stocks")
+    reconcile_scope = str(kwargs.pop("reconcile_scope", None) or "sector")
     if reconcile_scope not in ("all-stocks", "sector"):
         reconcile_scope = "all-stocks"
     reconcile_selected_sector = str(kwargs.pop("reconcile_selected_sector", None) or "defence")
@@ -494,7 +501,7 @@ def run_analysis():
 @app.post("/run-reconcile")
 def run_reconcile():
     load_dotenv(ROOT / ".env", override=False)
-    scope = request.form.get("reconcile_scope", "all-stocks").strip()
+    scope = request.form.get("reconcile_scope", "sector").strip()
     sector_id = request.form.get("reconcile_sector_id", "defence").strip()
     backfill_days = request.form.get("reconcile_backfill_days", "0").strip()
     backfill_only = request.form.get("reconcile_backfill_only") == "on"

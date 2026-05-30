@@ -3,6 +3,7 @@
 Basic local UI for operational controls:
 
 - Run Titan analysis on demand (`--live` or `--sector`).
+- **Run Reconcile Now** — Supabase-only post-market report (manual trigger; use after daily Titan runs have stored analysis for ~1 week).
 - Validate Breeze token from Supabase `session_config`.
 - Paste a new `API_Session` token (or redirect URL), validate it, and persist to Supabase.
 - Run portfolio summary from holdings PDF path or pasted holdings text fallback.
