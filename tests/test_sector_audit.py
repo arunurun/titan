@@ -489,6 +489,12 @@ def test_run_sector_live_digest_one_gemini_call(mock_load, mock_metrics, mock_em
     assert "One combined post" in body
     assert "Per-symbol metrics" in body
     assert "Risk overlays" in body
+    assert "Long-term trend breadth (stocks above 200-day Exponential Moving Average):" in body
+    assert "Volume participation breadth (stocks with above-average traded volume):" in body
+    assert "Event-based risk adjustments applied:" in body
+    assert "Macro risk filters: not applied (macro market snapshot unavailable)" in body
+    assert "Average next-week score for top 5 ranked stocks:" in body
+    assert "Score gap between highest-ranked and lowest-ranked stock:" in body
 
 
 @patch("email_notify.send_success_post_email")
@@ -557,7 +563,61 @@ def test_run_sector_live_macro_guardrail_applied(mock_load, mock_metrics, mock_e
                                 )
 
     body = mock_email.call_args[0][0]
-    assert "Macro guardrail applied: yes" in body
+    assert "Macro risk filters: applied" in body
+    assert "--- EOD Reconcile (Decision-first) ---" not in body
+
+
+@patch("email_notify.send_success_post_email")
+@patch("sector_audit._process_one_metrics")
+@patch("sector_audit.load_sector_instruments")
+def test_run_sector_live_reconcile_report_only_suppresses_legacy_blocks(
+    mock_load, mock_metrics, mock_email, monkeypatch
+):
+    from sector_audit import run_sector_live
+
+    monkeypatch.setenv("TITAN_RECONCILE_MODE", "1")
+    monkeypatch.setenv("TITAN_RECONCILE_REPORT_ONLY", "1")
+    mock_load.return_value = [SectorInstrument("A", "NSE")]
+    mock_metrics.side_effect = [
+        {
+            "ok": True,
+            "symbol": "A",
+            "exchange": "NSE",
+            "audit": {
+                "symbol": "A",
+                "z_score": 1.0,
+                "intent_score": 62.0,
+                "effective_intent_score": 60.0,
+                "absorption_ratio": 1.2,
+                "return_1d_pct": 0.6,
+                "rows": 30,
+            },
+            "error": None,
+        }
+    ]
+    with patch("breeze_client.create_breeze_session", return_value=MagicMock()):
+        with patch("brain.generate_sector_digest_narrative", return_value="One combined post"):
+            with patch("supabase_log.save_audit_log"):
+                with patch(
+                    "analysis_store.persist_sector_run_analytics",
+                    return_value={"persisted": True, "run_id": "test-report-only"},
+                ):
+                    with patch("analysis_store.update_sector_period_rollups"):
+                        with patch(
+                            "analysis_store.build_comparison_payload",
+                            return_value={"enabled": False},
+                        ):
+                            with patch(
+                                "analysis_store.persist_llm_digest_memory",
+                                return_value={"persisted": True},
+                            ):
+                                run_sector_live("defence", max_workers=1, digest=True)
+
+    body = mock_email.call_args[0][0]
+    assert "--- EOD Reconcile (Decision-first) ---" in body
+    assert "Report-only enforcement" in body
+    assert "Per-symbol metrics" not in body
+    assert "LLM forensic narrative" not in body
 
 
 @patch("sector_audit._process_one_metrics")
