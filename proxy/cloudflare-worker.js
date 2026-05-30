@@ -9,6 +9,7 @@
  * - SUPABASE_URL (optional: enables GET /insights/latest for TWA / mobile UI)
  * - SUPABASE_SERVICE_ROLE_KEY (optional: same; service role — never expose to browser)
  * - GET /insights/github-run/:id — digest for a specific GitHub Actions run (+ sector)
+ * - GET /sectors/active — active sector list for UI dropdowns
  */
 
 const ALLOWED_WORKFLOWS = new Set([
@@ -54,6 +55,7 @@ const IMPACT_NEWS_TERMS = {
   contract: 0.2,
   capex: 0.3,
 };
+const EXCLUDED_SECTOR_IDS = new Set(["unknown", "non_equity"]);
 
 function toStringInput(v) {
   return typeof v === "string" ? v.trim() : "";
@@ -728,6 +730,50 @@ async function fetchLatestInsight(env, sector) {
   return { ok: true, insight };
 }
 
+async function fetchActiveSectors(env) {
+  const base = String(env.SUPABASE_URL || "").trim().replace(/\/+$/, "");
+  const key = String(env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
+  if (!base || !key) {
+    throw new Error("Missing worker secrets: SUPABASE_URL and/or SUPABASE_SERVICE_ROLE_KEY");
+  }
+  const url = new URL(`${base}/rest/v1/sector_catalog`);
+  url.searchParams.set("select", "sector_key,is_active");
+  url.searchParams.set("is_active", "is.true");
+  url.searchParams.append("sector_key", "not.in.(unknown,non_equity)");
+  url.searchParams.set("order", "sector_key.asc");
+
+  const res = await fetch(url.toString(), {
+    headers: {
+      apikey: key,
+      Authorization: `Bearer ${key}`,
+      Accept: "application/json",
+    },
+  });
+  const txt = await res.text();
+  if (!res.ok) {
+    throw new Error(`Supabase REST ${res.status}: ${txt.slice(0, 500)}`);
+  }
+  let rows;
+  try {
+    rows = txt ? JSON.parse(txt) : [];
+  } catch (_e) {
+    throw new Error("Supabase REST returned non-JSON");
+  }
+  if (!Array.isArray(rows)) {
+    throw new Error("Supabase REST returned non-array rows");
+  }
+  const sectors = [];
+  const seen = new Set();
+  for (const row of rows) {
+    const keyRaw = toStringInput(row?.sector_key).toLowerCase();
+    if (!keyRaw || !SECTOR_ID_RE.test(keyRaw) || EXCLUDED_SECTOR_IDS.has(keyRaw)) continue;
+    if (seen.has(keyRaw)) continue;
+    seen.add(keyRaw);
+    sectors.push(keyRaw);
+  }
+  return sectors;
+}
+
 async function countDigestMemoryRows(base, key) {
   const url = `${base}/rest/v1/llm_digest_memory?select=run_id&limit=1`;
   const res = await fetch(url, {
@@ -1022,6 +1068,31 @@ export default {
         const status = await latestNewsSnapshotStatus(env);
         return json(status);
       }
+
+      if (isGetLike && path === "/sectors/active") {
+        try {
+          const sectors = await fetchActiveSectors(env);
+          return json({
+            ok: true,
+            sectors,
+            count: sectors.length,
+            source: "supabase.sector_catalog",
+            excluded: Array.from(EXCLUDED_SECTOR_IDS),
+          });
+        } catch (e) {
+          const msg = String(e.message || e);
+          const isMissingSecrets = msg.includes("Missing worker secrets");
+          return json(
+            {
+              ok: false,
+              code: isMissingSecrets ? "missing_supabase_secrets" : "sectors_fetch_failed",
+              error: msg,
+            },
+            isMissingSecrets ? 503 : 502,
+          );
+        }
+      }
+
 
       const ghRunInsightMatch = path.match(/^\/insights\/github-run\/(\d{1,20})$/);
       if (isGetLike && ghRunInsightMatch) {
