@@ -25,6 +25,7 @@ create table if not exists public.symbol_daily_features (
     run_ts timestamptz not null,
     intent_score double precision null,
     effective_intent_score double precision null,
+    action_signal text null,
     z_score double precision null,
     absorption_ratio double precision null,
     return_1d_pct double precision null,
@@ -73,6 +74,36 @@ create table if not exists public.sector_period_rollup (
     primary key (period_type, period_end, sector)
 );
 
+create table if not exists public.stock_signal_transition_analytics (
+    trade_date date not null,
+    sector text not null,
+    symbol text not null,
+    exchange text not null,
+    run_id text null references public.run_metadata(run_id) on delete set null,
+    trailing_window_days integer not null default 30,
+    previous_signal text null,
+    current_signal text not null,
+    transition_type text not null,
+    transition_date date null,
+    days_in_previous_signal integer null,
+    buy_signal_consistency_ratio double precision not null default 0,
+    hold_signal_consistency_ratio double precision not null default 0,
+    trim_signal_consistency_ratio double precision not null default 0,
+    exit_risk_signal_consistency_ratio double precision not null default 0,
+    transition_stability_score double precision not null default 0,
+    is_whipsaw_transition boolean not null default false,
+    whipsaw_transition_count integer not null default 0,
+    transition_event_count integer not null default 0,
+    matured_1w_available boolean not null default false,
+    matured_1w_realized_return_pct double precision null,
+    matured_1w_outcome text null,
+    matured_1m_available boolean not null default false,
+    matured_1m_realized_return_pct double precision null,
+    matured_1m_outcome text null,
+    computed_at timestamptz not null default now(),
+    primary key (trade_date, sector, symbol, exchange, trailing_window_days)
+);
+
 create table if not exists public.llm_digest_memory (
     run_id text primary key,
     sector text not null,
@@ -96,6 +127,12 @@ create index if not exists idx_sector_daily_rollup_sector_date
 
 create index if not exists idx_sector_period_rollup_sector_period
     on public.sector_period_rollup (sector, period_type, period_end desc);
+
+create index if not exists idx_stock_signal_transition_sector_date
+    on public.stock_signal_transition_analytics (sector, trade_date desc);
+
+create index if not exists idx_stock_signal_transition_symbol_date
+    on public.stock_signal_transition_analytics (symbol, exchange, trade_date desc);
 
 create index if not exists idx_llm_digest_memory_sector_recorded
     on public.llm_digest_memory (sector, recorded_at desc);
