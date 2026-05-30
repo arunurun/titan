@@ -39,9 +39,11 @@ _DEFAULT_NEWS_FEEDS: tuple[str, ...] = (
     "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
     "https://www.aljazeera.com/xml/rss/all.xml",
 )
+_STOCK_NEWS_SEARCH_URL = "https://news.google.com/rss/search?q={query}&hl=en-IN&gl=IN&ceid=IN:en"
 _NEWS_STALE_HOURS_DEFAULT = 36.0
 _NEWS_SNAPSHOT_TTL_HOURS_DEFAULT = 2.0
 _NEWS_FETCH_LIMIT_DEFAULT = 40
+_STOCK_NEWS_FETCH_LIMIT_DEFAULT = 8
 _NEWS_BLEND_WEIGHT_DEFAULT = 3.5
 _NEWS_BLEND_CAP_DEFAULT = 3.0
 _NEWS_DRIVER_LIMIT_DEFAULT = 3
@@ -160,6 +162,16 @@ def _news_fetch_limit() -> int:
         return max(5, int(raw))
     except ValueError:
         return _NEWS_FETCH_LIMIT_DEFAULT
+
+
+def _stock_news_fetch_limit() -> int:
+    raw = (str(os.environ.get("TITAN_STOCK_NEWS_FETCH_LIMIT", "")) or "").strip()
+    if not raw:
+        return _STOCK_NEWS_FETCH_LIMIT_DEFAULT
+    try:
+        return max(2, int(raw))
+    except ValueError:
+        return _STOCK_NEWS_FETCH_LIMIT_DEFAULT
 
 
 def _news_max_age_hours() -> float:
@@ -377,6 +389,148 @@ def fetch_latest_global_news(*, timeout_seconds: float = 12.0, now_utc: datetime
     return out
 
 
+def _instrument_alias_candidates(
+    cfg: TitanConfig,
+    *,
+    symbol: str,
+    exchange: str,
+) -> list[str]:
+    sym = str(symbol or "").strip().upper()
+    ex = str(exchange or "").strip().upper()
+    if not sym or ex not in ("NSE", "BSE"):
+        return [sym] if sym else []
+    out: list[str] = [sym]
+    try:
+        client = create_client(cfg.supabase_url, cfg.supabase_key)
+        res = (
+            client.table("market_instruments")
+            .select("symbol,instrument_name,breeze_stock_code")
+            .eq("exchange", ex)
+            .eq("symbol", sym)
+            .limit(1)
+            .execute()
+        )
+    except Exception:
+        return out
+    rows = list(getattr(res, "data", None) or [])
+    row = rows[0] if rows and isinstance(rows[0], dict) else {}
+    for raw in (
+        row.get("instrument_name"),
+        row.get("breeze_stock_code"),
+    ):
+        txt = str(raw or "").strip()
+        if not txt:
+            continue
+        if txt.upper() == sym:
+            continue
+        if txt not in out:
+            out.append(txt)
+    return out
+
+
+def _stock_news_query_candidates(*, symbol: str, aliases: list[str]) -> list[str]:
+    sym = str(symbol or "").strip().upper()
+    out: list[str] = []
+    for raw in [sym, *aliases]:
+        q = str(raw or "").strip()
+        if not q:
+            continue
+        if q not in out:
+            out.append(q)
+    if sym and f"{sym} stock" not in out:
+        out.append(f"{sym} stock")
+    return out
+
+
+def _dedupe_recent_news_items(
+    items: list[dict[str, Any]],
+    *,
+    now_utc: datetime,
+    limit: int,
+) -> list[dict[str, Any]]:
+    stale_cutoff = now_utc - timedelta(hours=_news_max_age_hours())
+    deduped: dict[str, dict[str, Any]] = {}
+    for item in items:
+        ts = item.get("published_at")
+        if not isinstance(ts, datetime):
+            continue
+        if ts < stale_cutoff:
+            continue
+        title_key = _normalize_news_text(str(item.get("title", "")))
+        url_key = str(item.get("url", "")).strip().lower()
+        dedupe_key = f"{title_key}|{url_key}" if url_key else title_key
+        if not dedupe_key:
+            continue
+        existing = deduped.get(dedupe_key)
+        if existing is None or ts > existing.get("published_at", datetime.min.replace(tzinfo=timezone.utc)):
+            deduped[dedupe_key] = item
+    ordered = sorted(
+        deduped.values(),
+        key=lambda x: x.get("published_at", datetime.min.replace(tzinfo=timezone.utc)),
+        reverse=True,
+    )
+    out: list[dict[str, Any]] = []
+    for item in ordered[: max(1, int(limit))]:
+        out.append(
+            {
+                "title": str(item.get("title", "")).strip(),
+                "url": str(item.get("url", "")).strip(),
+                "summary": str(item.get("summary", "")).strip(),
+                "source": str(item.get("source", "unknown_source")).strip() or "unknown_source",
+                "published_at": item.get("published_at").isoformat(),
+            }
+        )
+    return out
+
+
+def fetch_stock_news_for_symbol(
+    cfg: TitanConfig,
+    *,
+    symbol: str,
+    exchange: str,
+    timeout_seconds: float = 10.0,
+    now_utc: datetime | None = None,
+) -> dict[str, Any]:
+    now = now_utc or datetime.now(timezone.utc)
+    aliases = _instrument_alias_candidates(cfg, symbol=symbol, exchange=exchange)
+    queries = _stock_news_query_candidates(symbol=symbol, aliases=aliases)
+    max_items = _stock_news_fetch_limit()
+    last_error = ""
+    used_query = ""
+    used_alias = ""
+    for query in queries:
+        q = urllib.parse.quote(query)
+        raw, err = _http_get_text(_STOCK_NEWS_SEARCH_URL.format(query=q), timeout_seconds=timeout_seconds)
+        if raw is None:
+            last_error = str(err or "request_error")
+            continue
+        parsed = _parse_rss_feed_items(_STOCK_NEWS_SEARCH_URL.format(query=q), raw)
+        normalized = _dedupe_recent_news_items(parsed, now_utc=now, limit=max_items)
+        if normalized:
+            used_query = query
+            if query.strip().upper() != str(symbol).strip().upper():
+                used_alias = query
+            return {
+                "symbol": str(symbol).strip().upper(),
+                "exchange": str(exchange).strip().upper(),
+                "items": normalized,
+                "query_used": used_query,
+                "alias_used": used_alias,
+                "fallback_used": bool(used_alias),
+                "error": "",
+            }
+        last_error = "empty_feed"
+    return {
+        "symbol": str(symbol).strip().upper(),
+        "exchange": str(exchange).strip().upper(),
+        "items": [],
+        "query_used": used_query,
+        "alias_used": used_alias,
+        "fallback_used": bool(used_alias),
+        "error": last_error or "unavailable",
+    }
+
+
 def _news_sentiment_score(text: str) -> float:
     t = _normalize_news_text(text)
     if not t:
@@ -487,6 +641,187 @@ def map_news_to_sector_scores(news_items: list[dict[str, Any]]) -> dict[str, dic
     for sector_key in sorted(_SECTOR_THEME_KEYWORDS.keys()):
         out[sector_key] = score_sector_news(news_items, sector_key=sector_key)
     return out
+
+
+def _macro_news_scope(*, title: str, source: str) -> str:
+    txt = _normalize_news_text(f"{title} {source}")
+    local_terms = (
+        "india",
+        "indian",
+        "nse",
+        "bse",
+        "nifty",
+        "sensex",
+        "rbi",
+        "sebi",
+        "rupee",
+        "moneycontrol",
+        "livemint",
+        "economictimes",
+        "business standard",
+    )
+    market_terms = (
+        "stock",
+        "stocks",
+        "shares",
+        "equity",
+        "earnings",
+        "guidance",
+        "ipo",
+        "buyback",
+        "merger",
+        "acquisition",
+    )
+    if any(term in txt for term in local_terms):
+        return "local"
+    if any(term in txt for term in market_terms):
+        return "market"
+    return "global"
+
+
+def build_macro_news_layers(snapshot: dict[str, Any], *, sector_key: str) -> dict[str, list[dict[str, Any]]]:
+    layers: dict[str, list[dict[str, Any]]] = {"global": [], "local": [], "market": []}
+    scores = snapshot.get("sector_scores")
+    score_map = scores if isinstance(scores, dict) else {}
+    sector = str(sector_key or "").strip().lower()
+    sector_row = score_map.get(sector) if isinstance(score_map.get(sector), dict) else {}
+    drivers = sector_row.get("drivers_top") if isinstance(sector_row.get("drivers_top"), list) else []
+    if not drivers:
+        fallback_drivers: list[dict[str, Any]] = []
+        for row in score_map.values():
+            if not isinstance(row, dict):
+                continue
+            drows = row.get("drivers_top")
+            if not isinstance(drows, list):
+                continue
+            for d in drows:
+                if isinstance(d, dict):
+                    fallback_drivers.append(d)
+        drivers = sorted(
+            fallback_drivers,
+            key=lambda d: abs(_safe_float(d.get("contribution"))),
+            reverse=True,
+        )[: max(1, _news_driver_limit())]
+    for raw in drivers:
+        if not isinstance(raw, dict):
+            continue
+        title = str(raw.get("title") or raw.get("driver") or "").strip()
+        if not title:
+            continue
+        scope = _macro_news_scope(title=title, source=str(raw.get("source") or ""))
+        layers.setdefault(scope, []).append(
+            {
+                "headline": title,
+                "source": str(raw.get("source") or "unknown_source").strip() or "unknown_source",
+                "published_at": str(raw.get("published_at") or "").strip(),
+                "impact_contribution_score": round(_safe_float(raw.get("contribution")), 4),
+            }
+        )
+    return layers
+
+
+def correlate_stock_news_with_macro(
+    *,
+    symbol: str,
+    sector_key: str,
+    stock_news_items: list[dict[str, Any]],
+    snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    stock_rows: list[dict[str, Any]] = []
+    stock_contribution = 0.0
+    stock_weight = 0.0
+    for item in stock_news_items:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        summary = str(item.get("summary") or "").strip()
+        if not title:
+            continue
+        text = _normalize_news_text(f"{title} {summary}")
+        sentiment = _news_sentiment_score(text)
+        impact = _news_impact_score(text)
+        confidence = _news_confidence_score(item)
+        contribution = sentiment * impact * confidence
+        stock_contribution += contribution
+        stock_weight += max(impact, 0.05)
+        stock_rows.append(
+            {
+                "headline": title,
+                "source": str(item.get("source") or "unknown_source").strip() or "unknown_source",
+                "published_at": str(item.get("published_at") or "").strip(),
+                "impact_contribution_score": round(contribution, 4),
+            }
+        )
+    stock_rows = sorted(
+        stock_rows,
+        key=lambda x: abs(_safe_float(x.get("impact_contribution_score"))),
+        reverse=True,
+    )[: max(1, _news_driver_limit())]
+    stock_score = 0.0 if stock_weight <= 0.0 else stock_contribution / stock_weight
+    scores = snapshot.get("sector_scores")
+    score_map = scores if isinstance(scores, dict) else {}
+    sector = str(sector_key or "").strip().lower()
+    sector_row = score_map.get(sector) if isinstance(score_map.get(sector), dict) else {}
+    macro_score = _safe_float(sector_row.get("score"))
+    if math.isnan(macro_score):
+        macro_score = 0.0
+    macro_conf = _safe_float(sector_row.get("confidence"))
+    if math.isnan(macro_conf):
+        macro_conf = 0.35
+    if stock_rows:
+        blended = (stock_score * 0.7) + (macro_score * 0.3)
+        confidence = _clamp((0.65 * 0.7) + (macro_conf * 0.3), 0.2, 0.95)
+    else:
+        blended = macro_score
+        confidence = _clamp(macro_conf, 0.2, 0.9)
+    if blended > 0.02:
+        direction = "tailwind"
+    elif blended < -0.02:
+        direction = "headwind"
+    else:
+        direction = "neutral"
+    macro_layers = build_macro_news_layers(snapshot, sector_key=sector)
+    evidence_layers = {
+        "global": macro_layers.get("global", [])[:2],
+        "local": macro_layers.get("local", [])[:2],
+        "market": macro_layers.get("market", [])[:2],
+        "stock": stock_rows[:2],
+    }
+    stock_driver = stock_rows[0] if stock_rows else {}
+    if stock_driver:
+        driver = f"{stock_driver.get('headline')} ({stock_driver.get('source')})"
+        fallback_label = ""
+    else:
+        macro_driver = (macro_layers.get("market") or macro_layers.get("local") or macro_layers.get("global") or [{}])[0]
+        driver_headline = str(macro_driver.get("headline") or "No recent market driver available").strip()
+        driver_source = str(macro_driver.get("source") or "snapshot_unavailable").strip()
+        driver = f"{driver_headline} ({driver_source})"
+        if driver_headline == "No recent market driver available":
+            fallback_label = "sector_specific_match_missing_no_market_driver"
+        else:
+            scope = _macro_news_scope(title=driver_headline, source=driver_source)
+            fallback_label = f"sector_specific_match_missing_using_{scope}_market_driver"
+    return {
+        "symbol": str(symbol or "").strip().upper(),
+        "driver": driver,
+        "direction": direction,
+        "confidence": round(float(confidence), 4),
+        "sector_news_score": round(float(macro_score), 4),
+        "stock_news_score": round(float(stock_score), 4),
+        "net_score": round(float(blended), 4),
+        "fallback_label": fallback_label,
+        "evidence": {
+            "net_news_impact_score": round(float(blended), 4),
+            "net_news_impact_direction": direction,
+            "top_headlines": evidence_layers,
+            "macro_layer_scores": {
+                "global_count": len(evidence_layers.get("global") or []),
+                "local_count": len(evidence_layers.get("local") or []),
+                "market_count": len(evidence_layers.get("market") or []),
+                "stock_count": len(evidence_layers.get("stock") or []),
+            },
+        },
+    }
 
 
 def _news_blend_points(sector_news_score: float) -> float:

@@ -1,0 +1,158 @@
+﻿........................................................................ [ 48%]
+.................................FF..................................... [ 96%]
+.....                                                                    [100%]
+================================== FAILURES ===================================
+_________________ test_run_sector_live_digest_one_gemini_call _________________
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpx\_transports\default.py:101: in map_httpcore_exceptions
+    yield
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpx\_transports\default.py:250: in handle_request
+    resp = self._pool.handle_request(req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpcore\_sync\connection_pool.py:256: in handle_request
+    raise exc from None
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpcore\_sync\connection_pool.py:236: in handle_request
+    response = connection.handle_request(
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpcore\_sync\connection.py:101: in handle_request
+    raise exc
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpcore\_sync\connection.py:78: in handle_request
+    stream = self._connect(request)
+             ^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpcore\_sync\connection.py:124: in _connect
+    stream = self._network_backend.connect_tcp(**kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpcore\_backends\sync.py:207: in connect_tcp
+    with map_exceptions(exc_map):
+         ^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\contextlib.py:158: in __exit__
+    self.gen.throw(value)
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpcore\_exceptions.py:14: in map_exceptions
+    raise to_exc(exc) from exc
+E   httpcore.ConnectError: [Errno 11001] getaddrinfo failed
+
+The above exception was the direct cause of the following exception:
+tests\test_sector_audit.py:290: in test_run_sector_live_digest_one_gemini_call
+    run_sector_live("defence", max_workers=2, digest=True)
+src\sector_audit.py:1402: in run_sector_live
+    update_sector_period_rollups(cfg, sector=sector_id)
+src\analysis_store.py:312: in update_sector_period_rollups
+    .execute()
+     ^^^^^^^^^
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\postgrest\_sync\request_builder.py:47: in execute
+    r = self.request.send()
+        ^^^^^^^^^^^^^^^^^^^
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\postgrest\base_request_builder.py:82: in send
+    return self.session.request(
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpx\_client.py:825: in request
+    return self.send(request, auth=auth, follow_redirects=follow_redirects)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpx\_client.py:914: in send
+    response = self._send_handling_auth(
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpx\_client.py:942: in _send_handling_auth
+    response = self._send_handling_redirects(
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpx\_client.py:979: in _send_handling_redirects
+    response = self._send_single_request(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpx\_client.py:1014: in _send_single_request
+    response = transport.handle_request(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpx\_transports\default.py:249: in handle_request
+    with map_httpcore_exceptions():
+         ^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\contextlib.py:158: in __exit__
+    self.gen.throw(value)
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpx\_transports\default.py:118: in map_httpcore_exceptions
+    raise mapped_exc(message) from exc
+E   httpx.ConnectError: [Errno 11001] getaddrinfo failed
+------------------------------ Captured log call ------------------------------
+WARNING  analysis_store:analysis_store.py:252 Analysis store persist failed: [Errno 11001] getaddrinfo failed
+________________ test_run_sector_live_macro_guardrail_applied _________________
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpx\_transports\default.py:101: in map_httpcore_exceptions
+    yield
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpx\_transports\default.py:250: in handle_request
+    resp = self._pool.handle_request(req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpcore\_sync\connection_pool.py:256: in handle_request
+    raise exc from None
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpcore\_sync\connection_pool.py:236: in handle_request
+    response = connection.handle_request(
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpcore\_sync\connection.py:101: in handle_request
+    raise exc
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpcore\_sync\connection.py:78: in handle_request
+    stream = self._connect(request)
+             ^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpcore\_sync\connection.py:124: in _connect
+    stream = self._network_backend.connect_tcp(**kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpcore\_backends\sync.py:207: in connect_tcp
+    with map_exceptions(exc_map):
+         ^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\contextlib.py:158: in __exit__
+    self.gen.throw(value)
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpcore\_exceptions.py:14: in map_exceptions
+    raise to_exc(exc) from exc
+E   httpcore.ConnectError: [Errno 11001] getaddrinfo failed
+
+The above exception was the direct cause of the following exception:
+tests\test_sector_audit.py:347: in test_run_sector_live_macro_guardrail_applied
+    run_sector_live(
+src\sector_audit.py:1402: in run_sector_live
+    update_sector_period_rollups(cfg, sector=sector_id)
+src\analysis_store.py:312: in update_sector_period_rollups
+    .execute()
+     ^^^^^^^^^
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\postgrest\_sync\request_builder.py:47: in execute
+    r = self.request.send()
+        ^^^^^^^^^^^^^^^^^^^
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\postgrest\base_request_builder.py:82: in send
+    return self.session.request(
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpx\_client.py:825: in request
+    return self.send(request, auth=auth, follow_redirects=follow_redirects)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpx\_client.py:914: in send
+    response = self._send_handling_auth(
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpx\_client.py:942: in _send_handling_auth
+    response = self._send_handling_redirects(
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpx\_client.py:979: in _send_handling_redirects
+    response = self._send_single_request(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpx\_client.py:1014: in _send_single_request
+    response = transport.handle_request(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpx\_transports\default.py:249: in handle_request
+    with map_httpcore_exceptions():
+         ^^^^^^^^^^^^^^^^^^^^^^^^^
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\contextlib.py:158: in __exit__
+    self.gen.throw(value)
+C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\httpx\_transports\default.py:118: in map_httpcore_exceptions
+    raise mapped_exc(message) from exc
+E   httpx.ConnectError: [Errno 11001] getaddrinfo failed
+------------------------------ Captured log call ------------------------------
+WARNING  analysis_store:analysis_store.py:252 Analysis store persist failed: [Errno 11001] getaddrinfo failed
+============================== warnings summary ===============================
+tests/test_sector_audit.py::test_build_equity_live_audit_skips_narrative
+tests/test_sector_audit.py::test_build_equity_live_audit_skips_narrative
+tests/test_sector_audit.py::test_run_sector_live_calls_workers
+tests/test_sector_audit.py::test_run_sector_live_digest_one_gemini_call
+tests/test_sector_audit.py::test_run_sector_live_digest_one_gemini_call
+tests/test_sector_audit.py::test_run_sector_live_macro_guardrail_applied
+tests/test_sector_audit.py::test_run_sector_live_macro_guardrail_applied
+tests/test_sector_audit.py::test_absorption_calibration_v2_uses_historical_percentile
+  C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\supabase\_sync\client.py:309: DeprecationWarning: The 'timeout' parameter is deprecated. Please configure it in the http client instead.
+    return SyncPostgrestClient(
+
+tests/test_sector_audit.py::test_build_equity_live_audit_skips_narrative
+tests/test_sector_audit.py::test_build_equity_live_audit_skips_narrative
+tests/test_sector_audit.py::test_run_sector_live_calls_workers
+tests/test_sector_audit.py::test_run_sector_live_digest_one_gemini_call
+tests/test_sector_audit.py::test_run_sector_live_digest_one_gemini_call
+tests/test_sector_audit.py::test_run_sector_live_macro_guardrail_applied
+tests/test_sector_audit.py::test_run_sector_live_macro_guardrail_applied
+tests/test_sector_audit.py::test_absorption_calibration_v2_uses_historical_percentile
+  C:\Users\91880\AppData\Local\Programs\Python\Python312\Lib\site-packages\supabase\_sync\client.py:309: DeprecationWarning: The 'verify' parameter is deprecated. Please configure it in the http client instead.
+    return SyncPostgrestClient(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ===========================
+FAILED tests/test_sector_audit.py::test_run_sector_live_digest_one_gemini_call
+FAILED tests/test_sector_audit.py::test_run_sector_live_macro_guardrail_applied
+2 failed, 147 passed, 16 warnings in 32.62s
