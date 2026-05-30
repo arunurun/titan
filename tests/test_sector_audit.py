@@ -138,6 +138,7 @@ def test_symbol_digest_default_shows_neutral_na_for_missing_new_metrics(monkeypa
         "Money flow trend (20D): n/a "
         "(n/a; bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution)" in text
     )
+    assert "News correlation unavailable: correlation metadata missing" in text
 
 
 def test_symbol_digest_includes_global_news_correlation_line(monkeypatch):
@@ -310,6 +311,50 @@ def test_apply_global_news_correlation_sets_line_for_all_audits_when_snapshot_em
         line = _news_correlation_line(row["audit"])
         assert "Macro fallback relation:" in line
         assert "fallback=sector_specific_match_missing_no_market_driver" in line
+
+
+def test_apply_global_news_correlation_macro_snapshot_survives_missing_stock_helpers(monkeypatch):
+    from sector_audit import _apply_global_news_correlation
+
+    snapshot = {
+        "source": "cached",
+        "fresh": True,
+        "age_minutes": 12.0,
+        "sector_scores": {
+            "defence": {
+                "score": 0.19,
+                "confidence": 0.67,
+                "drivers_top": [
+                    {
+                        "title": "Global defence exports rise",
+                        "source": "Reuters",
+                        "published_at": "2026-05-30T08:30:00+00:00",
+                        "contribution": 0.17,
+                    }
+                ],
+            }
+        },
+    }
+    monkeypatch.setattr("sector_priority.resolve_global_news_snapshot", lambda _cfg: snapshot)
+    monkeypatch.delattr("sector_priority.fetch_stock_news_for_symbol", raising=False)
+    monkeypatch.delattr("sector_priority.correlate_stock_news_with_macro", raising=False)
+    ok_results = [
+        {
+            "symbol": "HAL",
+            "exchange": "NSE",
+            "audit": {"symbol": "HAL", "exchange": "NSE", "prediction_breakdown": {"week": {"ema_term": 1.2}}},
+        }
+    ]
+    meta = _apply_global_news_correlation(make_cfg(), sector_id="defence", ok_results=ok_results)
+    assert meta["applied"] is True
+    assert meta["applied_count"] == 1
+    assert meta["snapshot"]["source"] == "cached"
+    assert meta["snapshot_available"] is True
+    corr = ok_results[0]["audit"]["news_correlation"]
+    assert corr["fallback_label"] == "macro_only_fallback"
+    assert corr["stock_news_coverage"] == "helper_unavailable"
+    assert corr["driver_source"] == "macro"
+    assert isinstance(corr.get("evidence"), dict)
 
 
 def test_symbol_digest_verbose_restores_legacy_line(monkeypatch):
@@ -774,15 +819,83 @@ def test_run_sector_live_digest_one_gemini_call(mock_load, mock_metrics, mock_em
     mock_email.assert_called_once()
     body = mock_email.call_args[0][0]
     assert "digest mode: 1 Gemini call" in body
-    assert "One combined post" in body
+    assert "--- Decision-first top section ---" in body
+    assert "One combined post" not in body
     assert "Per-symbol metrics" in body
+    assert "Risk overlays" not in body
+    assert "--- Executive snapshot (verbose) ---" not in body
+
+
+@patch("email_notify.send_success_post_email")
+@patch("sector_audit._process_one_metrics")
+@patch("sector_audit.load_sector_instruments")
+def test_run_sector_live_digest_verbose_sections_enabled(
+    mock_load, mock_metrics, mock_email, monkeypatch
+):
+    from sector_audit import run_sector_live
+
+    monkeypatch.setenv("TITAN_DIGEST_VERBOSE_SECTIONS", "1")
+    mock_load.return_value = [SectorInstrument("A", "NSE")]
+    mock_metrics.side_effect = [
+        {
+            "ok": True,
+            "symbol": "A",
+            "exchange": "NSE",
+            "audit": {
+                "symbol": "A",
+                "z_score": 1.0,
+                "intent_score": 62.0,
+                "effective_intent_score": 60.0,
+                "absorption_ratio": 1.2,
+                "return_1d_pct": 0.6,
+                "rows": 30,
+            },
+            "error": None,
+        }
+    ]
+    with patch("breeze_client.create_breeze_session", return_value=MagicMock()):
+        with patch("brain.generate_sector_digest_narrative", return_value="One combined post"):
+            with patch("supabase_log.save_audit_log"):
+                with patch(
+                    "analysis_store.persist_sector_run_analytics",
+                    return_value={"persisted": True, "run_id": "test-verbose-sections"},
+                ):
+                    with patch("analysis_store.update_sector_period_rollups"):
+                        with patch(
+                            "analysis_store.build_comparison_payload",
+                            return_value={"enabled": False},
+                        ):
+                            with patch(
+                                "analysis_store.persist_llm_digest_memory",
+                                return_value={"persisted": True},
+                            ):
+                                run_sector_live("defence", max_workers=1, digest=True)
+    body = mock_email.call_args[0][0]
+    assert "--- Executive snapshot (verbose) ---" in body
     assert "Risk overlays" in body
-    assert "Long-term trend breadth (stocks above 200-day Exponential Moving Average):" in body
-    assert "Volume participation breadth (stocks with above-average traded volume):" in body
-    assert "Event-based risk adjustments applied:" in body
-    assert "Macro risk filters: not applied (macro market snapshot unavailable)" in body
-    assert "Average next-week score for top 5 ranked stocks:" in body
-    assert "Score gap between highest-ranked and lowest-ranked stock:" in body
+
+
+def test_symbol_digest_explicit_news_unavailable_message(monkeypatch):
+    monkeypatch.delenv("TITAN_DIGEST_VERBOSE_SYMBOLS", raising=False)
+    from sector_audit import _format_symbol_metrics_line
+
+    audit = {
+        "effective_intent_score": 52.0,
+        "z_score": 0.6,
+        "volume_participation_ratio": 1.1,
+        "return_1d_pct": 0.2,
+        "atr_14_pct": 1.9,
+        "next_week_score": 54.3,
+        "sell_signal": "hold",
+        "sell_signal_reasons": ["monitor trend"],
+        "prediction_breakdown": {"week": {}, "day": {}, "penalties": []},
+        "news_correlation": {
+            "available": False,
+            "unavailable_reason": "global_news_snapshot_unavailable",
+        },
+    }
+    text = _format_symbol_metrics_line({"symbol": "HAL", "exchange": "NSE", "audit": audit})
+    assert "News correlation unavailable: global_news_snapshot_unavailable" in text
 
 
 @patch("email_notify.send_success_post_email")

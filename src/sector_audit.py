@@ -349,6 +349,16 @@ def _digest_verbose_symbol_lines_enabled() -> bool:
     )
 
 
+def _digest_verbose_sections_enabled() -> bool:
+    """Enable long top digest sections for deep inspection."""
+    return (os.environ.get("TITAN_DIGEST_VERBOSE_SECTIONS") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _digest_report_only_mode_enabled() -> bool:
     return (os.environ.get("TITAN_RECONCILE_REPORT_ONLY") or "").strip().lower() in (
         "1",
@@ -586,7 +596,12 @@ def _news_evidence_line(audit: dict[str, Any]) -> str:
 def _news_correlation_line(audit: dict[str, Any]) -> str:
     corr = audit.get("news_correlation")
     if not isinstance(corr, dict):
-        return ""
+        return "News correlation unavailable: correlation metadata missing"
+    unavailable_reason = str(corr.get("unavailable_reason") or "").strip()
+    if unavailable_reason:
+        return f"News correlation unavailable: {unavailable_reason}"
+    if corr.get("available") is False:
+        return "News correlation unavailable: correlation data unavailable"
     driver = str(corr.get("driver") or "").strip()
     metric = str(corr.get("affected_metric") or "").strip()
     theme = str(corr.get("affected_theme") or "").strip()
@@ -598,7 +613,7 @@ def _news_correlation_line(audit: dict[str, Any]) -> str:
     coverage_status = str(corr.get("stock_news_coverage") or "").strip().lower() or "unknown"
     fallback_label = str(corr.get("fallback_label") or "").strip()
     if not driver or not metric:
-        return ""
+        return "News correlation unavailable: incomplete correlation payload"
     if direction == "tailwind":
         dir_label = "tailwind"
     elif direction == "headwind":
@@ -1586,17 +1601,74 @@ def _apply_global_news_correlation(
     sector_id: str,
     ok_results: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    resolve_global_news_snapshot = None
+    fetch_stock_news_for_symbol = None
+    correlate_stock_news_with_macro = None
+    helper_unavailable: list[str] = []
     try:
-        from sector_priority import (
-            correlate_stock_news_with_macro,
-            fetch_stock_news_for_symbol,
-            resolve_global_news_snapshot,
+        from sector_priority import resolve_global_news_snapshot as _resolver
+
+        resolve_global_news_snapshot = _resolver
+    except Exception as exc:
+        helper_unavailable.append("resolve_global_news_snapshot")
+        logger.warning("News correlation snapshot resolver unavailable: %s", exc)
+    try:
+        from sector_priority import fetch_stock_news_for_symbol as _fetcher
+
+        fetch_stock_news_for_symbol = _fetcher
+    except Exception as exc:
+        helper_unavailable.append("fetch_stock_news_for_symbol")
+        logger.warning("News correlation stock-news helper unavailable: %s", exc)
+    try:
+        from sector_priority import correlate_stock_news_with_macro as _correlator
+
+        correlate_stock_news_with_macro = _correlator
+    except Exception as exc:
+        helper_unavailable.append("correlate_stock_news_with_macro")
+        logger.warning("News correlation correlator helper unavailable: %s", exc)
+
+    snapshot: dict[str, Any] = {}
+    snapshot_reason = ""
+    if callable(resolve_global_news_snapshot):
+        try:
+            raw_snapshot = resolve_global_news_snapshot(cfg)
+            snapshot = raw_snapshot if isinstance(raw_snapshot, dict) else {}
+            if not isinstance(raw_snapshot, dict):
+                snapshot_reason = "snapshot_payload_invalid"
+                logger.warning(
+                    "News correlation snapshot resolver returned non-dict payload: %s",
+                    type(raw_snapshot).__name__,
+                )
+        except Exception as exc:
+            snapshot_reason = f"snapshot_resolver_error:{exc}"
+            logger.warning("News correlation snapshot resolution failed: %s", exc)
+            snapshot = {}
+    else:
+        snapshot_reason = "snapshot_resolver_unavailable"
+    if not snapshot:
+        snapshot = {"source": "unavailable", "sector_scores": {}, "reason": snapshot_reason}
+    elif snapshot_reason and not str(snapshot.get("reason") or "").strip():
+        snapshot["reason"] = snapshot_reason
+
+    snapshot_source = str(snapshot.get("source") or "").strip().lower()
+    snapshot_available = snapshot_source not in ("", "unavailable", "na", "n/a", "none")
+
+    if helper_unavailable:
+        logger.warning(
+            "News correlation using fallback path; unavailable helpers=%s",
+            ",".join(helper_unavailable),
         )
-    except Exception:
-        return {"applied": False, "reason": "news_module_unavailable"}
     if not ok_results:
-        return {"applied": False, "reason": "no_results"}
-    snapshot = resolve_global_news_snapshot(cfg)
+        return {
+            "applied": False,
+            "reason": "no_results",
+            "snapshot": snapshot,
+            "snapshot_available": snapshot_available,
+            "snapshot_reason": str(snapshot.get("reason") or snapshot_reason or "").strip(),
+            "applied_count": 0,
+            "stock_news_coverage_count": 0,
+            "fallback_count": 0,
+        }
     sector_key = str(sector_id).strip().lower()
     coverage_pairs: set[tuple[str, str]] = set()
     for row in ok_results:
@@ -1606,25 +1678,41 @@ def _apply_global_news_correlation(
         if symbol and exchange in ("NSE", "BSE"):
             coverage_pairs.add((symbol, exchange))
     stock_news_by_symbol: dict[tuple[str, str], dict[str, Any]] = {}
-    for symbol, exchange in coverage_pairs:
-        if not symbol or exchange not in ("NSE", "BSE"):
-            continue
-        try:
-            stock_news_by_symbol[(symbol, exchange)] = fetch_stock_news_for_symbol(
-                cfg,
-                symbol=symbol,
-                exchange=exchange,
-            )
-        except Exception as exc:
-            stock_news_by_symbol[(symbol, exchange)] = {
-                "symbol": symbol,
-                "exchange": exchange,
-                "items": [],
-                "query_used": "",
-                "alias_used": "",
-                "fallback_used": False,
-                "error": f"unexpected:{exc}",
-            }
+    if callable(fetch_stock_news_for_symbol):
+        for symbol, exchange in coverage_pairs:
+            if not symbol or exchange not in ("NSE", "BSE"):
+                continue
+            try:
+                stock_news_by_symbol[(symbol, exchange)] = fetch_stock_news_for_symbol(
+                    cfg,
+                    symbol=symbol,
+                    exchange=exchange,
+                )
+            except Exception as exc:
+                stock_news_by_symbol[(symbol, exchange)] = {
+                    "symbol": symbol,
+                    "exchange": exchange,
+                    "items": [],
+                    "query_used": "",
+                    "alias_used": "",
+                    "fallback_used": False,
+                    "error": f"unexpected:{exc}",
+                }
+    else:
+        logger.warning(
+            "News correlation stock-level fetch skipped; helper unavailable for %s symbols",
+            len(coverage_pairs),
+        )
+
+    scores = snapshot.get("sector_scores")
+    scores = scores if isinstance(scores, dict) else {}
+    sector_news = scores.get(sector_key) if isinstance(scores.get(sector_key), dict) else {}
+    sector_score = _safe_float(sector_news.get("score"))
+    if math.isnan(sector_score):
+        sector_score = 0.0
+    sector_conf = _safe_float(sector_news.get("confidence"))
+    drivers = sector_news.get("drivers_top")
+    drivers = drivers if isinstance(drivers, list) else []
     applied = 0
     fallback_count = 0
     for r in ok_results:
@@ -1636,13 +1724,53 @@ def _apply_global_news_correlation(
         stock_news_meta = stock_news_by_symbol.get((symbol, exchange), {})
         stock_news_items = stock_news_meta.get("items")
         stock_news_items = stock_news_items if isinstance(stock_news_items, list) else []
-        coverage_status = "fetched" if (symbol, exchange) in stock_news_by_symbol else "not_covered"
-        corr = correlate_stock_news_with_macro(
-            symbol=symbol,
-            sector_key=sector_key,
-            stock_news_items=stock_news_items,
-            snapshot=snapshot,
-        )
+        if callable(fetch_stock_news_for_symbol):
+            coverage_status = "fetched" if (symbol, exchange) in stock_news_by_symbol else "not_covered"
+        else:
+            coverage_status = "helper_unavailable"
+        unavailable_reason = ""
+        corr: dict[str, Any] = {}
+        if callable(correlate_stock_news_with_macro):
+            try:
+                corr = correlate_stock_news_with_macro(
+                    symbol=symbol,
+                    sector_key=sector_key,
+                    stock_news_items=stock_news_items,
+                    snapshot=snapshot,
+                )
+                corr = corr if isinstance(corr, dict) else {}
+            except Exception as exc:
+                logger.warning(
+                    "News correlation compute failed for %s (%s): %s; using macro fallback",
+                    symbol or "unknown",
+                    exchange or "unknown",
+                    exc,
+                )
+                corr = {}
+                unavailable_reason = f"correlator_error:{exc}"
+        if not corr:
+            macro_driver = str(
+                ((drivers[0] if drivers and isinstance(drivers[0], dict) else {}).get("title"))
+                or ((drivers[0] if drivers and isinstance(drivers[0], dict) else {}).get("driver"))
+                or "Global macro flow"
+            ).strip() or "Global macro flow"
+            if sector_score > 0.02:
+                macro_direction = "tailwind"
+            elif sector_score < -0.02:
+                macro_direction = "headwind"
+            else:
+                macro_direction = "neutral"
+            if not unavailable_reason and not callable(correlate_stock_news_with_macro):
+                unavailable_reason = "correlator_helper_unavailable_macro_only"
+            if not unavailable_reason and not snapshot_available:
+                unavailable_reason = str(snapshot.get("reason") or "global_news_snapshot_unavailable").strip()
+            corr = {
+                "driver": macro_driver,
+                "direction": macro_direction,
+                "confidence": None if math.isnan(sector_conf) else round(sector_conf, 4),
+                "evidence": _news_evidence_payload(drivers=drivers, net_score=sector_score),
+                "fallback_label": "macro_only_fallback",
+            }
         fallback_label = str(corr.get("fallback_label") or "").strip()
         if fallback_label:
             fallback_count += 1
@@ -1663,6 +1791,8 @@ def _apply_global_news_correlation(
             "stock_news_fetched_count": len(stock_news_items),
             "stock_news_coverage": coverage_status,
             "used_macro_fallback": bool(fallback_label) or not stock_news_items,
+            "available": True,
+            "unavailable_reason": unavailable_reason,
             "stock_news": {
                 "fetched_count": len(stock_news_items),
                 "query_used": str(stock_news_meta.get("query_used") or "").strip(),
@@ -1672,16 +1802,12 @@ def _apply_global_news_correlation(
             },
         }
         applied += 1
-    scores = snapshot.get("sector_scores")
-    scores = scores if isinstance(scores, dict) else {}
-    sector_news = scores.get(sector_key) if isinstance(scores.get(sector_key), dict) else {}
-    sector_score = _safe_float(sector_news.get("score"))
-    if math.isnan(sector_score):
-        sector_score = 0.0
     return {
         "applied": bool(applied),
         "applied_count": applied,
         "snapshot": snapshot,
+        "snapshot_available": snapshot_available,
+        "snapshot_reason": str(snapshot.get("reason") or snapshot_reason or "").strip(),
         "sector_news_score": round(sector_score, 4),
         "stock_news_coverage_count": len(stock_news_by_symbol),
         "fallback_count": fallback_count,
@@ -2472,114 +2598,137 @@ def run_sector_live(
         leaders = comparison.get("leaders", []) if isinstance(comparison, dict) else []
         laggards = comparison.get("laggards", []) if isinstance(comparison, dict) else []
 
+        verbose_sections = _digest_verbose_sections_enabled()
+        snapshot_meta = news_corr_meta.get("snapshot") if isinstance(news_corr_meta.get("snapshot"), dict) else {}
+        snapshot_reason = str(
+            news_corr_meta.get("snapshot_reason")
+            or snapshot_meta.get("reason")
+            or "global_news_snapshot_unavailable"
+        ).strip()
+        if news_corr_meta.get("snapshot_available"):
+            news_snapshot_line = (
+                "Global news snapshot: "
+                f"{str(snapshot_meta.get('source') or 'unknown_source')} | "
+                f"fresh={bool(snapshot_meta.get('fresh'))} | "
+                f"age_min={_fmt_metric(snapshot_meta.get('age_minutes'))} | "
+                f"refreshed={str(snapshot_meta.get('refreshed_at') or 'unknown_refresh')}"
+            )
+        else:
+            news_snapshot_line = f"Global news snapshot unavailable: {snapshot_reason}"
+        applied_count = int(news_corr_meta.get("applied_count", 0) or 0)
+        if applied_count > 0:
+            news_score_line = (
+                f"Global news score ({sector_id}): {_fmt_metric(news_corr_meta.get('sector_news_score'))} "
+                f"| correlation_applied={applied_count} symbols"
+            )
+        else:
+            news_score_line = (
+                f"Global news score ({sector_id}) unavailable: {snapshot_reason} "
+                f"| correlation_applied={applied_count} symbols"
+            )
+
         lines = [
             f"Titan sector run: {sector_id!r} — {ok_count}/{len(results)} succeeded "
             f"(digest mode: 1 Gemini call)\n",
             "",
-            "--- Executive snapshot ---",
+            "--- Decision-first top section ---",
             (
                 "Deployment mode: ACTIONABLE"
                 if quality_gate["passed"]
                 else "Deployment mode: WATCHLIST ONLY (quality gate failed)"
             ),
-            f"Regime: {(comparison.get('regime') if isinstance(comparison, dict) else 'n/a')}",
-            f"Avg effective intent: {_fmt_metric(today.get('avg_effective_intent_score') if isinstance(today, dict) else None)} "
-            f"(vs 7d {_fmt_metric(dlt.get('avg_effective_intent_vs_7d') if isinstance(dlt, dict) else None)}, "
-            f"vs 30d {_fmt_metric(dlt.get('avg_effective_intent_vs_30d') if isinstance(dlt, dict) else None)})",
-            f"Long-term trend breadth (stocks above 200-day Exponential Moving Average): {_fmt_metric(today.get('breadth_above_ema200_pct') if isinstance(today, dict) else None)}%",
-            f"Volume participation breadth (stocks with above-average traded volume): {_fmt_metric(today.get('pct_absorption_gt_1') if isinstance(today, dict) else None)}%",
+            f"Regime: {(comparison.get('regime') if isinstance(comparison, dict) else 'unknown')}",
+            news_snapshot_line,
+            news_score_line,
             (
-                "Global news snapshot: "
-                f"{str((news_corr_meta.get('snapshot') or {}).get('source') or 'n/a')} | "
-                f"fresh={bool((news_corr_meta.get('snapshot') or {}).get('fresh'))} | "
-                f"age_min={_fmt_metric((news_corr_meta.get('snapshot') or {}).get('age_minutes'))} | "
-                f"refreshed={str((news_corr_meta.get('snapshot') or {}).get('refreshed_at') or 'n/a')}"
-            ),
-            (
-                f"Global news score ({sector_id}): {_fmt_metric(news_corr_meta.get('sector_news_score'))} "
-                f"| correlation_applied={news_corr_meta.get('applied_count', 0)} symbols"
+                f"Data reconciliation: requested {len(results)} | success {ok_count} | "
+                f"skipped(no data) {len(skipped_rows)} | hard failures {len(hard_failed_rows)}"
             ),
             "",
         ]
         if _digest_reconcile_mode_enabled():
             lines.extend(build_reconcile_digest_lines(reconcile_summary))
-        lines.extend(
-            [
-                "",
-                "--- Movement summary ---",
-            ]
-        )
-        if leaders:
-            lines.append(
-                "Leaders: "
-                + "; ".join(
-                    f"{x.get('symbol')}({_fmt_metric(x.get('effective_intent_score'))})"
-                    for x in leaders[:5]
-                )
+        if verbose_sections:
+            lines.extend(
+                [
+                    "",
+                    "--- Executive snapshot (verbose) ---",
+                    f"Avg effective intent: {_fmt_metric(today.get('avg_effective_intent_score') if isinstance(today, dict) else None)} "
+                    f"(vs 7d {_fmt_metric(dlt.get('avg_effective_intent_vs_7d') if isinstance(dlt, dict) else None)}, "
+                    f"vs 30d {_fmt_metric(dlt.get('avg_effective_intent_vs_30d') if isinstance(dlt, dict) else None)})",
+                    f"Long-term trend breadth (stocks above 200-day Exponential Moving Average): {_fmt_metric(today.get('breadth_above_ema200_pct') if isinstance(today, dict) else None)}%",
+                    f"Volume participation breadth (stocks with above-average traded volume): {_fmt_metric(today.get('pct_absorption_gt_1') if isinstance(today, dict) else None)}%",
+                    "",
+                    "--- Movement summary ---",
+                ]
             )
-        if laggards:
-            lines.append(
-                "Laggards: "
-                + "; ".join(
-                    f"{x.get('symbol')}({_fmt_metric(x.get('effective_intent_score'))})"
-                    for x in laggards[:5]
+            if leaders:
+                lines.append(
+                    "Leaders: "
+                    + "; ".join(
+                        f"{x.get('symbol')}({_fmt_metric(x.get('effective_intent_score'))})"
+                        for x in leaders[:5]
+                    )
                 )
+            if laggards:
+                lines.append(
+                    "Laggards: "
+                    + "; ".join(
+                        f"{x.get('symbol')}({_fmt_metric(x.get('effective_intent_score'))})"
+                        for x in laggards[:5]
+                    )
+                )
+            lines.extend(
+                [
+                    "",
+                    "--- Buckets ---",
+                    f"High-conviction momentum: {len(by_bucket['high-conviction-momentum'])}",
+                    f"Constructive watchlist: {len(by_bucket['constructive-watchlist'])}",
+                    f"Neutral/weak: {len(by_bucket['neutral-weak'])}",
+                    f"Trap-risk: {len(by_bucket['trap-risk'])}",
+                    "",
+                    "--- LLM forensic narrative ---",
+                    post.strip(),
+                    "",
+                    "--- Risk overlays ---",
+                    f"Cluster breadth red ratio (<= -1% day): {_fmt_metric(red_ratio * 100.0)}%",
+                    f"Cluster bullish downgrades applied: {cluster_downgrades}",
+                    f"Event-based risk adjustments applied: {event_adjustments}",
+                    (
+                        "Macro risk filters: not applied (macro market snapshot unavailable)"
+                        if (not macro_applied and str(macro_reason).strip().lower() == "macro snapshot not provided")
+                        else f"Macro risk filters: {'applied' if macro_applied else 'not applied'} ({macro_reason})"
+                    ),
+                    (
+                        "Quality checks: "
+                        + (", ".join(qc_warnings) if qc_warnings else "ok")
+                    ),
+                    "",
+                    "--- Data reconciliation ---",
+                    f"Symbols requested: {len(results)} | successful: {ok_count} | skipped(no data): {len(skipped_rows)} | hard failures: {len(hard_failed_rows)}",
+                    (
+                        "Skipped samples: "
+                        + (", ".join(f"{x['symbol']}({x['exchange']})" for x in skipped_rows[:8]) if skipped_rows else "none")
+                    ),
+                    (
+                        "Hard-failure breakdown: "
+                        + (", ".join(f"{k}={v}" for k, v in sorted(hard_failure_breakdown.items())) if hard_failure_breakdown else "none")
+                    ),
+                    "--- Prediction quality gate ---",
+                    f"Gate status: {'PASS' if quality_gate['passed'] else 'FAIL'}",
+                    f"Successful symbols: {quality_gate['ok_count']}/{quality_gate['total_count']} ({_fmt_metric(quality_gate['coverage_ratio'] * 100.0)}%)",
+                    f"Scored symbols coverage: {_fmt_metric(quality_gate['scored_ratio'] * 100.0)}%",
+                    f"Average next-week score for top 5 ranked stocks: {_fmt_metric(quality_gate['top5_next_week_mean'])}",
+                    f"Score gap between highest-ranked and lowest-ranked stock: {_fmt_metric(quality_gate['spread_top_bottom'])}",
+                    (
+                        "Gate reasons: none"
+                        if quality_gate["passed"]
+                        else "Gate reasons: " + "; ".join(quality_gate["reasons"])
+                    ),
+                    "",
+                ]
             )
-        lines.extend(
-            [
-                "",
-                "--- Buckets ---",
-                f"High-conviction momentum: {len(by_bucket['high-conviction-momentum'])}",
-                f"Constructive watchlist: {len(by_bucket['constructive-watchlist'])}",
-                f"Neutral/weak: {len(by_bucket['neutral-weak'])}",
-                f"Trap-risk: {len(by_bucket['trap-risk'])}",
-                "",
-                "--- LLM forensic narrative ---",
-            ]
-        )
-        lines.extend(
-            [
-            post.strip(),
-            "",
-            "--- Risk overlays ---",
-            f"Cluster breadth red ratio (<= -1% day): {_fmt_metric(red_ratio * 100.0)}%",
-            f"Cluster bullish downgrades applied: {cluster_downgrades}",
-            f"Event-based risk adjustments applied: {event_adjustments}",
-            (
-                "Macro risk filters: not applied (macro market snapshot unavailable)"
-                if (not macro_applied and str(macro_reason).strip().lower() == "macro snapshot not provided")
-                else f"Macro risk filters: {'applied' if macro_applied else 'not applied'} ({macro_reason})"
-            ),
-            (
-                "Quality checks: "
-                + (", ".join(qc_warnings) if qc_warnings else "ok")
-            ),
-                "",
-                "--- Data reconciliation ---",
-                f"Symbols requested: {len(results)} | successful: {ok_count} | skipped(no data): {len(skipped_rows)} | hard failures: {len(hard_failed_rows)}",
-                (
-                    "Skipped samples: "
-                    + (", ".join(f"{x['symbol']}({x['exchange']})" for x in skipped_rows[:8]) if skipped_rows else "none")
-                ),
-                (
-                    "Hard-failure breakdown: "
-                    + (", ".join(f"{k}={v}" for k, v in sorted(hard_failure_breakdown.items())) if hard_failure_breakdown else "none")
-                ),
-                "--- Prediction quality gate ---",
-                f"Gate status: {'PASS' if quality_gate['passed'] else 'FAIL'}",
-                f"Successful symbols: {quality_gate['ok_count']}/{quality_gate['total_count']} ({_fmt_metric(quality_gate['coverage_ratio'] * 100.0)}%)",
-                f"Scored symbols coverage: {_fmt_metric(quality_gate['scored_ratio'] * 100.0)}%",
-                f"Average next-week score for top 5 ranked stocks: {_fmt_metric(quality_gate['top5_next_week_mean'])}",
-                f"Score gap between highest-ranked and lowest-ranked stock: {_fmt_metric(quality_gate['spread_top_bottom'])}",
-                (
-                    "Gate reasons: none"
-                    if quality_gate["passed"]
-                    else "Gate reasons: " + "; ".join(quality_gate["reasons"])
-                ),
-                "",
-                "--- Action summary ---",
-            ]
-        )
+        lines.append("--- Action summary ---")
         action_counts = {"buy": 0, "hold": 0, "trim": 0, "exit-risk": 0}
         for r in ok_results:
             sig = str((r.get("audit") or {}).get("sell_signal") or "hold").lower()
