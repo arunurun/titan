@@ -834,6 +834,7 @@ def test_run_sector_live_macro_guardrail_applied(mock_load, mock_metrics, mock_e
 
     body = mock_email.call_args[0][0]
     assert "Macro guardrail applied: yes" in body
+    assert "--- EOD Reconcile (Decision-first) ---" not in body
 
 
 @patch("email_notify.send_success_post_email")
@@ -844,6 +845,7 @@ def test_run_sector_live_reconcile_report_only_suppresses_legacy_blocks(
 ):
     from sector_audit import run_sector_live
 
+    monkeypatch.setenv("TITAN_RECONCILE_MODE", "1")
     monkeypatch.setenv("TITAN_RECONCILE_REPORT_ONLY", "1")
     mock_load.return_value = [SectorInstrument("A", "NSE")]
     mock_metrics.side_effect = [
@@ -882,6 +884,7 @@ def test_run_sector_live_reconcile_report_only_suppresses_legacy_blocks(
                                 run_sector_live("defence", max_workers=1, digest=True)
 
     body = mock_email.call_args[0][0]
+    assert "--- EOD Reconcile (Decision-first) ---" in body
     assert "Report-only enforcement" in body
     assert "Per-symbol metrics" not in body
     assert "LLM forensic narrative" not in body

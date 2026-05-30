@@ -52,25 +52,15 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Load Breeze token from Supabase
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python scripts/inject_breeze_session_from_supabase.py
-
       - name: Run post-market stock reconcile
         env:
           GITHUB_RUN_ID: ${{ github.run_id }}
           GITHUB_RUN_NUMBER: ${{ github.run_number }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          BREEZE_API_KEY: ${{ secrets.BREEZE_API_KEY }}
-          BREEZE_SECRET: ${{ secrets.BREEZE_SECRET }}
           TITAN_ENABLE_ANALYSIS_STORE: "1"
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
-          GEMINI_MIN_CALL_INTERVAL_SECONDS: "45"
-          GEMINI_SECTOR_DIGEST_FAIL_OPEN: "true"
+          TITAN_RECONCILE_MODE: "1"
+          TITAN_RECONCILE_REPORT_ONLY: "1"
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}

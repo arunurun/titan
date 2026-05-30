@@ -28,6 +28,13 @@ def test_create_breeze_session_expired_raises_actionable(mock_cls):
         create_breeze_session(cfg)
 
 
+def test_create_breeze_session_blocked_in_reconcile_mode(monkeypatch):
+    cfg = make_cfg()
+    monkeypatch.setenv("TITAN_RECONCILE_MODE", "1")
+    with pytest.raises(RuntimeError, match=r"\[ReconcileGuard\]"):
+        create_breeze_session(cfg)
+
+
 def make_cfg():
     return TitanConfig(
         breeze_api_key="k",

@@ -1253,6 +1253,8 @@ def build_stock_reconcile_snapshot(
 
             tr = transition_by_symbol.get(symbol, {})
             prev_signal = _normalize_action_signal(tr.get("previous_signal") or previous.get("action_signal"))
+            current_signal = _normalize_action_signal(tr.get("current_signal") or signal)
+            is_actual_transition = prev_signal != current_signal
             transition_label = str(tr.get("transition_type") or f"{prev_signal}_to_{signal}")
             tr_quality = str(tr.get("matured_1w_outcome") or "unknown").lower()
             transition_quality[tr_quality] += 1
@@ -1291,9 +1293,26 @@ def build_stock_reconcile_snapshot(
                     "sector": current.get("sector") or previous.get("sector"),
                 }
             )
-            transition_beneficial = (
-                tr_quality == "favorable"
-                or (hit_1d is True and hit_1w in (True, None))
+            matured_1w_available = bool(tr.get("matured_1w_available"))
+            matured_1m_available = bool(tr.get("matured_1m_available"))
+            transition_evaluable = (
+                matured_1w_available
+                or matured_1m_available
+                or (hit_1d is not None)
+                or (hit_1w is not None)
+            )
+            transition_beneficial: bool | None
+            if transition_evaluable:
+                transition_beneficial = (
+                    tr_quality == "favorable"
+                    or (hit_1d is True and hit_1w in (True, None))
+                )
+            else:
+                transition_beneficial = None
+            transition_outcome_label = (
+                "beneficial"
+                if transition_beneficial is True
+                else ("not-beneficial" if transition_beneficial is False else "not_evaluable")
             )
             symbol_success = (hit_1d is True) or (hit_1w is True)
             symbol_failure = (hit_1d is False) or (hit_1w is False)
@@ -1320,9 +1339,13 @@ def build_stock_reconcile_snapshot(
                 "realized_next_week": realized_1w,
                 "hit_next_week": hit_1w,
                 "signal_transition": transition_label.replace("_to_", "->"),
+                "previous_signal": prev_signal,
+                "current_signal": current_signal,
+                "is_actual_transition": bool(is_actual_transition),
+                "transition_evaluable": bool(transition_evaluable),
                 "transition_quality": tr_quality,
-                "transition_beneficial": bool(transition_beneficial),
-                "transition_outcome_label": "beneficial" if transition_beneficial else "not-beneficial",
+                "transition_beneficial": transition_beneficial,
+                "transition_outcome_label": transition_outcome_label,
                 "news_summary": news_summary,
                 "news_direction": news_dir,
                 "failure_reason": failure_reason,
@@ -1440,9 +1463,20 @@ def build_stock_reconcile_snapshot(
         q = _transition_quality(prev_week, curr_week)
         transition_counts[q] += 1
         signal_transition = f"{prev_signal}->{signal}"
+        is_actual_transition = prev_signal != signal
         news_summary = _news_summary_from_audit(audit)
         news_dir = _parse_news_direction(audit.get("news_correlation"))
-        transition_beneficial = q in ("improving", "favorable")
+        transition_evaluable = (hit_1d is not None) or (hit_1w is not None)
+        transition_beneficial: bool | None
+        if transition_evaluable:
+            transition_beneficial = q in ("improving", "favorable")
+        else:
+            transition_beneficial = None
+        transition_outcome_label = (
+            "beneficial"
+            if transition_beneficial is True
+            else ("not-beneficial" if transition_beneficial is False else "not_evaluable")
+        )
         symbol_success = (hit_1d is True) or (hit_1w is True)
         symbol_failure = (hit_1d is False) or (hit_1w is False)
         failure_reason = (
@@ -1471,9 +1505,13 @@ def build_stock_reconcile_snapshot(
             "realized_next_week": realized_1w,
             "hit_next_week": hit_1w,
             "signal_transition": signal_transition,
+            "previous_signal": prev_signal,
+            "current_signal": signal,
+            "is_actual_transition": bool(is_actual_transition),
+            "transition_evaluable": bool(transition_evaluable),
             "transition_quality": q,
-            "transition_beneficial": bool(transition_beneficial),
-            "transition_outcome_label": "beneficial" if transition_beneficial else "not-beneficial",
+            "transition_beneficial": transition_beneficial,
+            "transition_outcome_label": transition_outcome_label,
             "news_summary": news_summary,
             "news_direction": news_dir,
             "failure_reason": failure_reason,
@@ -1575,16 +1613,19 @@ def build_reconcile_digest_lines(summary: dict[str, Any]) -> list[str]:
     symbol_count = int(summary.get("symbol_count") or 0)
     coverage_next_day = int(summary.get("coverage_next_day") or 0)
     coverage_next_week = int(summary.get("coverage_next_week") or 0)
+    no_matured_coverage = coverage_next_day <= 0 and coverage_next_week <= 0
     news_eff = summary.get("news_attribution_efficacy")
     news_eff = news_eff if isinstance(news_eff, dict) else {}
     confidence = news_eff.get("alignment_rate_pct")
     confidence_txt = "n/a" if confidence is None else f"{confidence}%"
+    cov_1d_txt = str(coverage_next_day) if coverage_next_day > 0 else "insufficient matured data"
+    cov_1w_txt = str(coverage_next_week) if coverage_next_week > 0 else "insufficient matured data"
     lines.extend(
         [
             "",
             "A) Coverage and confidence",
             f"Scope: {scope} | universe symbols: {symbol_count}",
-            f"Evaluated: next-day {coverage_next_day} | next-week {coverage_next_week} | news-correlation confidence: {confidence_txt}",
+            f"Evaluated: next-day {cov_1d_txt} | next-week {cov_1w_txt} | news-correlation confidence: {confidence_txt}",
         ]
     )
 
@@ -1598,8 +1639,16 @@ def build_reconcile_digest_lines(summary: dict[str, Any]) -> list[str]:
         [
             "",
             "B) Success summary",
-            f"Count: {len(success_rows)} ({_pct(len(success_rows), len(rows))}) | avg 1D return: {_avg_return(success_rows, 'realized_next_day')} | avg 1W return: {_avg_return(success_rows, 'realized_next_week')}",
-            "Top symbols: " + _symbols_text([_display_symbol(r) for r in success_rows]),
+            (
+                f"Count: {len(success_rows)} ({_pct(len(success_rows), len(rows))}) | avg 1D return: {_avg_return(success_rows, 'realized_next_day')} | avg 1W return: {_avg_return(success_rows, 'realized_next_week')}"
+                if not no_matured_coverage
+                else f"Count: {len(success_rows)} (insufficient matured data) | avg 1D return: n/a | avg 1W return: n/a"
+            ),
+            (
+                "Top symbols: " + _symbols_text([_display_symbol(r) for r in success_rows])
+                if not no_matured_coverage
+                else f"Top symbols: none (0 evaluable symbols out of {len(rows)})"
+            ),
         ]
     )
 
@@ -1614,47 +1663,87 @@ def build_reconcile_digest_lines(summary: dict[str, Any]) -> list[str]:
         [
             "",
             "C) Failure summary",
-            f"Count: {len(failure_rows)} ({_pct(len(failure_rows), len(rows))}) | avg 1D return: {_avg_return(failure_rows, 'realized_next_day')} | avg 1W return: {_avg_return(failure_rows, 'realized_next_week')}",
-            "Top symbols: " + _symbols_text([_display_symbol(r) for r in failure_rows]),
-            "Failure reasons: "
-            + (
-                ", ".join(f"{k}={v}" for k, v in sorted(reason_counts.items(), key=lambda x: (-x[1], x[0])))
-                if reason_counts
-                else "none"
+            (
+                f"Count: {len(failure_rows)} ({_pct(len(failure_rows), len(rows))}) | avg 1D return: {_avg_return(failure_rows, 'realized_next_day')} | avg 1W return: {_avg_return(failure_rows, 'realized_next_week')}"
+                if not no_matured_coverage
+                else f"Count: {len(failure_rows)} (insufficient matured data) | avg 1D return: n/a | avg 1W return: n/a"
             ),
-            "News headwind evidence: " + _symbols_text(news_headwind_symbols),
+            (
+                "Top symbols: " + _symbols_text([_display_symbol(r) for r in failure_rows])
+                if not no_matured_coverage
+                else f"Top symbols: none (0 evaluable symbols out of {len(rows)})"
+            ),
+            (
+                "Failure reasons: "
+                + (
+                    ", ".join(
+                        f"{k}={v}" for k, v in sorted(reason_counts.items(), key=lambda x: (-x[1], x[0]))
+                    )
+                    if reason_counts
+                    else "none"
+                )
+                if not no_matured_coverage
+                else "Failure reasons: insufficient matured data"
+            ),
+            (
+                "News headwind evidence: " + _symbols_text(news_headwind_symbols)
+                if not no_matured_coverage
+                else "News headwind evidence: insufficient matured data"
+            ),
         ]
     )
 
     transition_matrix: dict[str, dict[str, Any]] = defaultdict(
-        lambda: {"beneficial": 0, "not_beneficial": 0, "symbols": []}
+        lambda: {"beneficial": 0, "not_beneficial": 0, "not_evaluable": 0, "symbols": []}
     )
     for r in rows:
+        previous_signal = _normalize_action_signal(r.get("previous_signal"))
+        current_signal = _normalize_action_signal(r.get("current_signal") or r.get("signal"))
+        if previous_signal == current_signal:
+            continue
         label = str(r.get("signal_transition") or "unknown->unknown").strip().upper()
-        is_beneficial = bool(r.get("transition_beneficial"))
+        outcome_label = str(r.get("transition_outcome_label") or "").strip().lower().replace("-", "_")
         row = transition_matrix[label]
-        if is_beneficial:
+        if outcome_label == "beneficial":
             row["beneficial"] += 1
-        else:
+        elif outcome_label == "not_beneficial":
             row["not_beneficial"] += 1
+        else:
+            row["not_evaluable"] += 1
         row["symbols"].append(_display_symbol(r))
 
     lines.extend(["", "D) Signal transition matrix"])
     if transition_matrix:
         for tr_label, tr_row in sorted(
             transition_matrix.items(),
-            key=lambda kv: -(int(kv[1]["beneficial"]) + int(kv[1]["not_beneficial"])),
+            key=lambda kv: -(
+                int(kv[1]["beneficial"])
+                + int(kv[1]["not_beneficial"])
+                + int(kv[1]["not_evaluable"])
+            ),
         )[:8]:
-            total = int(tr_row["beneficial"]) + int(tr_row["not_beneficial"])
-            lines.append(
-                f"{tr_label}: beneficial {tr_row['beneficial']} ({_pct(int(tr_row['beneficial']), total)}) | not-beneficial {tr_row['not_beneficial']} ({_pct(int(tr_row['not_beneficial']), total)}) | symbols: {_symbols_text(tr_row['symbols'])}"
-            )
+            total_evaluable = int(tr_row["beneficial"]) + int(tr_row["not_beneficial"])
+            not_evaluable = int(tr_row["not_evaluable"])
+            if total_evaluable <= 0:
+                lines.append(
+                    f"{tr_label}: insufficient matured data | not-evaluable {not_evaluable} | symbols: {_symbols_text(tr_row['symbols'], max_symbols=5)}"
+                )
+            else:
+                lines.append(
+                    f"{tr_label}: beneficial {tr_row['beneficial']} ({_pct(int(tr_row['beneficial']), total_evaluable)}) | not-beneficial {tr_row['not_beneficial']} ({_pct(int(tr_row['not_beneficial']), total_evaluable)}) | not-evaluable {not_evaluable} | symbols: {_symbols_text(tr_row['symbols'])}"
+                )
     else:
         lines.append("No transition rows available.")
 
     lines.extend(["", "E) Key transition examples"])
+    evaluable_rows = [
+        r
+        for r in rows
+        if _normalize_action_signal(r.get("previous_signal")) != _normalize_action_signal(r.get("current_signal") or r.get("signal"))
+        and str(r.get("transition_outcome_label") or "").strip().lower().replace("-", "_") != "not_evaluable"
+    ]
     example_rows = sorted(
-        rows,
+        evaluable_rows,
         key=lambda r: (
             0 if bool(r.get("transition_beneficial")) else 1,
             str(r.get("failure_reason") or ""),
@@ -1666,7 +1755,7 @@ def build_reconcile_digest_lines(summary: dict[str, Any]) -> list[str]:
                 f"{_display_symbol(r)} {str(r.get('signal_transition') or 'unknown->unknown').upper()} | {str(r.get('transition_outcome_label') or 'n/a')} | why: {str(r.get('failure_reason') or 'model_aligned')} | {str(r.get('news_summary') or 'news: n/a')}"
             )
     else:
-        lines.append("No transition examples available.")
+        lines.append("No evaluable transition examples (insufficient matured data).")
 
     flags: list[str] = []
     total_failures = len(failure_rows)

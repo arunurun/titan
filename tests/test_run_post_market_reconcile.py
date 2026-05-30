@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import sys
+from unittest.mock import MagicMock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,29 +18,35 @@ def _load_script_module():
     return mod
 
 
-def test_run_live_reconcile_sets_report_only_env(monkeypatch):
+def test_main_invokes_supabase_reconcile_runner(monkeypatch):
     mod = _load_script_module()
-    captured: dict[str, object] = {}
-
-    class _Proc:
-        returncode = 0
-
-    def _fake_run(cmd, cwd, env, check):  # noqa: ANN001
-        captured["cmd"] = cmd
-        captured["cwd"] = cwd
-        captured["env"] = env
-        captured["check"] = check
-        return _Proc()
-
-    monkeypatch.setattr(mod.subprocess, "run", _fake_run)
-    rc = mod._run_live_reconcile(
+    mock_run = MagicMock(return_value={"scope": "all-stocks"})
+    monkeypatch.setattr(mod, "run_reconcile_report", mock_run)
+    monkeypatch.setattr(sys, "argv", ["prog", "--scope", "all-stocks", "--backfill-days", "2"])
+    rc = mod.main()
+    assert rc == 0
+    mock_run.assert_called_once_with(
         sector=None,
         all_stocks=True,
-        max_symbols=8,
-        workers=2,
+        backfill_days=2,
     )
+
+
+def test_main_backfill_only_skips_report_generation(monkeypatch):
+    mod = _load_script_module()
+    mock_run = MagicMock(return_value={"scope": "defence"})
+    monkeypatch.setattr(mod, "run_reconcile_report", mock_run)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["prog", "--scope", "sector", "--sector", "defence", "--backfill-only", "--backfill-days", "4"],
+    )
+    rc = mod.main()
     assert rc == 0
-    assert "--all-sectors" in captured["cmd"]
-    assert captured["env"]["TITAN_ENABLE_ANALYSIS_STORE"] == "1"
-    assert captured["env"]["TITAN_RECONCILE_REPORT_ONLY"] == "1"
-    assert captured["env"]["TITAN_ALL_SECTORS_SINGLE_DIGEST"] == "1"
+    mock_run.assert_called_once_with(
+        sector="defence",
+        all_stocks=False,
+        backfill_days=4,
+        generate_report=False,
+        email_subject_prefix="Titan V12.0 reconcile backfill",
+    )

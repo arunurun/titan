@@ -358,6 +358,15 @@ def _digest_report_only_mode_enabled() -> bool:
     )
 
 
+def _digest_reconcile_mode_enabled() -> bool:
+    return (os.environ.get("TITAN_RECONCILE_MODE") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _sell_signal_plain_english(signal: str) -> str:
     from action_signals import action_signal_plain_english
 
@@ -2486,7 +2495,8 @@ def run_sector_live(
             ),
             "",
         ]
-        lines.extend(build_reconcile_digest_lines(reconcile_summary))
+        if _digest_reconcile_mode_enabled():
+            lines.extend(build_reconcile_digest_lines(reconcile_summary))
         lines.extend(
             [
                 "",
@@ -2615,7 +2625,8 @@ def run_sector_live(
                 f"Titan EOD reconcile run: {sector_id!r} — {ok_count}/{len(results)} succeeded",
                 "",
             ]
-            compact_lines.extend(build_reconcile_digest_lines(reconcile_summary))
+            if _digest_reconcile_mode_enabled():
+                compact_lines.extend(build_reconcile_digest_lines(reconcile_summary))
             compact_lines.extend(
                 [
                     "",
