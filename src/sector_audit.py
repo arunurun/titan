@@ -2715,6 +2715,11 @@ def run_sector_live(
         _apply_sector_cross_section(ok_results, score_percentiles=False)
         for r in ok_results:
             _refresh_symbol_scoring_outputs(r["audit"])
+            inst = SectorInstrument(
+                symbol=str(r.get("symbol") or ""),
+                exchange=str(r.get("exchange") or "NSE"),
+            )
+            _enrich_audit_with_symbol_news(cfg, inst, r["audit"])
         _apply_sector_cross_section(ok_results, score_percentiles=True)
         news_corr_meta = _apply_global_news_correlation(cfg, sector_id=sector_id, ok_results=ok_results)
         quality_gate = _prediction_quality_gate(ok_results, total_count=len(results))

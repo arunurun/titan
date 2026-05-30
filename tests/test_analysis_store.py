@@ -55,6 +55,38 @@ def test_build_symbol_daily_feature_basic():
     assert row["action_signal"] == "exit-risk"
 
 
+def test_build_symbol_daily_feature_includes_news_columns():
+    audit = {
+        "symbol": "HAL",
+        "exchange": "NSE",
+        "intent_score": 61.2,
+        "effective_intent_score": 55.0,
+        "z_score": 2.3,
+        "absorption_ratio": 1.4,
+        "return_1d_pct": 1.2,
+        "ema_200_distance_pct": 4.5,
+        "atr_14_pct": 3.2,
+        "rows": 38,
+        "news_correlation": {"direction": "tailwind", "driver": "Orders"},
+        "news_sentiment_aggregate": "positive",
+        "news_sentiment_score": 0.42,
+        "news_sentiment_trend": "strengthening",
+        "news_count": 4,
+    }
+    row = build_symbol_daily_feature(
+        audit,
+        trade_date="2026-04-12",
+        sector="defence",
+        run_id="defence-20260412-100000",
+        run_ts_iso="2026-04-12T10:00:00+05:30",
+    )
+    assert row["news_sentiment_aggregate"] == "positive"
+    assert row["news_sentiment_score"] == 0.42
+    assert row["news_sentiment_trend"] == "strengthening"
+    assert row["news_count"] == 4
+    assert row["tape_extras"]["news_correlation"]["direction"] == "tailwind"
+
+
 def test_build_stock_signal_transition_analytics_row_computes_transition_and_ratios():
     history_rows = [
         {"trade_date": "2026-04-01", "action_signal": "hold", "return_1d_pct": 0.2},

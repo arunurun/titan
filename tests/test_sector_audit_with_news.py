@@ -184,6 +184,39 @@ def test_get_symbol_news_snapshot_cache_hit_mocked(monkeypatch):
     assert snap.get("fresh") is True
 
 
+def test_store_news_items_marks_title_hash_duplicate(monkeypatch):
+    cfg = make_cfg()
+    marked: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(
+        "news_store._find_title_duplicate_original",
+        lambda *a, **k: 10,
+    )
+    monkeypatch.setattr(
+        "news_store.mark_news_as_duplicate",
+        lambda _cfg, news_id, duplicate_of_id: marked.append((news_id, duplicate_of_id)),
+    )
+    stored_row = {"id": 20, "symbol": "TESTSTOCK", "url": "https://example.com/new-url"}
+    client = _mock_supabase_client([stored_row])
+    with patch("news_store.create_client", return_value=client):
+        result = store_news_items(
+            cfg,
+            [
+                {
+                    "symbol": "TESTSTOCK",
+                    "exchange": "NSE",
+                    "title": "Duplicate headline title",
+                    "url": "https://example.com/new-url",
+                    "source": "pytest",
+                    "published_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ],
+        )
+    assert result["inserted"] == 0
+    assert result["duplicates_skipped"] == 1
+    assert marked == [(20, 10)]
+
+
 def test_cleanup_old_news_mocked():
     cfg = make_cfg()
     deleted_rows = [{"id": 1}, {"id": 2}]

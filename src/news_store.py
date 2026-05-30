@@ -134,6 +134,64 @@ def _upsert_sentiment_cache(
         logger.info("news_sentiment_cache upsert skipped: %s", exc)
 
 
+def _find_title_duplicate_original(
+    client: Any,
+    *,
+    symbol: str,
+    title_hash: str,
+    exclude_news_id: int,
+) -> int | None:
+    """Return oldest non-duplicate news_feed id for same symbol + title hash, if any."""
+    sym = str(symbol or "").strip().upper()
+    if not sym or not title_hash:
+        return None
+    try:
+        res = (
+            client.table("news_sentiment_cache")
+            .select("news_id")
+            .eq("title_hash", title_hash)
+            .neq("news_id", int(exclude_news_id))
+            .execute()
+        )
+    except APIError as exc:
+        payload = exc.args[0] if exc.args else {}
+        msg = payload.get("message", str(exc)) if isinstance(payload, dict) else str(exc)
+        if "could not find the table" not in msg.lower():
+            logger.info("title-hash duplicate lookup skipped: %s", msg)
+        return None
+    except Exception as exc:
+        logger.info("title-hash duplicate lookup skipped: %s", exc)
+        return None
+    cache_rows = list(getattr(res, "data", None) or [])
+    candidate_ids: list[int] = []
+    for row in cache_rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            candidate_ids.append(int(row.get("news_id")))
+        except (TypeError, ValueError):
+            continue
+    for candidate_id in sorted(candidate_ids):
+        try:
+            feed_res = (
+                client.table("news_feed")
+                .select("id")
+                .eq("id", candidate_id)
+                .eq("symbol", sym)
+                .eq("is_duplicate", False)
+                .limit(1)
+                .execute()
+            )
+        except APIError:
+            continue
+        except Exception:
+            continue
+        feed_rows = list(getattr(feed_res, "data", None) or [])
+        if feed_rows and isinstance(feed_rows[0], dict) and feed_rows[0].get("id"):
+            return int(feed_rows[0]["id"])
+    return None
+
+
 def store_news_items(
     cfg: TitanConfig,
     items: list[dict[str, Any]],
@@ -153,6 +211,7 @@ def store_news_items(
         if not row.get("title") or not row.get("url") or not row.get("symbol"):
             errors += 1
             continue
+        title_hash = _title_hash(str(row.get("title") or ""))
         try:
             res = client.table("news_feed").upsert(row, on_conflict="url").execute()
             rows = list(getattr(res, "data", None) or [])
@@ -166,6 +225,16 @@ def store_news_items(
                     sentiment_score=float(row.get("sentiment_score") or 0.0),
                     model_used=str(row.get("sentiment_model") or sentiment_model_name()),
                 )
+                original_id = _find_title_duplicate_original(
+                    client,
+                    symbol=str(row.get("symbol") or ""),
+                    title_hash=title_hash,
+                    exclude_news_id=news_id,
+                )
+                if original_id:
+                    mark_news_as_duplicate(cfg, news_id, original_id)
+                    duplicates_skipped += 1
+                    continue
             inserted += 1
         except APIError as exc:
             payload = exc.args[0] if exc.args else {}
