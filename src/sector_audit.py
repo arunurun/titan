@@ -470,25 +470,10 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
         f"strength bands: <20 sideways, 20-24 weak trend, >=25 strong trend; direction rule: {direction_rule})"
     )
     lines_out.append("")
-    dist_to_high = _safe_float(breakout_to_high)
-    dist_from_low = _safe_float(breakout_above_low)
-    dist_to_high_band = (
-        "n/a"
-        if math.isnan(dist_to_high)
-        else ("near 20D high (>= -1%)" if dist_to_high >= -1.0 else "away from 20D high (< -1%)")
-    )
-    dist_from_low_band = (
-        "n/a"
-        if math.isnan(dist_from_low)
-        else ("near 20D low (<= 1%)" if dist_from_low <= 1.0 else "away from 20D low (> 1%)")
-    )
     lines_out.append(
-        f"20D Range Position: {_fmt_metric(breakout_to_high)}% below 20D high · "
-        f"{_fmt_metric(breakout_above_low)}% above 20D low"
-    )
-    lines_out.append(
-        "Range distance bands: "
-        f"to-high {dist_to_high_band}; from-low {dist_from_low_band}"
+        f"20D Range Position: {_fmt_metric(breakout_to_high)}% to 20D high \u00b7 "
+        f"{_fmt_metric(breakout_above_low)}% above 20D low "
+        "(near-high (within ~1% of 20D high); thresholds: near-high >=-1%, near-low <=1%)"
     )
     lines_out.append("")
     lines_out.append(

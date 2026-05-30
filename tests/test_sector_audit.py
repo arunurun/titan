@@ -82,7 +82,7 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
     assert "strength bands: <20 sideways, 20-24 weak trend, >=25 strong trend" in text.lower()
     assert "direction rule: +di" in text.lower()
     assert "20d range position" in text.lower()
-    assert "range distance bands: to-high" in text.lower()
+    assert "thresholds: near-high >=-1%, near-low <=1%" in text.lower()
     assert "volatility vs 3m baseline" in text.lower()
     assert "money flow trend (20d)" in text.lower()
     assert "bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution" in text
@@ -107,8 +107,7 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
         "  \n"
         "  Trend regime (14D): Buy trend (ADX 22.60; strength building (20-25); strength bands: <20 sideways, 20-24 weak trend, >=25 strong trend; direction rule: +DI 29.10 > -DI 18.40 => buy trend)\n"
         "  \n"
-        "  20D Range Position: -0.80% below 20D high · 9.40% above 20D low\n"
-        "  Range distance bands: to-high near 20D high (>= -1%); from-low away from 20D low (> 1%)\n"
+        "  20D Range Position: -0.80% to 20D high \u00b7 9.40% above 20D low (near-high (within ~1% of 20D high); thresholds: near-high >=-1%, near-low <=1%)\n"
         "  \n"
         "  Volatility vs 3M baseline: 1.12x (high; bands: <0.90 low, 0.90-1.10 normal, >1.10 high)\n"
         "  \n"
@@ -147,8 +146,7 @@ def test_symbol_digest_default_shows_neutral_na_for_missing_new_metrics(monkeypa
         "Trend regime (14D): Sideways (ADX n/a; strength n/a; strength bands: <20 sideways, 20-24 weak trend, >=25 strong trend; direction rule: direction source unavailable)"
         in text
     )
-    assert "20D Range Position: n/a% below 20D high · n/a% above 20D low" in text
-    assert "Range distance bands: to-high n/a; from-low n/a" in text
+    assert "20D Range Position: n/a% to 20D high \u00b7 n/a% above 20D low (near-high (within ~1% of 20D high); thresholds: near-high >=-1%, near-low <=1%)" in text
     assert "Volatility vs 3M baseline: n/ax (n/a; bands: <0.90 low, 0.90-1.10 normal, >1.10 high)" in text
     assert (
         "Money flow trend (20D): n/a "
