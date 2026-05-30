@@ -280,7 +280,7 @@
   - [x] Handle duplicate URL via upsert / on_conflict (Appendix C: normal constraint violation → skip)
   - [x] Return counts: `inserted`, `duplicates_skipped` (and any `updated` if upsert)
   - [x] Populate `news_sentiment_cache` when sentiment computed
-  - [ ] Set `is_duplicate` / `duplicate_of_id` via `mark_news_as_duplicate` when detected (deferred follow-up)
+  - [x] Set `is_duplicate` / `duplicate_of_id` via `mark_news_as_duplicate` when detected (title-hash via `news_sentiment_cache`)
 
 - [x] **Function: `get_recent_news_for_symbol`**
   - [x] Signature: `(cfg, symbol, exchange="NSE", lookback_hours=None, limit=20) -> list[dict]`
@@ -602,17 +602,17 @@
   - [ ] Snapshot TTL cache hit/miss for `symbol_news_snapshots` (covered partially in `test_sector_audit_with_news.py`)
   - [ ] `cleanup_old_news` deletion counts (mocked Supabase)
 
-- [ ] **`tests/test_news_audit.py`**
-  - [ ] `validate_news_payload` valid/invalid cases
-  - [ ] `correlate_news_with_price_move` aligned vs contradiction paths
-  - [ ] `extract_news_drivers` ranking by impact × relevance
+- [x] **`tests/test_news_audit.py`**
+  - [x] `validate_news_payload` valid/invalid cases
+  - [x] `correlate_news_with_price_move` aligned vs contradiction paths
+  - [x] `extract_news_drivers` ranking by impact × relevance
 
 - [x] **Extend `tests/test_sector_audit.py`**
   - [x] News enrichment hook sets fields on mock news
   - [x] Enrichment failure sets `news_error` without raising
 
-- [ ] **Extend `tests/test_analysis_store.py`**
-  - [ ] New columns persisted in `symbol_daily_features` row
+- [x] **Extend `tests/test_analysis_store.py`**
+  - [x] New columns persisted in `symbol_daily_features` row
 
 ### 5.5 Test execution
 
@@ -786,4 +786,4 @@
 
 ---
 
-**End of checklist.** Unchecked items: deferred `sector_priority` blending, production deploy/monitoring, GHA dry-run, optional tests (`test_news_audit.py`, `test_news_store.py`, analysis_store news columns), legacy stock-news env vars, and `mark_news_as_duplicate` wiring in `store_news_items`. Finnhub 403 (forbidden) on some symbols — note only; not fixed in V12 pass.
+**End of checklist.** Unchecked items: deferred `sector_priority` blending (3.6/3.7), production deploy/monitoring, GHA dry-run, optional `test_news_store.py`, legacy stock-news env vars. Finnhub 403 (forbidden) on some symbols — note only; not fixed in V12 pass.
