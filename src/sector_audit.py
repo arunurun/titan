@@ -187,6 +187,71 @@ def _atr_regime_icon(ratio: Any) -> str:
     return "🟡➡"
 
 
+def _state_for_metric(v: Any, *, bullish_above: float, bearish_below: float) -> int:
+    f = _safe_float(v)
+    if math.isnan(f):
+        return 0
+    if f >= bullish_above:
+        return 1
+    if f <= bearish_below:
+        return -1
+    return 0
+
+
+def _tape_snapshot_icon(audit: dict[str, Any]) -> str:
+    states: list[int] = []
+    states.append(_state_for_metric(audit.get("return_1d_pct"), bullish_above=1.0, bearish_below=-1.0))
+    states.append(_state_for_metric(audit.get("z_score"), bullish_above=1.0, bearish_below=-1.0))
+    states.append(
+        _state_for_metric(audit.get("ema_200_distance_pct"), bullish_above=5.0, bearish_below=-5.0)
+    )
+    states.append(
+        _state_for_metric(
+            _volume_participation_for_digest_label(audit),
+            bullish_above=1.5,
+            bearish_below=0.7,
+        )
+    )
+    atr_pct = _safe_float(audit.get("atr_14_pct"))
+    if not math.isnan(atr_pct):
+        if atr_pct < 2.0:
+            states.append(1)
+        elif atr_pct > 4.0:
+            states.append(-1)
+        else:
+            states.append(0)
+    states.append(_state_for_metric(audit.get("cmf_20"), bullish_above=0.05, bearish_below=-0.05))
+    if not states:
+        return "🟡➡"
+    avg = sum(states) / len(states)
+    if avg >= 0.25:
+        return "🟢⬆"
+    if avg <= -0.25:
+        return "🔴⬇"
+    return "🟡➡"
+
+
+def _sector_relative_rank_icon(audit: dict[str, Any]) -> str:
+    states = [
+        _state_for_metric(
+            audit.get("sector_pctile_effective_intent"),
+            bullish_above=67.0,
+            bearish_below=33.0,
+        ),
+        _state_for_metric(
+            audit.get("sector_pctile_next_week_score"),
+            bullish_above=67.0,
+            bearish_below=33.0,
+        ),
+    ]
+    avg = sum(states) / len(states)
+    if avg >= 0.5:
+        return "🟢⬆"
+    if avg <= -0.5:
+        return "🔴⬇"
+    return "🟡➡"
+
+
 def _adx_strength_band(adx_val: Any) -> str:
     adx = _safe_float(adx_val)
     if math.isnan(adx):
@@ -375,6 +440,130 @@ def _infer_news_affected_metric(audit: dict[str, Any]) -> str:
     return ranked[0][0]
 
 
+def _news_scope_bucket(*, title: str, source: str) -> str:
+    txt = f"{title} {source}".lower()
+    stock_terms = (
+        "stock",
+        "stocks",
+        "share",
+        "shares",
+        "earnings",
+        "guidance",
+        "ipo",
+        "buyback",
+        "merger",
+        "acquisition",
+        "quarter",
+        "q1",
+        "q2",
+        "q3",
+        "q4",
+    )
+    local_terms = (
+        "india",
+        "indian",
+        "nse",
+        "bse",
+        "nifty",
+        "sensex",
+        "rbi",
+        "sebi",
+        "rupee",
+        "et now",
+        "moneycontrol",
+        "livemint",
+        "economictimes",
+        "business standard",
+    )
+    if any(term in txt for term in stock_terms):
+        return "stock"
+    if any(term in txt for term in local_terms):
+        return "local"
+    return "global"
+
+
+def _news_evidence_payload(
+    *,
+    drivers: list[dict[str, Any]],
+    net_score: float,
+    max_per_bucket: int = 3,
+) -> dict[str, Any]:
+    buckets: dict[str, list[dict[str, Any]]] = {"global": [], "local": [], "stock": []}
+    for raw in drivers:
+        if not isinstance(raw, dict):
+            continue
+        title = str(raw.get("title") or raw.get("driver") or "").strip()
+        source = str(raw.get("source") or "").strip() or "unknown_source"
+        published_at = str(raw.get("published_at") or "").strip()
+        contribution = _safe_float(raw.get("contribution"))
+        if not title or math.isnan(contribution):
+            continue
+        scope = _news_scope_bucket(title=title, source=source)
+        buckets.setdefault(scope, []).append(
+            {
+                "headline": title,
+                "source": source,
+                "published_at": published_at,
+                "impact_contribution_score": round(contribution, 4),
+            }
+        )
+    for scope in ("global", "local", "stock"):
+        buckets[scope] = sorted(
+            buckets.get(scope, []),
+            key=lambda x: abs(_safe_float(x.get("impact_contribution_score"))),
+            reverse=True,
+        )[: max(1, int(max_per_bucket))]
+    if net_score > 0.02:
+        direction = "tailwind"
+    elif net_score < -0.02:
+        direction = "headwind"
+    else:
+        direction = "neutral"
+    return {
+        "top_headlines": buckets,
+        "net_news_impact_score": round(net_score, 4),
+        "net_news_impact_direction": direction,
+    }
+
+
+def _news_evidence_line(audit: dict[str, Any]) -> str:
+    corr = audit.get("news_correlation")
+    if not isinstance(corr, dict):
+        return ""
+    evidence = corr.get("evidence")
+    if not isinstance(evidence, dict):
+        return ""
+    net_score = _safe_float(evidence.get("net_news_impact_score"))
+    direction = str(evidence.get("net_news_impact_direction") or "neutral").strip().lower() or "neutral"
+    top_headlines = evidence.get("top_headlines")
+    if not isinstance(top_headlines, dict):
+        top_headlines = {}
+
+    def _bucket_txt(name: str) -> str:
+        rows = top_headlines.get(name)
+        if not isinstance(rows, list) or not rows:
+            return f"{name}=none"
+        parts: list[str] = []
+        for row in rows[:2]:
+            if not isinstance(row, dict):
+                continue
+            headline = str(row.get("headline") or "").strip()
+            if not headline:
+                continue
+            source = str(row.get("source") or "unknown_source").strip()
+            published_at = str(row.get("published_at") or "n/a").strip() or "n/a"
+            impact = _fmt_metric(row.get("impact_contribution_score"), 4)
+            parts.append(
+                f"{headline} [source={source}; published_at={published_at}; impact_contribution_score={impact}]"
+            )
+        return f"{name}=" + (" || ".join(parts) if parts else "none")
+
+    return (
+        f"News evidence: net_news_impact_score={_fmt_metric(net_score, 4)} "
+        f"(direction={direction}) · {_bucket_txt('global')} · {_bucket_txt('local')} · {_bucket_txt('stock')}"
+    )
+
+
 def _news_correlation_line(audit: dict[str, Any]) -> str:
     corr = audit.get("news_correlation")
     if not isinstance(corr, dict):
@@ -384,6 +573,7 @@ def _news_correlation_line(audit: dict[str, Any]) -> str:
     theme = str(corr.get("affected_theme") or "").strip()
     direction = str(corr.get("direction") or "").strip().lower()
     conf = _safe_float(corr.get("confidence"))
+    fallback_label = str(corr.get("fallback_label") or "").strip()
     if not driver or not metric:
         return ""
     if direction == "tailwind":
@@ -406,6 +596,66 @@ def _news_correlation_line(audit: dict[str, Any]) -> str:
         f"Global news relation: driver={driver} · theme={theme_txt} · "
         f"affected_metric={metric} · direction={dir_label} · confidence={conf_txt} "
         f"({conf_band}; bands: >=0.75 high, 0.50-0.74 medium, <0.50 low)"
+        + (f" · fallback={fallback_label}" if fallback_label else "")
+    )
+
+
+def _cmf_delta_interpretation(absolute_change: float, current_value: float) -> str:
+    if absolute_change >= 0.03:
+        return "strong_increase"
+    if absolute_change > 0.005:
+        return "increase"
+    if absolute_change <= -0.03:
+        return "strong_decrease"
+    if absolute_change < -0.005:
+        return "decrease"
+    if current_value > 0.05:
+        return "stable_accumulation"
+    if current_value < -0.05:
+        return "stable_distribution"
+    return "stable_neutral"
+
+
+def _cmf_delta_payload(previous_value: Any, current_value: Any) -> dict[str, Any]:
+    prev = _safe_float(previous_value)
+    cur = _safe_float(current_value)
+    if math.isnan(prev) or math.isnan(cur):
+        return {
+            "previous_value": None,
+            "current_value": None if math.isnan(cur) else round(cur, 4),
+            "absolute_change": None,
+            "relative_change_percent": None,
+            "interpretation": "unavailable",
+        }
+    abs_change = cur - prev
+    rel_pct = None
+    if abs(prev) > 1e-9:
+        rel_pct = (abs_change / abs(prev)) * 100.0
+    return {
+        "previous_value": round(prev, 4),
+        "current_value": round(cur, 4),
+        "absolute_change": round(abs_change, 4),
+        "relative_change_percent": round(rel_pct, 2) if isinstance(rel_pct, float) else None,
+        "interpretation": _cmf_delta_interpretation(abs_change, cur),
+    }
+
+
+def _cmf_delta_line(audit: dict[str, Any]) -> str:
+    payload = audit.get("cmf_20_delta")
+    if not isinstance(payload, dict):
+        return ""
+    prev = payload.get("previous_value")
+    cur = payload.get("current_value")
+    abs_change = payload.get("absolute_change")
+    rel = payload.get("relative_change_percent")
+    interpretation = str(payload.get("interpretation") or "unavailable")
+    if prev is None or cur is None or abs_change is None:
+        return "CMF20 delta: unavailable"
+    rel_txt = "n/a" if rel is None else f"{float(rel):+.2f}%"
+    return (
+        f"CMF20 delta: previous_value={_fmt_metric(prev, 4)} -> current_value={_fmt_metric(cur, 4)} "
+        f"| absolute_change={_fmt_metric(abs_change, 4)} | relative_change_percent={rel_txt} "
+        f"| interpretation={interpretation}"
     )
 
 
@@ -441,9 +691,11 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     lines_out.append(f"{symbol} ({exchange}) — {_sell_signal_plain_english(str(sell_signal))}")
     nw_l = _horizon_score_label(next_week)
     lines_out.append(
+        f"{_metric_icon(next_week, bullish_above=55.0, bearish_below=45.0)} "
         f"1W outlook: {_fmt_metric(next_week)} / 100 ({nw_l}; {_horizon_score_bands_text()})"
     )
     lines_out.append(
+        f"{_metric_icon(intent, bullish_above=55.0, bearish_below=45.0)} "
         f"Technical intent: {_fmt_metric(intent)} / 100 "
         f"({_equity_technical_label(intent)}; bands: >=70 high-long, 55-69 moderate-long, 45-54 neutral, 30-44 defensive, <30 high-defensive)"
     )
@@ -464,64 +716,85 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
             )
     else:
         direction_rule = "direction source unavailable"
+    trend_icon = "🟡➡"
+    if trend_regime == "Buy trend":
+        trend_icon = "🟢⬆"
+    elif trend_regime == "Sell trend":
+        trend_icon = "🔴⬇"
     lines_out.append(
-        f"Trend regime (14D): {trend_regime} "
+        f"{trend_icon} Trend regime (14D): {trend_regime} "
         f"(ADX {_fmt_metric(adx_14)}; strength {_adx_strength_band(adx_14)}; "
         f"strength bands: <20 sideways, 20-24 weak trend, >=25 strong trend; direction rule: {direction_rule})"
     )
     lines_out.append("")
     lines_out.append(
+        f"{_breakout_state_icon(breakout_to_high, breakout_above_low)} "
         f"20D Range Position: {_fmt_metric(breakout_to_high)}% to 20D high \u00b7 "
         f"{_fmt_metric(breakout_above_low)}% above 20D low "
         "(near-high (within ~1% of 20D high); thresholds: near-high >=-1%, near-low <=1%)"
     )
     lines_out.append("")
     lines_out.append(
-        f"Volatility vs 3M baseline: {_fmt_metric(atr_ratio)}x "
+        f"{_atr_regime_icon(atr_ratio)} Volatility vs 3M baseline: {_fmt_metric(atr_ratio)}x "
         f"({_atr_ratio_band(atr_ratio)}; bands: <0.90 low, 0.90-1.10 normal, >1.10 high)"
     )
     lines_out.append("")
-    lines_out.append("Tape snapshot")
+    lines_out.append(f"{_tape_snapshot_icon(audit)} Tape snapshot")
     lines_out.append(
+        f"{_metric_icon(ret1d, bullish_above=1.0, bearish_below=-1.0)} "
         f"1D move: {_fmt_metric(ret1d)}% "
         f"(bands: >=+1 strong up, -1 to +1 muted, <=-1 weak)"
     )
     lines_out.append(
+        f"{_metric_icon(z, bullish_above=1.0, bearish_below=-1.0)} "
         f"1D z-score: {_fmt_metric(z)} "
         f"({_z_label(z)}; bands: >=+2 / +1 to +2 / -1 to +1 / -2 to -1 / <=-2)"
     )
     lines_out.append(
+        f"{_metric_icon(ema_dist, bullish_above=5.0, bearish_below=-5.0)} "
         f"Distance above long-term trend (EMA200): {_fmt_metric(ema_dist)}% "
         f"(bands: >+5 stretched above trend, -5 to +5 near trend, <-5 below trend)"
     )
     lines_out.append(
+        f"{_metric_icon(vpr_label_src, bullish_above=1.5, bearish_below=0.7)} "
         f"Volume participation: {_fmt_metric(vpr_label_src)}x "
         f"({_volume_participation_label(vpr_label_src)}; bands: >=1.5 high, 1.0-1.49 above-avg, 0.7-0.99 below-avg, <0.7 thin)"
     )
+    atr_icon = "🟡➡"
+    atr_v = _safe_float(atr_pct)
+    if not math.isnan(atr_v):
+        if atr_v < 2.0:
+            atr_icon = "🟢⬆"
+        elif atr_v > 4.0:
+            atr_icon = "🔴⬇"
     lines_out.append(
-        f"Typical daily swing (ATR14): {_fmt_metric(atr_pct)}% "
+        f"{atr_icon} Typical daily swing (ATR14): {_fmt_metric(atr_pct)}% "
         f"(bands: <2.0 calm, 2.0-4.0 moderate, >4.0 elevated)"
     )
     lines_out.append(
+        f"{_metric_icon(cmf_val, bullish_above=0.05, bearish_below=-0.05)} "
         f"Money flow trend (20D): {_fmt_metric(cmf_val, 3)} "
         f"({_cmf_band(cmf_val)}; bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution)"
         + (f" [{cmf_label} proxy]" if cmf_label != "CMF20" else "")
     )
     lines_out.append("")
 
-    lines_out.append("Sector-relative rank")
+    lines_out.append(f"{_sector_relative_rank_icon(audit)} Sector-relative rank")
     sp_int = audit.get("sector_pctile_effective_intent")
     lines_out.append(
+        f"{_metric_icon(sp_int, bullish_above=67.0, bearish_below=33.0)} "
         f"Technical intent percentile: {_fmt_metric(sp_int)} "
         f"({_sector_rank_band(sp_int)}; bands: leader >=67, average 34-66, laggard <=33)"
     )
     sp_nw = audit.get("sector_pctile_next_week_score")
     lines_out.append(
+        f"{_metric_icon(sp_nw, bullish_above=67.0, bearish_below=33.0)} "
         f"Next-week percentile: {_fmt_metric(sp_nw)} "
         f"({_sector_rank_band(sp_nw)}; bands: leader >=67, average 34-66, laggard <=33)"
     )
     nd_l = _horizon_score_label(nf)
     lines_out.append(
+        f"{_metric_icon(nf, bullish_above=55.0, bearish_below=45.0)} "
         f"Very short horizon (1D outlook): {_fmt_metric(nf)} / 100 "
         f"({nd_l}; {_horizon_score_bands_text()})"
     )
@@ -534,9 +807,16 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     if pred:
         lines_out.append(pred)
 
+    cmf_delta = _cmf_delta_line(audit)
+    if cmf_delta:
+        lines_out.append(cmf_delta)
+
     news_rel = _news_correlation_line(audit)
     if news_rel:
         lines_out.append(news_rel)
+    news_evidence = _news_evidence_line(audit)
+    if news_evidence:
+        lines_out.append(news_evidence)
 
     flag_simple = _digest_flags_simple(audit)
     if flag_simple:
@@ -631,11 +911,15 @@ def _format_symbol_metrics_line_verbose(result: dict[str, Any]) -> str:
     sell_reason_text = (
         f" ({'; '.join(str(x) for x in sell_reasons[:2])})" if sell_reasons else ""
     )
+    cmf_delta = _cmf_delta_line(audit)
     news_rel = _news_correlation_line(audit)
+    news_evidence = _news_evidence_line(audit)
     return (
         f"{base} | support={support_tag} | fundamentals={fundamental_text} "
         f"| sellReason={sell_signal}{sell_reason_text} | {_prediction_reason_text(audit)}"
+        + (f" | {cmf_delta}" if cmf_delta else "")
         + (f" | {news_rel}" if news_rel else "")
+        + (f" | {news_evidence}" if news_evidence else "")
     )
 
 
@@ -1261,17 +1545,81 @@ def _apply_global_news_correlation(
         return {"applied": False, "reason": "news_module_unavailable"}
     snapshot = resolve_global_news_snapshot(cfg)
     scores = snapshot.get("sector_scores")
-    if not isinstance(scores, dict):
-        return {"applied": False, "reason": "news_scores_unavailable", "snapshot": snapshot}
-    sector_news = scores.get(str(sector_id).strip().lower())
-    if not isinstance(sector_news, dict):
-        return {"applied": False, "reason": "sector_news_missing", "snapshot": snapshot}
+    scores = scores if isinstance(scores, dict) else {}
+    sector_key = str(sector_id).strip().lower()
+    sector_news = scores.get(sector_key)
+    sector_news = sector_news if isinstance(sector_news, dict) else {}
     score = _safe_float(sector_news.get("score"))
     confidence = _safe_float(sector_news.get("confidence"))
-    drivers = sector_news.get("drivers_top")
-    top_driver = drivers[0] if isinstance(drivers, list) and drivers else {}
-    if not isinstance(top_driver, dict):
-        top_driver = {}
+    matched_items = int(sector_news.get("matched_items") or 0)
+    drivers_raw = sector_news.get("drivers_top")
+    drivers_list = [d for d in (drivers_raw if isinstance(drivers_raw, list) else []) if isinstance(d, dict)]
+    fallback_label = ""
+
+    if matched_items <= 0 or not drivers_list:
+        candidate_drivers: list[dict[str, Any]] = []
+        for score_row in scores.values():
+            if not isinstance(score_row, dict):
+                continue
+            dtop = score_row.get("drivers_top")
+            if not isinstance(dtop, list):
+                continue
+            for d in dtop:
+                if isinstance(d, dict):
+                    candidate_drivers.append(d)
+        if candidate_drivers:
+            drivers_list = sorted(
+                candidate_drivers,
+                key=lambda d: abs(_safe_float(d.get("contribution"))),
+                reverse=True,
+            )[:3]
+            top = drivers_list[0]
+            contribution = _safe_float(top.get("contribution"))
+            score = contribution if not math.isnan(contribution) else 0.0
+            conf_top = _safe_float(top.get("confidence"))
+            if math.isnan(conf_top):
+                conf_top = 0.35
+            confidence = min(0.49, conf_top)
+            fallback_scope = _news_scope_bucket(
+                title=str(top.get("title") or top.get("driver") or ""),
+                source=str(top.get("source") or ""),
+            )
+            fallback_label = f"sector_specific_match_missing_using_{fallback_scope}_market_driver"
+        else:
+            news_items = snapshot.get("news_items")
+            news_items = news_items if isinstance(news_items, list) else []
+            if news_items and isinstance(news_items[0], dict):
+                first = news_items[0]
+                title = str(first.get("title") or "").strip() or "Global market headlines"
+                source = str(first.get("source") or "").strip() or "unknown_source"
+                published_at = str(first.get("published_at") or "").strip()
+                drivers_list = [
+                    {
+                        "title": title,
+                        "driver": title,
+                        "source": source,
+                        "published_at": published_at,
+                        "contribution": 0.0,
+                    }
+                ]
+                score = 0.0
+                confidence = 0.3
+                fallback_scope = _news_scope_bucket(title=title, source=source)
+                fallback_label = f"sector_specific_match_missing_using_{fallback_scope}_market_driver"
+            else:
+                drivers_list = [
+                    {
+                        "title": "No recent market driver available",
+                        "driver": "No recent market driver available",
+                        "source": "snapshot_unavailable",
+                        "published_at": "",
+                        "contribution": 0.0,
+                    }
+                ]
+                score = 0.0
+                confidence = 0.2
+                fallback_label = "sector_specific_match_missing_no_market_driver"
+
     if math.isnan(score):
         score = 0.0
     if score > 0.02:
@@ -1280,12 +1628,14 @@ def _apply_global_news_correlation(
         direction = "headwind"
     else:
         direction = "neutral"
+    top_driver = drivers_list[0] if drivers_list else {}
     driver_text = str(top_driver.get("driver") or top_driver.get("title") or "").strip()
     if not driver_text:
         driver_text = "Global macro flow"
     source = str(top_driver.get("source") or "").strip()
     if source:
         driver_text = f"{driver_text} ({source})"
+    evidence = _news_evidence_payload(drivers=drivers_list, net_score=score)
     applied = 0
     for r in ok_results:
         audit = r.get("audit")
@@ -1297,6 +1647,8 @@ def _apply_global_news_correlation(
             "affected_theme": str(sector_id).strip().lower(),
             "direction": direction,
             "confidence": None if math.isnan(confidence) else round(confidence, 4),
+            "evidence": evidence,
+            "fallback_label": fallback_label,
         }
         applied += 1
     return {
@@ -1304,6 +1656,7 @@ def _apply_global_news_correlation(
         "applied_count": applied,
         "snapshot": snapshot,
         "sector_news_score": round(score, 4),
+        "fallback_label": fallback_label,
     }
 
 
@@ -1558,6 +1911,13 @@ def build_equity_live_audit(
             "breakout_20d_distance_pct_above_low": float("nan"),
             "atr_14_over_atr_63": float("nan"),
             "cmf_20": float("nan"),
+            "cmf_20_delta": {
+                "previous_value": None,
+                "current_value": None,
+                "absolute_change": None,
+                "relative_change_percent": None,
+                "interpretation": "unavailable",
+            },
             "obv_slope_20": float("nan"),
         }
         return skip, ""
@@ -1603,6 +1963,8 @@ def build_equity_live_audit(
     breakout_to_high, breakout_above_low = calculate_breakout_20d_distances_pct(df)
     atr_14_over_atr_63 = calculate_atr_ratio(df, short_window=14, long_window=63)
     cmf_20 = calculate_cmf(df, window=20)
+    cmf_20_prev = calculate_cmf(df.iloc[:-1], window=20) if len(df) > 1 else float("nan")
+    cmf_20_delta = _cmf_delta_payload(cmf_20_prev, cmf_20)
     obv_slope_20 = calculate_obv_slope(df, window=20)
     atr_14_pct = (
         (atr_14 / close_last) * 100.0
@@ -1669,6 +2031,7 @@ def build_equity_live_audit(
         "breakout_20d_distance_pct_above_low": breakout_above_low,
         "atr_14_over_atr_63": atr_14_over_atr_63,
         "cmf_20": cmf_20,
+        "cmf_20_delta": cmf_20_delta,
         "obv_slope_20": obv_slope_20,
         "atr_break_multiple": atr_break_multiple,
         "structural_break_proxy": (
@@ -2014,6 +2377,8 @@ def run_sector_live(
         from analysis_store import (
             analysis_store_enabled,
             build_comparison_payload,
+            build_reconcile_digest_lines,
+            enrich_audits_with_stock_reconcile,
             persist_llm_digest_memory,
             quality_checks_for_run,
             update_sector_period_rollups,
@@ -2032,6 +2397,11 @@ def run_sector_live(
         news_corr_meta = _apply_global_news_correlation(cfg, sector_id=sector_id, ok_results=ok_results)
         quality_gate = _prediction_quality_gate(ok_results, total_count=len(results))
         audits = [r["audit"] for r in ok_results]
+        reconcile_summary = enrich_audits_with_stock_reconcile(
+            cfg,
+            sector=sector_id,
+            audits=audits,
+        )
         persist_meta = persist_sector_run_analytics(
             cfg,
             sector=sector_id,
@@ -2102,8 +2472,14 @@ def run_sector_live(
                 f"| correlation_applied={news_corr_meta.get('applied_count', 0)} symbols"
             ),
             "",
-            "--- Movement summary ---",
         ]
+        lines.extend(build_reconcile_digest_lines(reconcile_summary))
+        lines.extend(
+            [
+                "",
+                "--- Movement summary ---",
+            ]
+        )
         if leaders:
             lines.append(
                 "Leaders: "
@@ -2218,7 +2594,10 @@ def run_sector_live(
                 cfg,
                 run_id=mem_run_id,
                 sector=sector_id,
-                prompt_facts=comparison if comparison.get("enabled") else {"enabled": False},
+                prompt_facts={
+                    "comparison": comparison if comparison.get("enabled") else {"enabled": False},
+                    "reconcile_summary": reconcile_summary,
+                },
                 output_text=post or digest_text[:8000] or "(digest)",
                 model_name=None,
                 full_digest=digest_text,

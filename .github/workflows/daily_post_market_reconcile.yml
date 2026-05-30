@@ -1,0 +1,95 @@
+name: Daily post-market reconcile
+
+on:
+  workflow_dispatch:
+    inputs:
+      sector_id:
+        description: "Sector id to reconcile (e.g. defence)"
+        required: false
+        default: "defence"
+      max_symbols:
+        description: "Optional cap for symbols"
+        required: false
+        default: ""
+      workers:
+        description: "Optional sector workers"
+        required: false
+        default: "4"
+      backfill_days:
+        description: "Optional reconcile backfill days"
+        required: false
+        default: "0"
+      backfill_only:
+        description: "Run only backfill persistence"
+        required: false
+        type: choice
+        default: "false"
+        options:
+          - "false"
+          - "true"
+  schedule:
+    # 16:35 IST Monday-Friday (GitHub cron uses UTC).
+    - cron: "5 11 * * 1-5"
+
+permissions:
+  contents: read
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Load Breeze token from Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python scripts/inject_breeze_session_from_supabase.py
+
+      - name: Run post-market stock reconcile
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          BREEZE_API_KEY: ${{ secrets.BREEZE_API_KEY }}
+          BREEZE_SECRET: ${{ secrets.BREEZE_SECRET }}
+          TITAN_ENABLE_ANALYSIS_STORE: "1"
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
+          GEMINI_MIN_CALL_INTERVAL_SECONDS: "45"
+          GEMINI_SECTOR_DIGEST_FAIL_OPEN: "true"
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          SMTP_USE_TLS: ${{ secrets.SMTP_USE_TLS }}
+        run: |
+          SECTOR_ID="${{ inputs.sector_id }}"
+          if [ -z "$SECTOR_ID" ]; then
+            SECTOR_ID="defence"
+          fi
+          ARGS="--sector $SECTOR_ID"
+          if [ -n "${{ inputs.max_symbols }}" ]; then
+            ARGS="$ARGS --max-symbols ${{ inputs.max_symbols }}"
+          fi
+          if [ -n "${{ inputs.workers }}" ]; then
+            ARGS="$ARGS --workers ${{ inputs.workers }}"
+          fi
+          if [ -n "${{ inputs.backfill_days }}" ]; then
+            ARGS="$ARGS --backfill-days ${{ inputs.backfill_days }}"
+          fi
+          if [ "${{ inputs.backfill_only }}" = "true" ]; then
+            ARGS="$ARGS --backfill-only"
+          fi
+          python scripts/run_post_market_reconcile.py $ARGS

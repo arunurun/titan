@@ -101,29 +101,15 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
     assert "\n" in text
     assert "model read confidence" in text.lower()
     assert "bands: >=70 high, 55-69 medium, <55 low" in text
-    assert (
-        "1W outlook: 51.84 / 100 (neutral band; bands: >=70 strong, 55-69 constructive, 45-54 neutral, 35-44 caution, <35 defensive)\n"
-        "  Technical intent: 50.00 / 100 (balanced / neutral; bands: >=70 high-long, 55-69 moderate-long, 45-54 neutral, 30-44 defensive, <30 high-defensive)\n"
-        "  \n"
-        "  Trend regime (14D): Buy trend (ADX 22.60; strength building (20-25); strength bands: <20 sideways, 20-24 weak trend, >=25 strong trend; direction rule: +DI 29.10 > -DI 18.40 => buy trend)\n"
-        "  \n"
-        "  20D Range Position: -0.80% to 20D high \u00b7 9.40% above 20D low (near-high (within ~1% of 20D high); thresholds: near-high >=-1%, near-low <=1%)\n"
-        "  \n"
-        "  Volatility vs 3M baseline: 1.12x (high; bands: <0.90 low, 0.90-1.10 normal, >1.10 high)\n"
-        "  \n"
-        "  Tape snapshot\n"
-        "  1D move: -4.28% (bands: >=+1 strong up, -1 to +1 muted, <=-1 weak)\n"
-        "  1D z-score: 0.80 (near mean; bands: >=+2 / +1 to +2 / -1 to +1 / -2 to -1 / <=-2)\n"
-        "  Distance above long-term trend (EMA200): 47.29% (bands: >+5 stretched above trend, -5 to +5 near trend, <-5 below trend)\n"
-        "  Volume participation: 1.81x (high participation; bands: >=1.5 high, 1.0-1.49 above-avg, 0.7-0.99 below-avg, <0.7 thin)\n"
-        "  Typical daily swing (ATR14): 3.42% (bands: <2.0 calm, 2.0-4.0 moderate, >4.0 elevated)\n"
-        "  Money flow trend (20D): 0.110 (accumulation; bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution)\n"
-        "  \n"
-        "  Sector-relative rank\n"
-        "  Technical intent percentile: 62.00 (average; bands: leader >=67, average 34-66, laggard <=33)\n"
-        "  Next-week percentile: n/a (n/a; bands: leader >=67, average 34-66, laggard <=33)\n"
-        "  Very short horizon (1D outlook): 49.77 / 100 (neutral band; bands: >=70 strong, 55-69 constructive, 45-54 neutral, 35-44 caution, <35 defensive)"
-    ) in text
+    assert "🟡➡ 1W outlook:" in text
+    assert "🟡➡ Technical intent:" in text
+    assert "🟢⬆ Trend regime (14D): Buy trend" in text
+    assert "🔴⬇ 1D move: -4.28%" in text
+    assert any(f"{icon} Tape snapshot" in text for icon in ("🟢⬆", "🟡➡", "🔴⬇"))
+    assert any(f"{icon} Sector-relative rank" in text for icon in ("🟢⬆", "🟡➡", "🔴⬇"))
+    assert any(
+        f"{icon} Technical intent percentile: 62.00" in text for icon in ("🟢⬆", "🟡➡", "🔴⬇")
+    )
 
 
 def test_symbol_digest_default_shows_neutral_na_for_missing_new_metrics(monkeypatch):
@@ -174,6 +160,22 @@ def test_symbol_digest_includes_global_news_correlation_line(monkeypatch):
             "affected_theme": "ai",
             "direction": "tailwind",
             "confidence": 0.73,
+            "evidence": {
+                "net_news_impact_score": 0.2142,
+                "net_news_impact_direction": "tailwind",
+                "top_headlines": {
+                    "global": [
+                        {
+                            "headline": "Chip capex rises globally",
+                            "source": "Reuters",
+                            "published_at": "2026-05-30T08:00:00+00:00",
+                            "impact_contribution_score": 0.1822,
+                        }
+                    ],
+                    "local": [],
+                    "stock": [],
+                },
+            },
         },
     }
     text = _format_symbol_metrics_line({"symbol": "HAL", "exchange": "NSE", "audit": audit})
@@ -181,6 +183,95 @@ def test_symbol_digest_includes_global_news_correlation_line(monkeypatch):
     assert "affected_metric=momentum 5D" in text
     assert "direction=tailwind" in text
     assert "bands: >=0.75 high, 0.50-0.74 medium, <0.50 low" in text
+    assert "News evidence: net_news_impact_score=0.2142" in text
+    assert "source=Reuters" in text
+    assert "published_at=2026-05-30T08:00:00+00:00" in text
+    assert "impact_contribution_score=0.1822" in text
+
+
+def test_apply_global_news_correlation_uses_explicit_fallback_when_sector_missing(monkeypatch):
+    from sector_audit import _apply_global_news_correlation
+
+    snapshot = {
+        "source": "cached",
+        "news_items": [
+            {
+                "title": "Global chip policy update impacts markets",
+                "source": "Reuters",
+                "published_at": "2026-05-30T08:00:00+00:00",
+            }
+        ],
+        "sector_scores": {
+            "defence": {
+                "score": -0.3,
+                "confidence": 0.82,
+                "matched_items": 1,
+                "drivers_top": [
+                    {
+                        "driver": "Defence spending delayed",
+                        "title": "Defence spending delayed",
+                        "source": "Reuters",
+                        "published_at": "2026-05-30T07:50:00+00:00",
+                        "contribution": -0.42,
+                        "confidence": 0.81,
+                    }
+                ],
+            }
+        },
+    }
+    monkeypatch.setattr("sector_priority.resolve_global_news_snapshot", lambda _cfg: snapshot)
+    ok_results = [{"audit": {"prediction_breakdown": {"week": {"ema_term": 1.3}}}}]
+    meta = _apply_global_news_correlation(make_cfg(), sector_id="ai", ok_results=ok_results)
+    corr = ok_results[0]["audit"]["news_correlation"]
+    assert meta["applied"] is True
+    assert "fallback_label" in corr
+    assert "sector_specific_match_missing_using_global_market_driver" == corr["fallback_label"]
+    assert corr["confidence"] < 0.5
+
+
+def test_symbol_digest_news_line_present_with_fallback_label(monkeypatch):
+    monkeypatch.delenv("TITAN_DIGEST_VERBOSE_SYMBOLS", raising=False)
+    from sector_audit import _format_symbol_metrics_line
+
+    audit = {
+        "effective_intent_score": 48.0,
+        "z_score": -0.5,
+        "volume_participation_ratio": 0.9,
+        "return_1d_pct": -0.2,
+        "atr_14_pct": 2.4,
+        "next_week_score": 47.1,
+        "sell_signal": "hold",
+        "sell_signal_reasons": ["monitor trend"],
+        "prediction_breakdown": {"week": {}, "day": {}, "penalties": []},
+        "news_correlation": {
+            "driver": "Global chip policy update (Reuters)",
+            "affected_metric": "trend",
+            "affected_theme": "ai",
+            "direction": "neutral",
+            "confidence": 0.32,
+            "fallback_label": "sector_specific_match_missing_using_global_market_driver",
+        },
+    }
+    text = _format_symbol_metrics_line({"symbol": "HAL", "exchange": "NSE", "audit": audit})
+    assert "Global news relation:" in text
+    assert "fallback=sector_specific_match_missing_using_global_market_driver" in text
+
+
+def test_apply_global_news_correlation_sets_line_for_all_audits_when_snapshot_empty(monkeypatch):
+    from sector_audit import _apply_global_news_correlation, _news_correlation_line
+
+    snapshot = {"source": "unavailable", "news_items": [], "sector_scores": {}}
+    monkeypatch.setattr("sector_priority.resolve_global_news_snapshot", lambda _cfg: snapshot)
+    ok_results = [
+        {"audit": {"prediction_breakdown": {"week": {"ret1d_term": 0.7}}}},
+        {"audit": {"prediction_breakdown": {"week": {"ema_term": -0.5}}}},
+    ]
+    meta = _apply_global_news_correlation(make_cfg(), sector_id="unknown_sector", ok_results=ok_results)
+    assert meta["applied"] is True
+    for row in ok_results:
+        line = _news_correlation_line(row["audit"])
+        assert "Global news relation:" in line
+        assert "fallback=sector_specific_match_missing_no_market_driver" in line
 
 
 def test_symbol_digest_verbose_restores_legacy_line(monkeypatch):
@@ -257,9 +348,88 @@ def test_build_equity_live_audit_success(monkeypatch):
     assert "breakout_20d_distance_pct_to_high" in audit
     assert "atr_14_over_atr_63" in audit
     assert "cmf_20" in audit
+    assert "cmf_20_delta" in audit
     assert "effective_intent_score" in audit
     assert audit.get("z_score_blend") == "20d_only"
     assert "high_volume_down_day_proxy" in audit
+
+
+def test_build_equity_live_audit_cmf20_delta_is_numeric(monkeypatch):
+    from sector_audit import build_equity_live_audit
+
+    closes = [100.0 + i * 0.1 for i in range(35)]
+    highs = [c + 1.0 for c in closes]
+    lows = [c - 1.0 for c in closes]
+    volumes = [1_000_000 + i * 1000 for i in range(35)]
+    df = pd.DataFrame({"close": closes, "high": highs, "low": lows, "volume": volumes})
+    monkeypatch.setattr("breeze_client.fetch_equity_data", lambda *a, **k: df)
+    monkeypatch.setattr(
+        "brain.generate_titan_narrative",
+        lambda audit, api_key=None, api_keys=None: "Post body",
+    )
+    inst = SectorInstrument("HAL", "NSE")
+    audit, _ = build_equity_live_audit(make_cfg(), MagicMock(), inst, sector_id="defence")
+    delta = audit.get("cmf_20_delta")
+    assert isinstance(delta, dict)
+    assert isinstance(delta.get("previous_value"), float)
+    assert isinstance(delta.get("current_value"), float)
+    assert isinstance(delta.get("absolute_change"), float)
+    rel = delta.get("relative_change_percent")
+    assert isinstance(rel, (float, int)) or rel is None
+    assert isinstance(delta.get("interpretation"), str) and delta["interpretation"]
+
+
+def test_apply_global_news_correlation_attaches_explicit_evidence(monkeypatch):
+    from sector_audit import _apply_global_news_correlation
+
+    snapshot = {
+        "source": "cached",
+        "fresh": True,
+        "sector_scores": {
+            "defence": {
+                "score": 0.12,
+                "confidence": 0.82,
+                "drivers_top": [
+                    {
+                        "title": "Global defense spending accelerates",
+                        "source": "Reuters",
+                        "published_at": "2026-05-30T09:10:00+00:00",
+                        "contribution": 0.0842,
+                    },
+                    {
+                        "title": "India defence stocks rally on order pipeline",
+                        "source": "Moneycontrol",
+                        "published_at": "2026-05-30T07:05:00+00:00",
+                        "contribution": 0.0611,
+                    },
+                    {
+                        "title": "HAL shares jump after earnings beat",
+                        "source": "Economic Times",
+                        "published_at": "2026-05-30T06:00:00+00:00",
+                        "contribution": 0.0528,
+                    },
+                ],
+            }
+        },
+    }
+    monkeypatch.setattr("sector_priority.resolve_global_news_snapshot", lambda cfg: snapshot)
+    ok_results = [{"audit": {"symbol": "HAL", "prediction_breakdown": {"week": {"ema_term": 2.0}}}}]
+    meta = _apply_global_news_correlation(make_cfg(), sector_id="defence", ok_results=ok_results)
+    assert meta["applied"] is True
+    corr = ok_results[0]["audit"]["news_correlation"]
+    assert isinstance(corr, dict)
+    evidence = corr.get("evidence")
+    assert isinstance(evidence, dict)
+    assert isinstance(evidence.get("net_news_impact_score"), float)
+    assert evidence.get("net_news_impact_direction") in ("tailwind", "headwind", "neutral")
+    buckets = evidence.get("top_headlines")
+    assert isinstance(buckets, dict)
+    assert set(["global", "local", "stock"]).issubset(set(buckets.keys()))
+    flat = [row for k in ("global", "local", "stock") for row in buckets.get(k, [])]
+    assert flat
+    assert all(isinstance(x.get("impact_contribution_score"), float) for x in flat)
+    assert all(str(x.get("source") or "").strip() for x in flat)
+    assert all("published_at" in x for x in flat)
 
 
 def test_build_equity_live_audit_records_exchange_fallback_metadata(monkeypatch):

@@ -6,6 +6,7 @@ import logging
 import math
 import os
 from collections.abc import Sequence
+from collections import defaultdict
 from datetime import date, datetime, timedelta
 from statistics import median
 from typing import Any
@@ -74,6 +75,350 @@ def analysis_store_enabled() -> bool:
     return _env_truthy("TITAN_ENABLE_ANALYSIS_STORE", default=False)
 
 
+VALID_ACTION_SIGNALS: tuple[str, ...] = ("buy", "hold", "trim", "exit-risk")
+DEFAULT_TRANSITION_TRAILING_WINDOW_DAYS = 30
+ONE_WEEK_TRADING_DAYS = 5
+ONE_MONTH_TRADING_DAYS = 20
+
+
+def _normalize_action_signal(raw_signal: Any) -> str:
+    text_signal = str(raw_signal or "").strip().lower()
+    if text_signal in ("exit", "exit_risk", "exitrisk", "exit-risk"):
+        return "exit-risk"
+    if text_signal in VALID_ACTION_SIGNALS:
+        return text_signal
+    return "hold"
+
+
+def _signal_consistency_ratios_from_sequence(signal_sequence: Sequence[str]) -> dict[str, float]:
+    total_points = len(signal_sequence)
+    if total_points <= 0:
+        return {
+            "buy_signal_consistency_ratio": 0.0,
+            "hold_signal_consistency_ratio": 0.0,
+            "trim_signal_consistency_ratio": 0.0,
+            "exit_risk_signal_consistency_ratio": 0.0,
+        }
+    return {
+        "buy_signal_consistency_ratio": round(signal_sequence.count("buy") / total_points, 4),
+        "hold_signal_consistency_ratio": round(signal_sequence.count("hold") / total_points, 4),
+        "trim_signal_consistency_ratio": round(signal_sequence.count("trim") / total_points, 4),
+        "exit_risk_signal_consistency_ratio": round(signal_sequence.count("exit-risk") / total_points, 4),
+    }
+
+
+def _evaluate_transition_horizon_outcome(
+    target_signal: str,
+    realized_return_pct: float | None,
+) -> str | None:
+    if realized_return_pct is None or math.isnan(realized_return_pct):
+        return None
+    outcome_threshold_pct = 0.25
+    is_bullish_signal = target_signal in ("buy", "hold")
+    if is_bullish_signal:
+        if realized_return_pct >= outcome_threshold_pct:
+            return "favorable"
+        if realized_return_pct <= -outcome_threshold_pct:
+            return "unfavorable"
+        return "neutral"
+    if realized_return_pct <= -outcome_threshold_pct:
+        return "favorable"
+    if realized_return_pct >= outcome_threshold_pct:
+        return "unfavorable"
+    return "neutral"
+
+
+def _compounded_return_pct_for_horizon(
+    trailing_rows_after_transition: Sequence[dict[str, Any]],
+    *,
+    required_trading_days: int,
+) -> float | None:
+    if len(trailing_rows_after_transition) < required_trading_days:
+        return None
+    growth_multiplier = 1.0
+    for feature_row in trailing_rows_after_transition[:required_trading_days]:
+        daily_return_pct = _safe_float(feature_row.get("return_1d_pct"))
+        if math.isnan(daily_return_pct):
+            return None
+        growth_multiplier *= 1.0 + (daily_return_pct / 100.0)
+    return round((growth_multiplier - 1.0) * 100.0, 4)
+
+
+def build_stock_signal_transition_analytics_row(
+    *,
+    sector: str,
+    symbol: str,
+    exchange: str,
+    run_id: str,
+    as_of_trade_date: date,
+    historical_feature_rows: Sequence[dict[str, Any]],
+    trailing_window_days: int = DEFAULT_TRANSITION_TRAILING_WINDOW_DAYS,
+) -> dict[str, Any]:
+    parsed_rows: list[dict[str, Any]] = []
+    for feature_row in historical_feature_rows:
+        trade_day = _parse_date(feature_row.get("trade_date"))
+        if trade_day is None or trade_day > as_of_trade_date:
+            continue
+        normalized_signal = _normalize_action_signal(feature_row.get("action_signal"))
+        parsed_rows.append(
+            {
+                **feature_row,
+                "_parsed_trade_date": trade_day,
+                "_normalized_action_signal": normalized_signal,
+            }
+        )
+    if not parsed_rows:
+        return sanitize_for_json(
+            {
+                "trade_date": as_of_trade_date.isoformat(),
+                "sector": sector,
+                "symbol": symbol,
+                "exchange": exchange,
+                "run_id": run_id,
+                "trailing_window_days": int(trailing_window_days),
+                "previous_signal": None,
+                "current_signal": "hold",
+                "transition_type": "insufficient_history",
+                "transition_date": None,
+                "days_in_previous_signal": None,
+                "buy_signal_consistency_ratio": 0.0,
+                "hold_signal_consistency_ratio": 0.0,
+                "trim_signal_consistency_ratio": 0.0,
+                "exit_risk_signal_consistency_ratio": 0.0,
+                "transition_stability_score": 0.0,
+                "is_whipsaw_transition": False,
+                "whipsaw_transition_count": 0,
+                "transition_event_count": 0,
+                "matured_1w_available": False,
+                "matured_1w_realized_return_pct": None,
+                "matured_1w_outcome": None,
+                "matured_1m_available": False,
+                "matured_1m_realized_return_pct": None,
+                "matured_1m_outcome": None,
+                "computed_at": datetime.now(IST).isoformat(timespec="seconds"),
+            }
+        )
+
+    parsed_rows.sort(key=lambda row: row["_parsed_trade_date"])
+    trailing_cutoff_date = as_of_trade_date - timedelta(days=max(1, int(trailing_window_days)) - 1)
+    trailing_rows = [row for row in parsed_rows if row["_parsed_trade_date"] >= trailing_cutoff_date]
+    if not trailing_rows:
+        trailing_rows = [parsed_rows[-1]]
+
+    transition_events: list[dict[str, Any]] = []
+    signal_segments: list[dict[str, Any]] = []
+    for row in trailing_rows:
+        row_signal = row["_normalized_action_signal"]
+        row_date = row["_parsed_trade_date"]
+        if not signal_segments:
+            signal_segments.append(
+                {
+                    "signal": row_signal,
+                    "start_date": row_date,
+                    "end_date": row_date,
+                    "trade_day_count": 1,
+                }
+            )
+            continue
+        active_segment = signal_segments[-1]
+        if active_segment["signal"] == row_signal:
+            active_segment["end_date"] = row_date
+            active_segment["trade_day_count"] += 1
+            continue
+        transition_events.append(
+            {
+                "from_signal": active_segment["signal"],
+                "to_signal": row_signal,
+                "date": row_date,
+            }
+        )
+        signal_segments.append(
+            {
+                "signal": row_signal,
+                "start_date": row_date,
+                "end_date": row_date,
+                "trade_day_count": 1,
+            }
+        )
+
+    current_segment = signal_segments[-1]
+    previous_segment = signal_segments[-2] if len(signal_segments) >= 2 else None
+    current_signal = str(current_segment["signal"])
+    previous_signal = str(previous_segment["signal"]) if previous_segment is not None else None
+    transition_date = current_segment["start_date"]
+    if previous_signal and previous_signal != current_signal:
+        transition_type = f"{previous_signal}_to_{current_signal}"
+    elif previous_signal:
+        transition_type = "no_transition"
+    else:
+        transition_type = "initial_observation"
+
+    whipsaw_transition_count = 0
+    is_whipsaw_transition = False
+    for transition_index in range(1, len(transition_events)):
+        previous_event = transition_events[transition_index - 1]
+        current_event = transition_events[transition_index]
+        is_reversal = (
+            previous_event["from_signal"] == current_event["to_signal"]
+            and previous_event["to_signal"] == current_event["from_signal"]
+        )
+        day_gap = (current_event["date"] - previous_event["date"]).days
+        if is_reversal and day_gap <= 5:
+            whipsaw_transition_count += 1
+            if transition_index == len(transition_events) - 1:
+                is_whipsaw_transition = True
+
+    consistency_ratios = _signal_consistency_ratios_from_sequence(
+        [str(row["_normalized_action_signal"]) for row in trailing_rows]
+    )
+    dominant_consistency_ratio = max(consistency_ratios.values()) if consistency_ratios else 0.0
+    transition_event_count = len(transition_events)
+    transition_stability_score = max(
+        0.0,
+        min(
+            100.0,
+            round(
+                (20.0 + (65.0 * dominant_consistency_ratio))
+                - (5.0 * transition_event_count)
+                - (15.0 * whipsaw_transition_count),
+                2,
+            ),
+        ),
+    )
+
+    rows_after_transition = [
+        row for row in parsed_rows if row["_parsed_trade_date"] > transition_date
+    ]
+    matured_1w_realized_return_pct = _compounded_return_pct_for_horizon(
+        rows_after_transition,
+        required_trading_days=ONE_WEEK_TRADING_DAYS,
+    )
+    matured_1m_realized_return_pct = _compounded_return_pct_for_horizon(
+        rows_after_transition,
+        required_trading_days=ONE_MONTH_TRADING_DAYS,
+    )
+    matured_1w_outcome = _evaluate_transition_horizon_outcome(
+        current_signal,
+        matured_1w_realized_return_pct,
+    )
+    matured_1m_outcome = _evaluate_transition_horizon_outcome(
+        current_signal,
+        matured_1m_realized_return_pct,
+    )
+
+    return sanitize_for_json(
+        {
+            "trade_date": as_of_trade_date.isoformat(),
+            "sector": sector,
+            "symbol": symbol,
+            "exchange": exchange,
+            "run_id": run_id,
+            "trailing_window_days": int(trailing_window_days),
+            "previous_signal": previous_signal,
+            "current_signal": current_signal,
+            "transition_type": transition_type,
+            "transition_date": transition_date.isoformat(),
+            "days_in_previous_signal": (
+                int(previous_segment["trade_day_count"]) if previous_segment is not None else None
+            ),
+            **consistency_ratios,
+            "transition_stability_score": transition_stability_score,
+            "is_whipsaw_transition": bool(is_whipsaw_transition),
+            "whipsaw_transition_count": int(whipsaw_transition_count),
+            "transition_event_count": int(transition_event_count),
+            "matured_1w_available": matured_1w_realized_return_pct is not None,
+            "matured_1w_realized_return_pct": matured_1w_realized_return_pct,
+            "matured_1w_outcome": matured_1w_outcome,
+            "matured_1m_available": matured_1m_realized_return_pct is not None,
+            "matured_1m_realized_return_pct": matured_1m_realized_return_pct,
+            "matured_1m_outcome": matured_1m_outcome,
+            "computed_at": datetime.now(IST).isoformat(timespec="seconds"),
+        }
+    )
+
+
+def persist_stock_signal_transition_analytics(
+    cfg: TitanConfig,
+    *,
+    client: Any,
+    sector: str,
+    run_id: str,
+    as_of_trade_date: date,
+    audits: Sequence[dict[str, Any]],
+    trailing_window_days: int = DEFAULT_TRANSITION_TRAILING_WINDOW_DAYS,
+) -> dict[str, Any]:
+    symbol_pairs = sorted(
+        {
+            (str(a.get("symbol") or "").strip(), str(a.get("exchange") or "").strip())
+            for a in audits
+            if str(a.get("symbol") or "").strip() and str(a.get("exchange") or "").strip()
+        }
+    )
+    if not symbol_pairs:
+        return {"persisted": False, "reason": "no_symbols"}
+
+    lookback_start_date = as_of_trade_date - timedelta(
+        days=max(60, int(trailing_window_days) + ONE_MONTH_TRADING_DAYS + 10)
+    )
+    transition_rows: list[dict[str, Any]] = []
+    for symbol, exchange in symbol_pairs:
+        history_response = (
+            client.table("symbol_daily_features")
+            .select("trade_date,symbol,exchange,action_signal,return_1d_pct")
+            .eq("sector", sector)
+            .eq("symbol", symbol)
+            .eq("exchange", exchange)
+            .gte("trade_date", lookback_start_date.isoformat())
+            .lte("trade_date", as_of_trade_date.isoformat())
+            .order("trade_date")
+            .execute()
+        )
+        historical_rows = list(getattr(history_response, "data", None) or [])
+        transition_rows.append(
+            build_stock_signal_transition_analytics_row(
+                sector=sector,
+                symbol=symbol,
+                exchange=exchange,
+                run_id=run_id,
+                as_of_trade_date=as_of_trade_date,
+                historical_feature_rows=historical_rows,
+                trailing_window_days=trailing_window_days,
+            )
+        )
+
+    client.table("stock_signal_transition_analytics").upsert(
+        transition_rows,
+        on_conflict="trade_date,sector,symbol,exchange,trailing_window_days",
+    ).execute()
+    return {"persisted": True, "rows": len(transition_rows)}
+
+
+def build_stock_transition_validation_checks(*, sector: str, trade_date: str) -> dict[str, str]:
+    return {
+        "presence_check": (
+            "select trade_date, sector, count(*) as row_count "
+            "from public.stock_signal_transition_analytics "
+            f"where sector = '{sector}' and trade_date = '{trade_date}' "
+            "group by trade_date, sector;"
+        ),
+        "maturity_check": (
+            "select current_signal, matured_1w_available, matured_1m_available, count(*) as symbols "
+            "from public.stock_signal_transition_analytics "
+            f"where sector = '{sector}' and trade_date = '{trade_date}' "
+            "group by current_signal, matured_1w_available, matured_1m_available "
+            "order by current_signal, matured_1w_available desc, matured_1m_available desc;"
+        ),
+        "whipsaw_check": (
+            "select symbol, exchange, transition_type, whipsaw_transition_count, "
+            "transition_stability_score "
+            "from public.stock_signal_transition_analytics "
+            f"where sector = '{sector}' and trade_date = '{trade_date}' and whipsaw_transition_count > 0 "
+            "order by whipsaw_transition_count desc, transition_stability_score asc "
+            "limit 20;"
+        ),
+    }
+
+
 def build_symbol_daily_feature(
     audit: dict[str, Any],
     *,
@@ -111,6 +456,13 @@ def build_symbol_daily_feature(
         "next_week_score": audit.get("next_week_score"),
         "next_day_score": audit.get("next_day_score"),
         "prediction_breakdown": audit.get("prediction_breakdown"),
+        "sell_signal": audit.get("sell_signal"),
+        "reconcile_next_day_hit": audit.get("reconcile_next_day_hit"),
+        "reconcile_next_week_hit": audit.get("reconcile_next_week_hit"),
+        "reconcile_transition_quality": audit.get("reconcile_transition_quality"),
+        "reconcile_signal_transition": audit.get("reconcile_signal_transition"),
+        "reconcile_news_summary": audit.get("reconcile_news_summary"),
+        "news_correlation": audit.get("news_correlation"),
     }
 
     return sanitize_for_json(
@@ -123,6 +475,9 @@ def build_symbol_daily_feature(
             "run_ts": run_ts_iso,
             "intent_score": audit.get("intent_score"),
             "effective_intent_score": audit.get("effective_intent_score", audit.get("intent_score")),
+            "action_signal": _normalize_action_signal(
+                audit.get("action_signal", audit.get("sell_signal"))
+            ),
             "z_score": audit.get("z_score"),
             "volume_participation_ratio": audit.get("volume_participation_ratio", audit.get("absorption_ratio")),
             "absorption_ratio": audit.get("absorption_ratio"),
@@ -242,6 +597,15 @@ def persist_sector_run_analytics(
             features,
             on_conflict="trade_date,sector,symbol,exchange",
         ).execute()
+        transition_persist_meta = persist_stock_signal_transition_analytics(
+            cfg,
+            client=client,
+            sector=sector,
+            run_id=run_id,
+            as_of_trade_date=run_ts.date(),
+            audits=audits,
+            trailing_window_days=DEFAULT_TRANSITION_TRAILING_WINDOW_DAYS,
+        )
 
         rollup = build_sector_daily_rollup(
             list(audits),
@@ -259,6 +623,11 @@ def persist_sector_run_analytics(
             "persisted": True,
             "run_id": run_id,
             "feature_rows": len(features),
+            "transition_rows": int(transition_persist_meta.get("rows") or 0),
+            "transition_validation_checks": build_stock_transition_validation_checks(
+                sector=sector,
+                trade_date=trade_date,
+            ),
         }
     except APIError as e:
         payload = e.args[0] if e.args else {}
@@ -266,7 +635,7 @@ def persist_sector_run_analytics(
         msg = payload.get("message", str(e)) if isinstance(payload, dict) else str(e)
         if code == "PGRST205" or "could not find the table" in msg.lower():
             logger.warning(
-                "Analysis store tables missing; run sql/create_analysis_rollups.sql. Details: %s",
+                "Analysis store tables missing; run sql/create_analysis_rollups.sql and relevant alter migrations. Details: %s",
                 msg,
             )
             return {"enabled": True, "persisted": False, "reason": "missing_tables"}
@@ -512,6 +881,331 @@ def quality_checks_for_run(
         if int(today.get("symbol_count") or 0) < len(audits):
             warnings.append("rollup_symbol_count_mismatch")
     return warnings
+
+
+def _score_direction(score: Any) -> str:
+    v = _safe_float(score)
+    if math.isnan(v):
+        return "unknown"
+    if v >= 55.0:
+        return "up"
+    if v <= 45.0:
+        return "down"
+    return "neutral"
+
+
+def _return_direction(ret_pct: Any) -> str:
+    v = _safe_float(ret_pct)
+    if math.isnan(v):
+        return "unknown"
+    if v >= 0.3:
+        return "up"
+    if v <= -0.3:
+        return "down"
+    return "neutral"
+
+
+def _direction_hit(predicted: str, realized: str) -> bool | None:
+    if predicted == "unknown" or realized == "unknown":
+        return None
+    if predicted == "neutral":
+        return realized == "neutral"
+    return predicted == realized
+
+
+def _transition_quality(prev_score: Any, curr_score: Any) -> str:
+    prev = _safe_float(prev_score)
+    curr = _safe_float(curr_score)
+    if math.isnan(prev) or math.isnan(curr):
+        return "unknown"
+    delta = curr - prev
+    if delta >= 3.0:
+        return "improving"
+    if delta <= -3.0:
+        return "deteriorating"
+    return "stable"
+
+
+def _news_summary_from_audit(audit: dict[str, Any]) -> str:
+    corr = audit.get("news_correlation")
+    if not isinstance(corr, dict):
+        return "news: n/a"
+    driver = str(corr.get("driver") or "n/a").strip()
+    metric = str(corr.get("affected_metric") or "n/a").strip()
+    direction = str(corr.get("direction") or "neutral").strip()
+    conf = _safe_float(corr.get("confidence"))
+    conf_txt = "n/a" if math.isnan(conf) else f"{conf:.2f}"
+    return f"news: {direction} via {driver} on {metric} (conf {conf_txt})"
+
+
+def _safe_tape_extras(row: dict[str, Any]) -> dict[str, Any]:
+    x = row.get("tape_extras")
+    return x if isinstance(x, dict) else {}
+
+
+def build_stock_reconcile_snapshot(
+    audits: Sequence[dict[str, Any]],
+    *,
+    historical_rows_by_symbol: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    accuracy: dict[str, dict[str, dict[str, int]]] = defaultdict(
+        lambda: {"next_day": {"hit": 0, "total": 0}, "next_week": {"hit": 0, "total": 0}}
+    )
+    transition_counts: dict[str, int] = defaultdict(int)
+    per_symbol: dict[str, dict[str, Any]] = {}
+    news_rows: list[dict[str, Any]] = []
+
+    for audit in audits:
+        symbol = str(audit.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        signal = _normalize_action_signal(audit.get("action_signal", audit.get("sell_signal")))
+        hist = historical_rows_by_symbol.get(symbol, [])
+        prev = hist[0] if hist else {}
+        prev_tape = _safe_tape_extras(prev) if isinstance(prev, dict) else {}
+        week_ref = hist[4] if len(hist) >= 5 else {}
+        week_tape = _safe_tape_extras(week_ref) if isinstance(week_ref, dict) else {}
+
+        pred_1d = _score_direction(prev_tape.get("next_day_score"))
+        realized_1d = _return_direction(audit.get("return_1d_pct"))
+        hit_1d = _direction_hit(pred_1d, realized_1d)
+
+        pred_1w = _score_direction(week_tape.get("next_week_score"))
+        realized_1w = _return_direction(audit.get("return_5d_pct"))
+        hit_1w = _direction_hit(pred_1w, realized_1w)
+
+        if hit_1d is not None:
+            accuracy[signal]["next_day"]["total"] += 1
+            accuracy[signal]["next_day"]["hit"] += int(hit_1d)
+        if hit_1w is not None:
+            accuracy[signal]["next_week"]["total"] += 1
+            accuracy[signal]["next_week"]["hit"] += int(hit_1w)
+
+        prev_signal = _normalize_action_signal(
+            (prev if isinstance(prev, dict) else {}).get("action_signal", prev_tape.get("sell_signal"))
+        )
+        curr_week = audit.get("next_week_score")
+        prev_week = prev_tape.get("next_week_score")
+        q = _transition_quality(prev_week, curr_week)
+        transition_counts[q] += 1
+        signal_transition = f"{prev_signal}->{signal}"
+        news_summary = _news_summary_from_audit(audit)
+
+        row = {
+            "symbol": symbol,
+            "signal": signal,
+            "pred_next_day": pred_1d,
+            "realized_next_day": realized_1d,
+            "hit_next_day": hit_1d,
+            "pred_next_week": pred_1w,
+            "realized_next_week": realized_1w,
+            "hit_next_week": hit_1w,
+            "signal_transition": signal_transition,
+            "transition_quality": q,
+            "news_summary": news_summary,
+        }
+        per_symbol[symbol] = row
+        news_rows.append(
+            {
+                "symbol": symbol,
+                "signal": signal,
+                "summary": news_summary,
+            }
+        )
+
+    coverage_1d = sum(v["next_day"]["total"] for v in accuracy.values())
+    coverage_1w = sum(v["next_week"]["total"] for v in accuracy.values())
+    acc_json = {k: v for k, v in accuracy.items()}
+    transition_json = {k: int(v) for k, v in transition_counts.items()}
+    return sanitize_for_json(
+        {
+            "symbol_count": len(per_symbol),
+            "coverage_next_day": coverage_1d,
+            "coverage_next_week": coverage_1w,
+            "accuracy_by_signal_horizon": acc_json,
+            "transition_quality": transition_json,
+            "news_attribution_summaries": news_rows[:20],
+            "per_symbol": per_symbol,
+        }
+    )
+
+
+def _fetch_symbol_history_by_sector(
+    cfg: TitanConfig,
+    *,
+    sector: str,
+    lookback_days: int = 45,
+) -> dict[str, list[dict[str, Any]]]:
+    client = create_client(cfg.supabase_url, cfg.supabase_key)
+    start = (datetime.now(IST).date() - timedelta(days=max(lookback_days, 10))).isoformat()
+    try:
+        res = (
+            client.table("symbol_daily_features")
+            .select("trade_date,symbol,action_signal,tape_extras")
+            .eq("sector", sector)
+            .gte("trade_date", start)
+            .order("trade_date", desc=True)
+            .execute()
+        )
+    except Exception as e:  # pragma: no cover
+        logger.warning("Reconcile history fetch failed for %s: %s", sector, e)
+        return {}
+    rows = list(getattr(res, "data", None) or [])
+    out: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        out[symbol].append(row)
+    return out
+
+
+def build_reconcile_digest_lines(summary: dict[str, Any]) -> list[str]:
+    lines = ["--- Stock-level reconcile ---"]
+    lines.append(
+        f"Coverage: symbols={int(summary.get('symbol_count') or 0)} | "
+        f"next-day={int(summary.get('coverage_next_day') or 0)} | "
+        f"next-week={int(summary.get('coverage_next_week') or 0)}"
+    )
+    acc = summary.get("accuracy_by_signal_horizon")
+    if isinstance(acc, dict):
+        for signal in ("buy", "hold", "trim", "exit-risk"):
+            row = acc.get(signal) if isinstance(acc.get(signal), dict) else {}
+            d1 = row.get("next_day") if isinstance(row, dict) else {}
+            d7 = row.get("next_week") if isinstance(row, dict) else {}
+            d1_hit = int((d1 or {}).get("hit") or 0)
+            d1_total = int((d1 or {}).get("total") or 0)
+            d7_hit = int((d7 or {}).get("hit") or 0)
+            d7_total = int((d7 or {}).get("total") or 0)
+            d1_pct = round((100.0 * d1_hit / d1_total), 1) if d1_total else None
+            d7_pct = round((100.0 * d7_hit / d7_total), 1) if d7_total else None
+            lines.append(
+                f"{signal}: 1D {d1_hit}/{d1_total} ({d1_pct if d1_pct is not None else 'n/a'}%) | "
+                f"1W {d7_hit}/{d7_total} ({d7_pct if d7_pct is not None else 'n/a'}%)"
+            )
+    tq = summary.get("transition_quality")
+    if isinstance(tq, dict):
+        lines.append(
+            "Transition quality: "
+            f"improving={int(tq.get('improving') or 0)}, "
+            f"stable={int(tq.get('stable') or 0)}, "
+            f"deteriorating={int(tq.get('deteriorating') or 0)}"
+        )
+    news = summary.get("news_attribution_summaries")
+    if isinstance(news, list) and news:
+        lines.append("News attribution highlights:")
+        for row in news[:8]:
+            if not isinstance(row, dict):
+                continue
+            lines.append(
+                f"{str(row.get('symbol') or '').upper()} [{str(row.get('signal') or 'hold').lower()}] "
+                f"{str(row.get('summary') or 'news: n/a')}"
+            )
+    return lines
+
+
+def enrich_audits_with_stock_reconcile(
+    cfg: TitanConfig,
+    *,
+    sector: str,
+    audits: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    history = _fetch_symbol_history_by_sector(cfg, sector=sector)
+    summary = build_stock_reconcile_snapshot(audits, historical_rows_by_symbol=history)
+    per_symbol = summary.get("per_symbol")
+    if not isinstance(per_symbol, dict):
+        return summary
+    for audit in audits:
+        symbol = str(audit.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        row = per_symbol.get(symbol)
+        if not isinstance(row, dict):
+            continue
+        audit["reconcile_next_day_hit"] = row.get("hit_next_day")
+        audit["reconcile_next_week_hit"] = row.get("hit_next_week")
+        audit["reconcile_signal_transition"] = row.get("signal_transition")
+        audit["reconcile_transition_quality"] = row.get("transition_quality")
+        audit["reconcile_news_summary"] = row.get("news_summary")
+    return summary
+
+
+def persist_reconcile_backfill(
+    cfg: TitanConfig,
+    *,
+    sector: str,
+    days: int,
+) -> dict[str, Any]:
+    if days <= 0:
+        return {"persisted": 0, "days": 0}
+    client = create_client(cfg.supabase_url, cfg.supabase_key)
+    try:
+        rows_res = (
+            client.table("symbol_daily_features")
+            .select("trade_date,symbol,sector,action_signal,return_1d_pct,tape_extras")
+            .eq("sector", sector)
+            .order("trade_date", desc=True)
+            .limit(max(60, days * 20))
+            .execute()
+        )
+    except Exception as e:  # pragma: no cover
+        logger.warning("Reconcile backfill fetch failed: %s", e)
+        return {"persisted": 0, "days": days, "reason": "fetch_failed"}
+    rows = [r for r in list(getattr(rows_res, "data", None) or []) if isinstance(r, dict)]
+    if not rows:
+        return {"persisted": 0, "days": days, "reason": "no_rows"}
+    by_date: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_symbol: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        td = str(row.get("trade_date") or "").strip()
+        sym = str(row.get("symbol") or "").strip().upper()
+        if not td or not sym:
+            continue
+        by_date[td].append(row)
+        by_symbol[sym].append(row)
+    trade_dates = sorted(by_date.keys(), reverse=True)[:days]
+    persisted = 0
+    for td in trade_dates:
+        audits: list[dict[str, Any]] = []
+        hist: dict[str, list[dict[str, Any]]] = {}
+        for row in by_date.get(td, []):
+            sym = str(row.get("symbol") or "").strip().upper()
+            tape = _safe_tape_extras(row)
+            audits.append(
+                {
+                    "symbol": sym,
+                    "action_signal": row.get("action_signal"),
+                    "sell_signal": tape.get("sell_signal"),
+                    "next_week_score": tape.get("next_week_score"),
+                    "return_1d_pct": row.get("return_1d_pct"),
+                    "return_5d_pct": tape.get("return_5d_pct"),
+                    "news_correlation": tape.get("news_correlation"),
+                }
+            )
+            hist[sym] = [x for x in by_symbol.get(sym, []) if str(x.get("trade_date")) < td]
+        summary = build_stock_reconcile_snapshot(audits, historical_rows_by_symbol=hist)
+        lines = build_reconcile_digest_lines(summary)
+        run_id = f"reconcile-backfill-{sector}-{td}"
+        payload = sanitize_for_json(
+            {
+                "run_id": run_id,
+                "sector": sector,
+                "prompt_facts": {"trade_date": td, "reconcile_summary": summary},
+                "output_text": "\n".join(lines),
+                "full_digest": "\n".join(lines),
+                "model_name": "reconcile_backfill",
+                "output_chars": len("\n".join(lines)),
+                "recorded_at": datetime.now(IST).isoformat(timespec="seconds"),
+            }
+        )
+        try:
+            client.table("llm_digest_memory").upsert(payload, on_conflict="run_id").execute()
+            persisted += 1
+        except Exception as e:  # pragma: no cover
+            logger.warning("Reconcile backfill upsert failed for %s/%s: %s", sector, td, e)
+    return {"persisted": persisted, "days": len(trade_dates)}
 
 
 def persist_llm_digest_memory(
