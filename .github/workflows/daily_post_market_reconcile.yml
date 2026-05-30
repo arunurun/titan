@@ -3,10 +3,14 @@ name: Daily post-market reconcile
 on:
   workflow_dispatch:
     inputs:
-      sector_id:
-        description: "Sector id to reconcile (e.g. defence)"
+      scope:
+        description: "Reconcile scope: all-stocks or sector"
         required: false
-        default: "defence"
+        default: "all-stocks"
+      sector_id:
+        description: "Sector id when scope=sector (e.g. defence)"
+        required: false
+        default: ""
       max_symbols:
         description: "Optional cap for symbols"
         required: false
@@ -75,11 +79,18 @@ jobs:
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           SMTP_USE_TLS: ${{ secrets.SMTP_USE_TLS }}
         run: |
-          SECTOR_ID="${{ inputs.sector_id }}"
-          if [ -z "$SECTOR_ID" ]; then
-            SECTOR_ID="defence"
+          SCOPE="${{ inputs.scope }}"
+          if [ -z "$SCOPE" ]; then
+            SCOPE="all-stocks"
           fi
-          ARGS="--sector $SECTOR_ID"
+          ARGS="--scope $SCOPE"
+          if [ "$SCOPE" = "sector" ]; then
+            SECTOR_ID="${{ inputs.sector_id }}"
+            if [ -z "$SECTOR_ID" ]; then
+              SECTOR_ID="defence"
+            fi
+            ARGS="$ARGS --sector $SECTOR_ID"
+          fi
           if [ -n "${{ inputs.max_symbols }}" ]; then
             ARGS="$ARGS --max-symbols ${{ inputs.max_symbols }}"
           fi

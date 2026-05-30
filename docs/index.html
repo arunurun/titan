@@ -224,6 +224,62 @@
     </div>
 
     <div class="card">
+      <h3>Run End-of-Day Reconcile</h3>
+      <p class="small">Dispatches the dedicated post-market reconcile workflow. Default scope is all stocks in active universe.</p>
+      <div class="row two">
+        <div>
+          <label>Reconcile scope</label>
+          <select id="reconcileScope">
+            <option value="all-stocks" selected>all-stocks (recommended)</option>
+            <option value="sector">single sector</option>
+          </select>
+        </div>
+        <div>
+          <label>Reconcile sector (if scope=sector)</label>
+          <select id="reconcileSectorId">
+            <option value="">(ignored for all-stocks)</option>
+            <option value="ai">ai</option>
+            <option value="auto">auto</option>
+            <option value="auto_ancillary">auto_ancillary</option>
+            <option value="banks_psu">banks_psu</option>
+            <option value="banks_private">banks_private</option>
+            <option value="capital_goods_industrials">capital_goods_industrials</option>
+            <option value="cement_building_materials">cement_building_materials</option>
+            <option value="chemicals">chemicals</option>
+            <option value="consumer_discretionary">consumer_discretionary</option>
+            <option value="defence">defence</option>
+            <option value="fmcg_staples">fmcg_staples</option>
+            <option value="infrastructure_construction">infrastructure_construction</option>
+            <option value="insurance">insurance</option>
+            <option value="it">it</option>
+            <option value="logistics">logistics</option>
+            <option value="media">media</option>
+            <option value="metals_mining">metals_mining</option>
+            <option value="nbfc_financial_services">nbfc_financial_services</option>
+            <option value="oil_gas_energy">oil_gas_energy</option>
+            <option value="pharma_healthcare">pharma_healthcare</option>
+            <option value="power_utilities">power_utilities</option>
+            <option value="realty_reits">realty_reits</option>
+            <option value="telecom">telecom</option>
+            <option value="textiles">textiles</option>
+          </select>
+          <p class="small" id="reconcileSectorHint">Used only when scope=sector.</p>
+        </div>
+      </div>
+      <div class="row two">
+        <div>
+          <label>Workers (optional)</label>
+          <input id="reconcileWorkers" type="number" min="1" max="32" placeholder="4" />
+        </div>
+        <div>
+          <label>Backfill days (optional)</label>
+          <input id="reconcileBackfillDays" type="number" min="0" max="120" placeholder="0" />
+        </div>
+      </div>
+      <button type="button" class="warning" id="runReconcileBtn">Dispatch EOD Reconcile</button>
+    </div>
+
+    <div class="card">
       <h3>Past runs &amp; insights</h3>
       <button type="button" class="secondary" id="openInsightsByRunBtn">Open insights (pick a recent run)</button>
     </div>

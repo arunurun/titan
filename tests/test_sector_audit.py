@@ -191,6 +191,7 @@ def test_symbol_digest_includes_global_news_correlation_line(monkeypatch):
 
 def test_apply_global_news_correlation_uses_explicit_fallback_when_sector_missing(monkeypatch):
     from sector_audit import _apply_global_news_correlation
+    from sector_registry import SectorInstrument
 
     snapshot = {
         "source": "cached",
@@ -220,6 +221,19 @@ def test_apply_global_news_correlation_uses_explicit_fallback_when_sector_missin
         },
     }
     monkeypatch.setattr("sector_priority.resolve_global_news_snapshot", lambda _cfg: snapshot)
+    monkeypatch.setattr("sector_priority.load_priority_instruments", lambda _cfg, sector_key, top_n=None: [SectorInstrument("HAL", "NSE")])
+    monkeypatch.setattr(
+        "sector_priority.fetch_stock_news_for_symbol",
+        lambda _cfg, symbol, exchange, timeout_seconds=10.0, now_utc=None: {
+            "symbol": symbol,
+            "exchange": exchange,
+            "items": [],
+            "query_used": symbol,
+            "alias_used": "",
+            "fallback_used": False,
+            "error": "empty_feed",
+        },
+    )
     ok_results = [{"audit": {"prediction_breakdown": {"week": {"ema_term": 1.3}}}}]
     meta = _apply_global_news_correlation(make_cfg(), sector_id="ai", ok_results=ok_results)
     corr = ok_results[0]["audit"]["news_correlation"]
@@ -262,9 +276,22 @@ def test_apply_global_news_correlation_sets_line_for_all_audits_when_snapshot_em
 
     snapshot = {"source": "unavailable", "news_items": [], "sector_scores": {}}
     monkeypatch.setattr("sector_priority.resolve_global_news_snapshot", lambda _cfg: snapshot)
+    monkeypatch.setattr("sector_priority.load_priority_instruments", lambda _cfg, sector_key, top_n=None: [])
+    monkeypatch.setattr(
+        "sector_priority.fetch_stock_news_for_symbol",
+        lambda _cfg, symbol, exchange, timeout_seconds=10.0, now_utc=None: {
+            "symbol": symbol,
+            "exchange": exchange,
+            "items": [],
+            "query_used": symbol,
+            "alias_used": "",
+            "fallback_used": False,
+            "error": "unavailable",
+        },
+    )
     ok_results = [
-        {"audit": {"prediction_breakdown": {"week": {"ret1d_term": 0.7}}}},
-        {"audit": {"prediction_breakdown": {"week": {"ema_term": -0.5}}}},
+        {"symbol": "HAL", "exchange": "NSE", "audit": {"symbol": "HAL", "exchange": "NSE", "prediction_breakdown": {"week": {"ret1d_term": 0.7}}}},
+        {"symbol": "BEL", "exchange": "NSE", "audit": {"symbol": "BEL", "exchange": "NSE", "prediction_breakdown": {"week": {"ema_term": -0.5}}}},
     ]
     meta = _apply_global_news_correlation(make_cfg(), sector_id="unknown_sector", ok_results=ok_results)
     assert meta["applied"] is True
@@ -381,6 +408,7 @@ def test_build_equity_live_audit_cmf20_delta_is_numeric(monkeypatch):
 
 def test_apply_global_news_correlation_attaches_explicit_evidence(monkeypatch):
     from sector_audit import _apply_global_news_correlation
+    from sector_registry import SectorInstrument
 
     snapshot = {
         "source": "cached",
@@ -413,6 +441,19 @@ def test_apply_global_news_correlation_attaches_explicit_evidence(monkeypatch):
         },
     }
     monkeypatch.setattr("sector_priority.resolve_global_news_snapshot", lambda cfg: snapshot)
+    monkeypatch.setattr("sector_priority.load_priority_instruments", lambda _cfg, sector_key, top_n=None: [SectorInstrument("HAL", "NSE")])
+    monkeypatch.setattr(
+        "sector_priority.fetch_stock_news_for_symbol",
+        lambda _cfg, symbol, exchange, timeout_seconds=10.0, now_utc=None: {
+            "symbol": symbol,
+            "exchange": exchange,
+            "items": [],
+            "query_used": symbol,
+            "alias_used": "",
+            "fallback_used": False,
+            "error": "empty_feed",
+        },
+    )
     ok_results = [{"audit": {"symbol": "HAL", "prediction_breakdown": {"week": {"ema_term": 2.0}}}}]
     meta = _apply_global_news_correlation(make_cfg(), sector_id="defence", ok_results=ok_results)
     assert meta["applied"] is True
@@ -425,11 +466,115 @@ def test_apply_global_news_correlation_attaches_explicit_evidence(monkeypatch):
     buckets = evidence.get("top_headlines")
     assert isinstance(buckets, dict)
     assert set(["global", "local", "stock"]).issubset(set(buckets.keys()))
-    flat = [row for k in ("global", "local", "stock") for row in buckets.get(k, [])]
+    flat = [row for k in ("global", "local", "market", "stock") for row in buckets.get(k, [])]
     assert flat
     assert all(isinstance(x.get("impact_contribution_score"), float) for x in flat)
     assert all(str(x.get("source") or "").strip() for x in flat)
     assert all("published_at" in x for x in flat)
+
+
+def test_apply_global_news_correlation_produces_symbol_specific_lines(monkeypatch):
+    from sector_audit import _apply_global_news_correlation, _news_correlation_line
+
+    snapshot = {
+        "source": "cached",
+        "fresh": True,
+        "news_items": [],
+        "sector_scores": {
+            "defence": {
+                "score": 0.08,
+                "confidence": 0.7,
+                "drivers_top": [
+                    {
+                        "title": "Defence order visibility improves globally",
+                        "source": "Reuters",
+                        "published_at": "2026-05-30T09:10:00+00:00",
+                        "contribution": 0.06,
+                    }
+                ],
+            }
+        },
+    }
+    monkeypatch.setattr("sector_priority.resolve_global_news_snapshot", lambda _cfg: snapshot)
+    monkeypatch.setattr("sector_priority.load_priority_instruments", lambda _cfg, sector_key, top_n=None: [])
+
+    def _fake_stock_news(_cfg, symbol, exchange, timeout_seconds=10.0, now_utc=None):
+        headline = "HAL wins engine contract" if symbol == "HAL" else "BEL secures radar export order"
+        return {
+            "symbol": symbol,
+            "exchange": exchange,
+            "items": [
+                {
+                    "title": headline,
+                    "summary": "Order pipeline expands",
+                    "source": "ET Markets",
+                    "url": f"https://x/{symbol.lower()}",
+                    "published_at": "2026-05-30T10:00:00+00:00",
+                }
+            ],
+            "query_used": symbol,
+            "alias_used": "",
+            "fallback_used": False,
+            "error": "",
+        }
+
+    monkeypatch.setattr("sector_priority.fetch_stock_news_for_symbol", _fake_stock_news)
+    ok_results = [
+        {"symbol": "HAL", "exchange": "NSE", "audit": {"symbol": "HAL", "exchange": "NSE", "prediction_breakdown": {"week": {"ema_term": 1.2}}}},
+        {"symbol": "BEL", "exchange": "NSE", "audit": {"symbol": "BEL", "exchange": "NSE", "prediction_breakdown": {"week": {"ema_term": 1.1}}}},
+    ]
+    meta = _apply_global_news_correlation(make_cfg(), sector_id="defence", ok_results=ok_results)
+    assert meta["applied"] is True
+    hal_line = _news_correlation_line(ok_results[0]["audit"])
+    bel_line = _news_correlation_line(ok_results[1]["audit"])
+    assert "HAL wins engine contract" in hal_line
+    assert "BEL secures radar export order" in bel_line
+    assert hal_line != bel_line
+
+
+def test_apply_global_news_correlation_records_alias_fallback(monkeypatch):
+    from sector_audit import _apply_global_news_correlation
+    from sector_registry import SectorInstrument
+
+    snapshot = {
+        "source": "cached",
+        "fresh": True,
+        "news_items": [],
+        "sector_scores": {
+            "defence": {
+                "score": 0.06,
+                "confidence": 0.68,
+                "drivers_top": [],
+            }
+        },
+    }
+    monkeypatch.setattr("sector_priority.resolve_global_news_snapshot", lambda _cfg: snapshot)
+    monkeypatch.setattr("sector_priority.load_priority_instruments", lambda _cfg, sector_key, top_n=None: [SectorInstrument("HAL", "NSE")])
+    monkeypatch.setattr(
+        "sector_priority.fetch_stock_news_for_symbol",
+        lambda _cfg, symbol, exchange, timeout_seconds=10.0, now_utc=None: {
+            "symbol": symbol,
+            "exchange": exchange,
+            "items": [
+                {
+                    "title": "Hindustan Aeronautics signs maintenance pact",
+                    "summary": "",
+                    "source": "Moneycontrol",
+                    "url": "https://x/hal-maint",
+                    "published_at": "2026-05-30T09:00:00+00:00",
+                }
+            ],
+            "query_used": "Hindustan Aeronautics",
+            "alias_used": "Hindustan Aeronautics",
+            "fallback_used": True,
+            "error": "",
+        },
+    )
+    ok_results = [{"symbol": "HAL", "exchange": "NSE", "audit": {"symbol": "HAL", "exchange": "NSE"}}]
+    _apply_global_news_correlation(make_cfg(), sector_id="defence", ok_results=ok_results)
+    stock_meta = ok_results[0]["audit"]["news_correlation"]["stock_news"]
+    assert stock_meta["alias_fallback_used"] is True
+    assert stock_meta["alias_used"] == "Hindustan Aeronautics"
 
 
 def test_build_equity_live_audit_records_exchange_fallback_metadata(monkeypatch):
@@ -689,6 +834,57 @@ def test_run_sector_live_macro_guardrail_applied(mock_load, mock_metrics, mock_e
 
     body = mock_email.call_args[0][0]
     assert "Macro guardrail applied: yes" in body
+
+
+@patch("email_notify.send_success_post_email")
+@patch("sector_audit._process_one_metrics")
+@patch("sector_audit.load_sector_instruments")
+def test_run_sector_live_reconcile_report_only_suppresses_legacy_blocks(
+    mock_load, mock_metrics, mock_email, monkeypatch
+):
+    from sector_audit import run_sector_live
+
+    monkeypatch.setenv("TITAN_RECONCILE_REPORT_ONLY", "1")
+    mock_load.return_value = [SectorInstrument("A", "NSE")]
+    mock_metrics.side_effect = [
+        {
+            "ok": True,
+            "symbol": "A",
+            "exchange": "NSE",
+            "audit": {
+                "symbol": "A",
+                "z_score": 1.0,
+                "intent_score": 62.0,
+                "effective_intent_score": 60.0,
+                "absorption_ratio": 1.2,
+                "return_1d_pct": 0.6,
+                "rows": 30,
+            },
+            "error": None,
+        }
+    ]
+    with patch("breeze_client.create_breeze_session", return_value=MagicMock()):
+        with patch("brain.generate_sector_digest_narrative", return_value="One combined post"):
+            with patch("supabase_log.save_audit_log"):
+                with patch(
+                    "analysis_store.persist_sector_run_analytics",
+                    return_value={"persisted": True, "run_id": "test-report-only"},
+                ):
+                    with patch("analysis_store.update_sector_period_rollups"):
+                        with patch(
+                            "analysis_store.build_comparison_payload",
+                            return_value={"enabled": False},
+                        ):
+                            with patch(
+                                "analysis_store.persist_llm_digest_memory",
+                                return_value={"persisted": True},
+                            ):
+                                run_sector_live("defence", max_workers=1, digest=True)
+
+    body = mock_email.call_args[0][0]
+    assert "Report-only enforcement" in body
+    assert "Per-symbol metrics" not in body
+    assert "LLM forensic narrative" not in body
 
 
 @patch("sector_audit._process_one_metrics")

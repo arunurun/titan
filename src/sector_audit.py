@@ -349,6 +349,15 @@ def _digest_verbose_symbol_lines_enabled() -> bool:
     )
 
 
+def _digest_report_only_mode_enabled() -> bool:
+    return (os.environ.get("TITAN_RECONCILE_REPORT_ONLY") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _sell_signal_plain_english(signal: str) -> str:
     from action_signals import action_signal_plain_english
 
@@ -560,7 +569,8 @@ def _news_evidence_line(audit: dict[str, Any]) -> str:
 
     return (
         f"News evidence: net_news_impact_score={_fmt_metric(net_score, 4)} "
-        f"(direction={direction}) · {_bucket_txt('global')} · {_bucket_txt('local')} · {_bucket_txt('stock')}"
+        f"(direction={direction}) · {_bucket_txt('global')} · {_bucket_txt('local')} · "
+        f"{_bucket_txt('market')} · {_bucket_txt('stock')}"
     )
 
 
@@ -1533,6 +1543,16 @@ def _apply_event_guardrails(ok_results: list[dict[str, Any]]) -> int:
     return adjusted
 
 
+def _stock_news_coverage_top_n() -> int:
+    raw = (str(os.environ.get("TITAN_STOCK_NEWS_COVERAGE_TOP_N", "")) or "").strip()
+    if not raw:
+        return 5
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 5
+
+
 def _apply_global_news_correlation(
     cfg: TitanConfig,
     *,
@@ -1540,123 +1560,116 @@ def _apply_global_news_correlation(
     ok_results: list[dict[str, Any]],
 ) -> dict[str, Any]:
     try:
-        from sector_priority import resolve_global_news_snapshot
+        from sector_priority import (
+            correlate_stock_news_with_macro,
+            fetch_stock_news_for_symbol,
+            load_priority_instruments,
+            resolve_global_news_snapshot,
+        )
     except Exception:
         return {"applied": False, "reason": "news_module_unavailable"}
+    if not ok_results:
+        return {"applied": False, "reason": "no_results"}
     snapshot = resolve_global_news_snapshot(cfg)
-    scores = snapshot.get("sector_scores")
-    scores = scores if isinstance(scores, dict) else {}
     sector_key = str(sector_id).strip().lower()
-    sector_news = scores.get(sector_key)
-    sector_news = sector_news if isinstance(sector_news, dict) else {}
-    score = _safe_float(sector_news.get("score"))
-    confidence = _safe_float(sector_news.get("confidence"))
-    matched_items = int(sector_news.get("matched_items") or 0)
-    drivers_raw = sector_news.get("drivers_top")
-    drivers_list = [d for d in (drivers_raw if isinstance(drivers_raw, list) else []) if isinstance(d, dict)]
-    fallback_label = ""
-
-    if matched_items <= 0 or not drivers_list:
-        candidate_drivers: list[dict[str, Any]] = []
-        for score_row in scores.values():
-            if not isinstance(score_row, dict):
-                continue
-            dtop = score_row.get("drivers_top")
-            if not isinstance(dtop, list):
-                continue
-            for d in dtop:
-                if isinstance(d, dict):
-                    candidate_drivers.append(d)
-        if candidate_drivers:
-            drivers_list = sorted(
-                candidate_drivers,
-                key=lambda d: abs(_safe_float(d.get("contribution"))),
-                reverse=True,
-            )[:3]
-            top = drivers_list[0]
-            contribution = _safe_float(top.get("contribution"))
-            score = contribution if not math.isnan(contribution) else 0.0
-            conf_top = _safe_float(top.get("confidence"))
-            if math.isnan(conf_top):
-                conf_top = 0.35
-            confidence = min(0.49, conf_top)
-            fallback_scope = _news_scope_bucket(
-                title=str(top.get("title") or top.get("driver") or ""),
-                source=str(top.get("source") or ""),
+    top_n = _stock_news_coverage_top_n()
+    try:
+        priority = load_priority_instruments(cfg, sector_key=sector_key, top_n=top_n)
+    except Exception:
+        priority = []
+    coverage_pairs = {
+        (str(inst.symbol).strip().upper(), str(inst.exchange).strip().upper())
+        for inst in priority
+        if str(inst.symbol).strip() and str(inst.exchange).strip()
+    }
+    if not coverage_pairs:
+        ranked_local = sorted(
+            [r for r in ok_results if isinstance(r.get("audit"), dict)],
+            key=lambda r: _safe_float((r.get("audit") or {}).get("effective_intent_score", (r.get("audit") or {}).get("intent_score"))),
+            reverse=True,
+        )
+        for row in ranked_local[:top_n]:
+            audit = row.get("audit") if isinstance(row.get("audit"), dict) else {}
+            coverage_pairs.add(
+                (
+                    str(audit.get("symbol") or row.get("symbol") or "").strip().upper(),
+                    str(audit.get("exchange") or row.get("exchange") or "").strip().upper(),
+                )
             )
-            fallback_label = f"sector_specific_match_missing_using_{fallback_scope}_market_driver"
-        else:
-            news_items = snapshot.get("news_items")
-            news_items = news_items if isinstance(news_items, list) else []
-            if news_items and isinstance(news_items[0], dict):
-                first = news_items[0]
-                title = str(first.get("title") or "").strip() or "Global market headlines"
-                source = str(first.get("source") or "").strip() or "unknown_source"
-                published_at = str(first.get("published_at") or "").strip()
-                drivers_list = [
-                    {
-                        "title": title,
-                        "driver": title,
-                        "source": source,
-                        "published_at": published_at,
-                        "contribution": 0.0,
-                    }
-                ]
-                score = 0.0
-                confidence = 0.3
-                fallback_scope = _news_scope_bucket(title=title, source=source)
-                fallback_label = f"sector_specific_match_missing_using_{fallback_scope}_market_driver"
-            else:
-                drivers_list = [
-                    {
-                        "title": "No recent market driver available",
-                        "driver": "No recent market driver available",
-                        "source": "snapshot_unavailable",
-                        "published_at": "",
-                        "contribution": 0.0,
-                    }
-                ]
-                score = 0.0
-                confidence = 0.2
-                fallback_label = "sector_specific_match_missing_no_market_driver"
-
-    if math.isnan(score):
-        score = 0.0
-    if score > 0.02:
-        direction = "tailwind"
-    elif score < -0.02:
-        direction = "headwind"
-    else:
-        direction = "neutral"
-    top_driver = drivers_list[0] if drivers_list else {}
-    driver_text = str(top_driver.get("driver") or top_driver.get("title") or "").strip()
-    if not driver_text:
-        driver_text = "Global macro flow"
-    source = str(top_driver.get("source") or "").strip()
-    if source:
-        driver_text = f"{driver_text} ({source})"
-    evidence = _news_evidence_payload(drivers=drivers_list, net_score=score)
+    stock_news_by_symbol: dict[tuple[str, str], dict[str, Any]] = {}
+    for symbol, exchange in coverage_pairs:
+        if not symbol or exchange not in ("NSE", "BSE"):
+            continue
+        try:
+            stock_news_by_symbol[(symbol, exchange)] = fetch_stock_news_for_symbol(
+                cfg,
+                symbol=symbol,
+                exchange=exchange,
+            )
+        except Exception as exc:
+            stock_news_by_symbol[(symbol, exchange)] = {
+                "symbol": symbol,
+                "exchange": exchange,
+                "items": [],
+                "query_used": "",
+                "alias_used": "",
+                "fallback_used": False,
+                "error": f"unexpected:{exc}",
+            }
     applied = 0
+    fallback_count = 0
     for r in ok_results:
         audit = r.get("audit")
         if not isinstance(audit, dict):
             continue
+        symbol = str(audit.get("symbol") or r.get("symbol") or "").strip().upper()
+        exchange = str(audit.get("exchange") or r.get("exchange") or "").strip().upper()
+        stock_news_meta = stock_news_by_symbol.get((symbol, exchange), {})
+        stock_news_items = stock_news_meta.get("items")
+        stock_news_items = stock_news_items if isinstance(stock_news_items, list) else []
+        corr = correlate_stock_news_with_macro(
+            symbol=symbol,
+            sector_key=sector_key,
+            stock_news_items=stock_news_items,
+            snapshot=snapshot,
+        )
+        fallback_label = str(corr.get("fallback_label") or "").strip()
+        if fallback_label:
+            fallback_count += 1
         audit["news_correlation"] = {
-            "driver": driver_text,
+            "driver": str(corr.get("driver") or "Global macro flow"),
             "affected_metric": _infer_news_affected_metric(audit),
-            "affected_theme": str(sector_id).strip().lower(),
-            "direction": direction,
-            "confidence": None if math.isnan(confidence) else round(confidence, 4),
-            "evidence": evidence,
+            "affected_theme": sector_key,
+            "direction": str(corr.get("direction") or "neutral"),
+            "confidence": (
+                None
+                if math.isnan(_safe_float(corr.get("confidence")))
+                else round(_safe_float(corr.get("confidence")), 4)
+            ),
+            "evidence": corr.get("evidence") if isinstance(corr.get("evidence"), dict) else {},
             "fallback_label": fallback_label,
+            "stock_news": {
+                "fetched_count": len(stock_news_items),
+                "query_used": str(stock_news_meta.get("query_used") or "").strip(),
+                "alias_used": str(stock_news_meta.get("alias_used") or "").strip(),
+                "alias_fallback_used": bool(stock_news_meta.get("fallback_used")),
+                "fetch_error": str(stock_news_meta.get("error") or "").strip(),
+            },
         }
         applied += 1
+    scores = snapshot.get("sector_scores")
+    scores = scores if isinstance(scores, dict) else {}
+    sector_news = scores.get(sector_key) if isinstance(scores.get(sector_key), dict) else {}
+    sector_score = _safe_float(sector_news.get("score"))
+    if math.isnan(sector_score):
+        sector_score = 0.0
     return {
         "applied": bool(applied),
         "applied_count": applied,
         "snapshot": snapshot,
-        "sector_news_score": round(score, 4),
-        "fallback_label": fallback_label,
+        "sector_news_score": round(sector_score, 4),
+        "stock_news_coverage_count": len(stock_news_by_symbol),
+        "fallback_count": fallback_count,
     }
 
 
@@ -2557,26 +2570,39 @@ def run_sector_live(
             [
                 f"BUY: {action_counts['buy']} | HOLD: {action_counts['hold']} | "
                 f"TRIM: {action_counts['trim']} | EXIT RISK: {action_counts['exit-risk']}",
-                "",
-                "--- Per-symbol metrics ---",
             ]
         )
-        # Rank by next-week score first for early winner discovery.
-        ranked = sorted(
-            ok_results,
-            key=lambda x: (
-                float("-inf")
-                if math.isnan(
-                    _safe_float(x["audit"].get("next_week_score", float("nan")))
-                )
-                else _safe_float(x["audit"].get("next_week_score", float("nan")))
-            ),
-            reverse=True,
-        )
-        for i, r in enumerate(ranked):
-            lines.append(_format_symbol_metrics_line(r))
-            if i < len(ranked) - 1:
-                lines.append("")
+        report_only_mode = _digest_report_only_mode_enabled()
+        if report_only_mode:
+            lines.extend(
+                [
+                    "",
+                    "Per-symbol metrics suppressed (report-only reconcile mode).",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "",
+                    "--- Per-symbol metrics ---",
+                ]
+            )
+            # Rank by next-week score first for early winner discovery.
+            ranked = sorted(
+                ok_results,
+                key=lambda x: (
+                    float("-inf")
+                    if math.isnan(
+                        _safe_float(x["audit"].get("next_week_score", float("nan")))
+                    )
+                    else _safe_float(x["audit"].get("next_week_score", float("nan")))
+                ),
+                reverse=True,
+            )
+            for i, r in enumerate(ranked):
+                lines.append(_format_symbol_metrics_line(r))
+                if i < len(ranked) - 1:
+                    lines.append("")
         for r in sorted(
             (x for x in results if (not x.get("ok")) and not _is_skipped_no_data_error(x.get("error"))),
             key=lambda x: (x["symbol"], x["exchange"]),
@@ -2584,6 +2610,28 @@ def run_sector_live(
             lines.append("")
             lines.append(f"--- {r['symbol']} ({r['exchange']}) FAILED ---")
             lines.append(r.get("error", "") or "")
+        if report_only_mode:
+            compact_lines = [
+                f"Titan EOD reconcile run: {sector_id!r} — {ok_count}/{len(results)} succeeded",
+                "",
+            ]
+            compact_lines.extend(build_reconcile_digest_lines(reconcile_summary))
+            compact_lines.extend(
+                [
+                    "",
+                    "Report-only enforcement: legacy sector forensic/per-symbol digest blocks suppressed.",
+                    (
+                        f"Data reconciliation: requested {len(results)} | success {ok_count} | "
+                        f"skipped(no data) {len(skipped_rows)} | hard failures {len(hard_failed_rows)}"
+                    ),
+                ]
+            )
+            if hard_failure_breakdown:
+                compact_lines.append(
+                    "Hard-failure breakdown: "
+                    + ", ".join(f"{k}={v}" for k, v in sorted(hard_failure_breakdown.items()))
+                )
+            lines = compact_lines
         digest_text = "\n".join(lines).strip()
         gh_rid = (os.environ.get("GITHUB_RUN_ID") or "").strip() or None
         if analysis_store_enabled():
