@@ -1,0 +1,11 @@
+# Optional heavy dependencies for FinBERT / transformer sentiment path.
+# Base CI and scheduled fetch workflows use VADER only (requirements.txt).
+#
+# Install:
+#   pip install -r requirements-news.txt
+#
+# Enable in runtime:
+#   TITAN_SENTIMENT_MODEL=finbert
+
+transformers>=4.40.0
+torch>=2.0.0

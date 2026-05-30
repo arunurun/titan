@@ -488,6 +488,11 @@ def build_symbol_daily_feature(
             "option_chain_unavailable": bool(audit.get("option_chain_unavailable", False)),
             "rows_count": int(audit.get("rows") or 0),
             "tape_extras": tape_extras,
+            "news_correlation": audit.get("news_correlation"),
+            "news_sentiment_aggregate": audit.get("news_sentiment_aggregate"),
+            "news_sentiment_score": audit.get("news_sentiment_score"),
+            "news_sentiment_trend": audit.get("news_sentiment_trend"),
+            "news_count": audit.get("news_count"),
         }
     )
 

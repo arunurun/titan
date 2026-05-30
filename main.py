@@ -174,6 +174,7 @@ def run_all_sectors(
     event_snapshot: dict | None,
     priority_only: bool = False,
     priority_top_n: int | None = None,
+    news_refresh: bool = False,
 ) -> None:
     from sector_audit import run_sector_live
     from sector_registry import list_active_sector_ids
@@ -228,6 +229,8 @@ def run_all_sectors(
             run_kwargs["macro_snapshot"] = macro_snapshot
         if event_snapshot is not None:
             run_kwargs["event_snapshot"] = event_snapshot
+        if news_refresh:
+            run_kwargs["news_refresh"] = True
         post_text = run_sector_live(sid, **run_kwargs)
         with successful_posts_lock:
             successful_posts[sid] = post_text
@@ -559,6 +562,11 @@ def main() -> None:
         action="store_true",
         help="When set with --protocol-run, only execute windows that are due right now (IST).",
     )
+    p.add_argument(
+        "--news-refresh",
+        action="store_true",
+        help="Force fetch and refresh news snapshots before sector analysis.",
+    )
     args = p.parse_args()
 
     macro_snapshot = _load_macro_snapshot(args.macro_json.strip()) if args.macro_json.strip() else None
@@ -620,6 +628,7 @@ def main() -> None:
                 event_snapshot=event_snapshot,
                 priority_only=args.sector_priority_only,
                 priority_top_n=args.sector_priority_top_n,
+                news_refresh=args.news_refresh,
             )
         except Exception as e:
             summary = str(e).strip().split("\n", 1)[0].strip()
@@ -672,6 +681,8 @@ def main() -> None:
             run_kwargs["macro_snapshot"] = macro_snapshot
         if event_snapshot is not None:
             run_kwargs["event_snapshot"] = event_snapshot
+        if args.news_refresh:
+            run_kwargs["news_refresh"] = True
 
         try:
             run_sector_live(

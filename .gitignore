@@ -6,6 +6,9 @@ config/.env
 config/.env.*
 !config/.env.example
 
+# GCP / service account keys (do not commit)
+stocks-484613-*.json
+
 # Python
 __pycache__/
 *.py[cod]
