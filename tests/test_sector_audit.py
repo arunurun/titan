@@ -634,6 +634,53 @@ def test_apply_global_news_correlation_records_alias_fallback(monkeypatch):
     assert stock_meta["alias_used"] == "Hindustan Aeronautics"
 
 
+def test_apply_global_news_correlation_records_filter_metadata(monkeypatch):
+    from sector_audit import _apply_global_news_correlation
+
+    snapshot = {
+        "source": "cached",
+        "sector_scores": {
+            "auto": {
+                "score": 0.06,
+                "confidence": 0.68,
+                "drivers_top": [],
+            }
+        },
+    }
+    monkeypatch.setattr("sector_priority.resolve_global_news_snapshot", lambda _cfg: snapshot)
+    monkeypatch.setattr(
+        "sector_priority.fetch_stock_news_for_symbol",
+        lambda _cfg, symbol, exchange, timeout_seconds=10.0, now_utc=None: {
+            "symbol": symbol,
+            "exchange": exchange,
+            "items": [
+                {
+                    "title": "HYUNDAI: Bulk deal — BUY 50000 @ 1500",
+                    "summary": "NSE bulk deal",
+                    "source": "nse_bulk_deals",
+                    "url": "https://www.nseindia.com/report-detail/display-bulk-and-block-deals",
+                    "published_at": "2026-05-30T09:00:00+00:00",
+                }
+            ],
+            "query_used": "",
+            "alias_used": "",
+            "fallback_used": False,
+            "error": "",
+            "filtered_count": 2,
+            "rejection_samples": [{"title": "5 stocks to buy", "reason": "negative:stocks to buy"}],
+            "relevance_top_score": 1.0,
+            "aliases": ["Hyundai Motor India"],
+            "nse_errors": [],
+        },
+    )
+    ok_results = [{"symbol": "HYUNDAI", "exchange": "NSE", "audit": {"symbol": "HYUNDAI", "exchange": "NSE"}}]
+    _apply_global_news_correlation(make_cfg(), sector_id="auto", ok_results=ok_results)
+    stock_meta = ok_results[0]["audit"]["news_correlation"]["stock_news"]
+    assert stock_meta["filtered_count"] == 2
+    assert stock_meta["rejection_samples"][0]["reason"].startswith("negative:")
+    assert stock_meta["relevance_top_score"] == 1.0
+
+
 def test_news_evidence_line_shows_stock_fetch_error(monkeypatch):
     monkeypatch.delenv("TITAN_DIGEST_VERBOSE_SYMBOLS", raising=False)
     from sector_audit import _format_symbol_metrics_line
@@ -1044,8 +1091,21 @@ def test_symbol_digest_explicit_news_unavailable_message(monkeypatch):
 @patch("email_notify.send_success_post_email")
 @patch("sector_audit._process_one_metrics")
 @patch("sector_audit.load_sector_instruments")
-def test_run_sector_live_macro_guardrail_applied(mock_load, mock_metrics, mock_email):
+def test_run_sector_live_macro_guardrail_applied(mock_load, mock_metrics, mock_email, monkeypatch):
     from sector_audit import run_sector_live
+
+    monkeypatch.setattr(
+        "sector_priority.fetch_nse_bulk_block_deals",
+        lambda *_args, **_kwargs: {"items": [], "error": "nse_empty"},
+    )
+    monkeypatch.setattr(
+        "sector_priority.fetch_nse_corporate_announcements",
+        lambda *_args, **_kwargs: {"items": [], "error": "nse_empty"},
+    )
+    monkeypatch.setattr(
+        "sector_priority._http_get_text",
+        lambda *_args, **_kwargs: ("<rss><channel><title>Google News</title></channel></rss>", None),
+    )
 
     mock_load.return_value = [
         SectorInstrument("A", "NSE"),
@@ -1107,7 +1167,7 @@ def test_run_sector_live_macro_guardrail_applied(mock_load, mock_metrics, mock_e
                                 )
 
     body = mock_email.call_args[0][0]
-    assert "Macro risk filters: applied" in body
+    assert "macro guardrail" in body
     assert "--- EOD Reconcile (Decision-first) ---" not in body
 
 

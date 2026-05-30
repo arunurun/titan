@@ -383,9 +383,17 @@ def test_fetch_stock_news_for_symbol_uses_alias_fallback(monkeypatch):
             return _Query()
 
     monkeypatch.setattr("sector_priority.create_client", lambda _u, _k: _Client())
+    monkeypatch.setattr(
+        "sector_priority.fetch_nse_bulk_block_deals",
+        lambda *_args, **_kwargs: {"items": [], "error": "nse_empty"},
+    )
+    monkeypatch.setattr(
+        "sector_priority.fetch_nse_corporate_announcements",
+        lambda *_args, **_kwargs: {"items": [], "error": "nse_empty"},
+    )
 
     def _fake_get(url, timeout_seconds=10.0):
-        if "Hindustan%20Aeronautics" in url:
+        if "Hindustan" in url:
             return (
                 """<rss><channel><title>Google News</title>
                 <item><title>Hindustan Aeronautics wins order</title><link>https://x/hal</link>
@@ -404,7 +412,174 @@ def test_fetch_stock_news_for_symbol_uses_alias_fallback(monkeypatch):
     )
     assert out["items"]
     assert out["fallback_used"] is True
-    assert out["alias_used"] == "Hindustan Aeronautics"
+    assert "Hindustan Aeronautics" in out["alias_used"]
+
+
+def test_filter_stock_news_rejects_hyundai_comparison():
+    from sector_priority import _filter_stock_news_items
+
+    items = [
+        {
+            "title": "Toyota vs Hyundai: which compact SUV is better in 2026?",
+            "summary": "Comparison review",
+            "source": "Google News",
+            "url": "https://x/compare",
+            "published_at": "2026-05-28T10:00:00+00:00",
+        }
+    ]
+    kept, meta = _filter_stock_news_items(
+        symbol="HYUNDAI",
+        aliases=["Hyundai Motor India"],
+        items=items,
+    )
+    assert kept == []
+    assert meta["filtered_count"] == 1
+    assert meta["rejection_samples"][0]["reason"].startswith("negative:")
+
+
+def test_filter_stock_news_rejects_listicle():
+    from sector_priority import _filter_stock_news_items
+
+    items = [
+        {
+            "title": "5 stocks to buy today: Tube Investments, HAL, and more",
+            "summary": "Broker picks",
+            "source": "Investment Guru",
+            "url": "https://x/list",
+            "published_at": "2026-05-28T10:00:00+00:00",
+        }
+    ]
+    kept, meta = _filter_stock_news_items(
+        symbol="TIINDIA",
+        aliases=["Tube Investments of India"],
+        items=items,
+    )
+    assert kept == []
+    assert meta["filtered_count"] == 1
+
+
+def test_filter_stock_news_keeps_bulk_deal_headline():
+    from sector_priority import _filter_stock_news_items
+
+    items = [
+        {
+            "title": "HYUNDAI: Bulk deal — BUY 50000 @ 1500 (ABC Capital)",
+            "summary": "NSE bulk deal for HYUNDAI",
+            "source": "nse_bulk_deals",
+            "url": "https://www.nseindia.com/report-detail/display-bulk-and-block-deals",
+            "published_at": "2026-05-28T10:00:00+00:00",
+        }
+    ]
+    kept, meta = _filter_stock_news_items(
+        symbol="HYUNDAI",
+        aliases=["Hyundai Motor India"],
+        items=items,
+    )
+    assert len(kept) == 1
+    assert "Bulk deal" in kept[0]["title"]
+    assert meta["filtered_count"] == 0
+
+
+def test_correlate_stock_news_macro_fallback_when_all_rejected():
+    from sector_priority import correlate_stock_news_with_macro
+
+    snapshot = {
+        "sector_scores": {
+            "auto": {
+                "score": 0.08,
+                "confidence": 0.7,
+                "drivers_top": [
+                    {
+                        "title": "Auto demand steady in India",
+                        "source": "Reuters",
+                        "published_at": "2026-01-02T08:00:00+00:00",
+                        "contribution": 0.05,
+                    }
+                ],
+            }
+        }
+    }
+    stock_news_items = [
+        {
+            "title": "5 stocks to buy today including Hyundai",
+            "summary": "Listicle",
+            "source": "Yahoo Finance",
+            "url": "https://x/list",
+            "published_at": "2026-01-02T10:00:00+00:00",
+        }
+    ]
+    out = correlate_stock_news_with_macro(
+        symbol="HYUNDAI",
+        sector_key="auto",
+        stock_news_items=stock_news_items,
+        snapshot=snapshot,
+        aliases=["Hyundai Motor India"],
+    )
+    assert out["fallback_label"] == "stock_news_no_relevant_items"
+    assert "Auto demand steady" in out["driver"]
+
+
+def test_fetch_nse_bulk_block_deals_parses_payload(monkeypatch):
+    from sector_priority import fetch_nse_bulk_block_deals
+
+    def _fake_api(url, *, params=None, timeout_seconds=20.0):
+        option = (params or {}).get("optionType", "")
+        if option == "bulk_deals":
+            return (
+                [
+                    {
+                        "BD_DT_DATE": "28-MAY-2026",
+                        "BD_SYMBOL": "HYUNDAI",
+                        "BD_BUY_SELL": "BUY",
+                        "BD_QTY_TRD": 50000,
+                        "BD_TP_WATP": 1500.0,
+                        "BD_CLIENT_NAME": "ABC Capital",
+                    }
+                ],
+                "",
+            )
+        return ([], "nse_empty")
+
+    monkeypatch.setattr("sector_priority._fetch_nse_api", _fake_api)
+    out = fetch_nse_bulk_block_deals("HYUNDAI", now_utc=datetime(2026, 5, 30, tzinfo=timezone.utc))
+    assert len(out["items"]) == 1
+    assert "Bulk deal" in out["items"][0]["title"]
+    assert out["items"][0]["source"] == "nse_bulk_deals"
+
+
+def test_fetch_nse_corporate_announcements_parses_payload(monkeypatch):
+    from sector_priority import fetch_nse_corporate_announcements
+
+    monkeypatch.setattr(
+        "sector_priority._fetch_nse_api",
+        lambda url, *, params=None, timeout_seconds=20.0: (
+            [
+                {
+                    "symbol": "HYUNDAI",
+                    "desc": "Board meeting outcome",
+                    "attchmntText": "Results approved",
+                    "an_dt": "28-MAY-2026",
+                }
+            ],
+            "",
+        ),
+    )
+    out = fetch_nse_corporate_announcements("HYUNDAI", now_utc=datetime(2026, 5, 30, tzinfo=timezone.utc))
+    assert len(out["items"]) == 1
+    assert out["items"][0]["source"] == "nse_corporate_announcements"
+    assert "Board meeting" in out["items"][0]["title"]
+
+
+def test_fetch_nse_bulk_block_deals_graceful_error(monkeypatch):
+    from sector_priority import fetch_nse_bulk_block_deals
+
+    monkeypatch.setattr(
+        "sector_priority._fetch_nse_api",
+        lambda *_args, **_kwargs: (None, "nse_cookie_failed"),
+    )
+    out = fetch_nse_bulk_block_deals("HYUNDAI")
+    assert out["items"] == []
+    assert "nse_cookie_failed" in out["error"]
 
 
 def test_correlate_stock_news_with_macro_prefers_stock_driver():
@@ -452,11 +627,9 @@ def test_stock_news_query_candidates_include_nse_suffix():
     from sector_priority import _stock_news_query_candidates
 
     queries = _stock_news_query_candidates(symbol="HAL", aliases=["Hindustan Aeronautics"])
-    assert "HAL" in queries
-    assert "HAL stock" in queries
-    assert "HAL NSE" in queries
-    assert "HAL share" in queries
-    assert "Hindustan Aeronautics" in queries
+    assert any("Hindustan Aeronautics" in q and "when:7d" in q for q in queries)
+    assert any("HAL NSE when:7d" in q for q in queries)
+    assert all("-recommend" in q or q == "HAL" for q in queries if "when:7d" in q)
 
 
 def test_map_news_to_sector_scores_includes_data_centre():

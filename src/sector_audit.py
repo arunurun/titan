@@ -1757,6 +1757,8 @@ def _apply_global_news_correlation(
         stock_news_meta = stock_news_by_symbol.get((symbol, exchange), {})
         stock_news_items = stock_news_meta.get("items")
         stock_news_items = stock_news_items if isinstance(stock_news_items, list) else []
+        stock_aliases = stock_news_meta.get("aliases")
+        stock_aliases = stock_aliases if isinstance(stock_aliases, list) else []
         stock_fetch_error = str(stock_news_meta.get("error") or "").strip()
         if not callable(fetch_stock_news_for_symbol):
             coverage_status = "helper_unavailable"
@@ -1777,6 +1779,7 @@ def _apply_global_news_correlation(
                     sector_key=sector_key,
                     stock_news_items=stock_news_items,
                     snapshot=snapshot,
+                    aliases=stock_aliases,
                 )
                 corr = corr if isinstance(corr, dict) else {}
             except Exception as exc:
@@ -1842,6 +1845,18 @@ def _apply_global_news_correlation(
                 "alias_used": str(stock_news_meta.get("alias_used") or "").strip(),
                 "alias_fallback_used": bool(stock_news_meta.get("fallback_used")),
                 "fetch_error": str(stock_news_meta.get("error") or "").strip(),
+                "filtered_count": int(stock_news_meta.get("filtered_count") or corr.get("filtered_count") or 0),
+                "rejection_samples": (
+                    stock_news_meta.get("rejection_samples")
+                    if isinstance(stock_news_meta.get("rejection_samples"), list)
+                    else (corr.get("rejection_samples") if isinstance(corr.get("rejection_samples"), list) else [])
+                ),
+                "relevance_top_score": stock_news_meta.get("relevance_top_score") or corr.get("relevance_top_score"),
+                "nse_errors": (
+                    stock_news_meta.get("nse_errors")
+                    if isinstance(stock_news_meta.get("nse_errors"), list)
+                    else []
+                ),
             },
         }
         applied += 1

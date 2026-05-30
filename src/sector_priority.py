@@ -134,7 +134,127 @@ _IMPACT_NEWS_TERMS = {
     "acquisition": 0.25,
     "contract": 0.2,
     "capex": 0.3,
+    "bulk deal": 0.4,
+    "block deal": 0.4,
+    "large deal": 0.35,
+    "fii": 0.3,
+    "dii": 0.3,
+    "fpi": 0.28,
+    "stake": 0.3,
+    "shareholding": 0.25,
+    "insider": 0.25,
+    "promoter": 0.25,
+    "qip": 0.3,
+    "preferential": 0.28,
+    "allotment": 0.22,
+    "order win": 0.25,
 }
+_STOCK_NEWS_NEGATIVE_PATTERNS_DEFAULT: tuple[str, ...] = (
+    "stocks to buy",
+    "stock picks",
+    "top stocks",
+    "multibagger",
+    "buy call",
+    "sell call",
+    "target price",
+    "price target",
+    "buy target",
+    "recommend",
+    "recommendation",
+    "rating",
+    "upgrade to buy",
+    "downgrade to sell",
+    "motilal oswal",
+    "icici direct",
+    "sharekhan",
+    "angel one",
+    "compared to",
+    "investment guru",
+    "yahoo finance recommends",
+    "msn money",
+)
+_STOCK_NEWS_POSITIVE_SIGNALS_DEFAULT: tuple[str, ...] = (
+    "bulk deal",
+    "block deal",
+    "large deal",
+    "insider",
+    "promoter",
+    "stake",
+    "acquisition",
+    "takeover",
+    "fii",
+    "dii",
+    "fpi",
+    "pms",
+    "aif",
+    "mutual fund",
+    "shareholding",
+    "allotment",
+    "qip",
+    "preferential",
+    "board meeting",
+    "results",
+    "order win",
+    "capex",
+    "plant",
+    "capacity expansion",
+    "iceberg",
+)
+_STOCK_NAME_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "india",
+        "indian",
+        "limited",
+        "ltd",
+        "company",
+        "corp",
+        "corporation",
+        "motor",
+        "motors",
+        "industries",
+        "industry",
+        "holdings",
+        "enterprises",
+        "the",
+        "and",
+    }
+)
+_STOCK_NEWS_AGGREGATOR_FRAGMENTS: tuple[str, ...] = (
+    "google news",
+    "news.google",
+    "msn",
+    "yahoo",
+    "investment guru",
+)
+_STOCK_NEWS_QUALITY_SOURCE_FRAGMENTS_DEFAULT: tuple[str, ...] = (
+    "livemint.com",
+    "economictimes.indiatimes.com",
+    "moneycontrol.com",
+    "business-standard.com",
+    "financialexpress.com",
+)
+_STOCK_NEWS_NSE_SOURCES: frozenset[str] = frozenset(
+    {
+        "nse_bulk_deals",
+        "nse_block_deals",
+        "nse_corporate_announcements",
+    }
+)
+_STOCK_NEWS_MIN_RELEVANCE_DEFAULT = 0.35
+_STOCK_NEWS_RECO_CONTEXT_TERMS: frozenset[str] = frozenset(
+    {
+        "target",
+        "recommend",
+        "rating",
+        "buy",
+        "sell",
+        "price",
+        "broker",
+        "analyst",
+    }
+)
+_NSE_BULK_BLOCK_URL = "https://www.nseindia.com/api/historicalOR/bulk-block-short-deals"
+_NSE_CORPORATE_ANNOUNCEMENTS_URL = "https://www.nseindia.com/api/corporate-announcements"
 
 
 def _safe_float(x: Any) -> float:
@@ -237,6 +357,46 @@ def _configured_news_feeds() -> list[str]:
         return list(_DEFAULT_NEWS_FEEDS)
     vals = [x.strip() for x in raw.split(",")]
     return [x for x in vals if x]
+
+
+def _env_csv_terms(env_key: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = (str(os.environ.get(env_key, "")) or "").strip()
+    if not raw:
+        return default
+    vals = tuple(x.strip().lower() for x in raw.split(",") if x.strip())
+    return vals or default
+
+
+def _stock_news_negative_patterns() -> tuple[str, ...]:
+    return _env_csv_terms("TITAN_STOCK_NEWS_NEGATIVE_KEYWORDS", _STOCK_NEWS_NEGATIVE_PATTERNS_DEFAULT)
+
+
+def _stock_news_positive_signals() -> tuple[str, ...]:
+    return _env_csv_terms("TITAN_STOCK_NEWS_POSITIVE_KEYWORDS", _STOCK_NEWS_POSITIVE_SIGNALS_DEFAULT)
+
+
+def _stock_news_quality_source_fragments() -> tuple[str, ...]:
+    return _env_csv_terms(
+        "TITAN_STOCK_NEWS_QUALITY_SOURCES",
+        _STOCK_NEWS_QUALITY_SOURCE_FRAGMENTS_DEFAULT,
+    )
+
+
+def _stock_news_min_relevance() -> float:
+    raw = (str(os.environ.get("TITAN_STOCK_NEWS_MIN_RELEVANCE", "")) or "").strip()
+    if not raw:
+        return _STOCK_NEWS_MIN_RELEVANCE_DEFAULT
+    try:
+        return _clamp(float(raw), 0.05, 0.95)
+    except ValueError:
+        return _STOCK_NEWS_MIN_RELEVANCE_DEFAULT
+
+
+def _stock_news_enable_nse() -> bool:
+    raw = (str(os.environ.get("TITAN_STOCK_NEWS_ENABLE_NSE", "")) or "").strip().lower()
+    if not raw:
+        return True
+    return raw not in ("0", "false", "no", "off")
 
 
 def _normalize_news_text(text: str) -> str:
@@ -428,19 +588,169 @@ def _instrument_alias_candidates(
     return out
 
 
+def _stock_news_query_exclusions() -> str:
+    return '-recommend -"stocks to buy" -target -"stock picks" -multibagger'
+
+
+def _stock_news_name_tokens(*, symbol: str, aliases: list[str]) -> list[str]:
+    sym = str(symbol or "").strip().upper()
+    tokens: list[str] = []
+    if sym:
+        tokens.append(sym.lower())
+    for raw in aliases:
+        for part in re.split(r"[^a-zA-Z0-9]+", str(raw or "")):
+            tok = part.strip().lower()
+            if len(tok) < 4 or tok in _STOCK_NAME_STOPWORDS:
+                continue
+            if tok not in tokens:
+                tokens.append(tok)
+    return tokens
+
+
+def _stock_news_negative_reason(text: str) -> str:
+    t = _normalize_news_text(text)
+    if not t:
+        return ""
+    for pattern in _stock_news_negative_patterns():
+        if pattern in t:
+            return f"negative:{pattern}"
+    if " vs " in t or " versus " in t:
+        return "negative:comparison"
+    if re.search(r"\d+\s+(stocks|shares)\s+to\s+buy", t):
+        return "negative:listicle"
+    if re.search(r"\d+\s+(stocks|shares)\b", t) and ("buy" in t or "pick" in t):
+        return "negative:listicle"
+    return ""
+
+
+def _stock_news_title_identity_match(*, symbol: str, aliases: list[str], title: str) -> bool:
+    title_norm = _normalize_news_text(title)
+    if not title_norm:
+        return False
+    sym = str(symbol or "").strip().upper()
+    if sym and re.search(rf"\b{re.escape(sym.lower())}\b", title_norm):
+        return True
+    for tok in _stock_news_name_tokens(symbol=symbol, aliases=aliases):
+        if re.search(rf"\b{re.escape(tok)}\b", title_norm):
+            return True
+    return False
+
+
+def _stock_news_summary_identity_match(*, symbol: str, aliases: list[str], summary: str) -> bool:
+    summary_norm = _normalize_news_text(summary)
+    if not summary_norm:
+        return False
+    sym = str(symbol or "").strip().upper()
+    if sym and re.search(rf"\b{re.escape(sym.lower())}\b", summary_norm):
+        return True
+    for tok in _stock_news_name_tokens(symbol=symbol, aliases=aliases):
+        if re.search(rf"\b{re.escape(tok)}\b", summary_norm):
+            return True
+    return False
+
+
+def _stock_news_relevance_score(*, symbol: str, aliases: list[str], item: dict[str, Any]) -> float:
+    source = str(item.get("source") or "").strip().lower()
+    if source in _STOCK_NEWS_NSE_SOURCES:
+        return 1.0
+    title = str(item.get("title") or "").strip()
+    summary = str(item.get("summary") or "").strip()
+    text = _normalize_news_text(f"{title} {summary}")
+    score = 0.0
+    sym = str(symbol or "").strip().upper()
+    title_norm = _normalize_news_text(title)
+    if sym and re.search(rf"\b{re.escape(sym.lower())}\b", title_norm):
+        score += 0.35
+    elif _stock_news_title_identity_match(symbol=symbol, aliases=aliases, title=title):
+        title_norm = _normalize_news_text(title)
+        name_hits = sum(
+            1
+            for tok in _stock_news_name_tokens(symbol=symbol, aliases=aliases)
+            if re.search(rf"\b{re.escape(tok)}\b", title_norm)
+        )
+        score += 0.35 if name_hits >= 2 else 0.25
+    elif _stock_news_summary_identity_match(symbol=symbol, aliases=aliases, summary=summary):
+        score += 0.05
+        score -= 0.20
+    else:
+        return 0.0
+    url = str(item.get("url") or "").lower()
+    source_blob = f"{source} {url}"
+    if any(fragment in source_blob for fragment in _stock_news_quality_source_fragments()):
+        score += 0.15
+    if any(fragment in source_blob for fragment in _STOCK_NEWS_AGGREGATOR_FRAGMENTS):
+        score -= 0.10
+    pos_hits = sum(1 for sig in _stock_news_positive_signals() if sig in text)
+    score += min(0.30, pos_hits * 0.10)
+    return round(_clamp(score, 0.0, 1.0), 4)
+
+
+def _filter_stock_news_items(
+    *,
+    symbol: str,
+    aliases: list[str],
+    items: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    min_relevance = _stock_news_min_relevance()
+    kept: list[dict[str, Any]] = []
+    rejected: list[dict[str, str]] = []
+    top_relevance = 0.0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        summary = str(item.get("summary") or "").strip()
+        if not title:
+            rejected.append({"title": "", "reason": "missing_title"})
+            continue
+        source = str(item.get("source") or "").strip().lower()
+        if source not in _STOCK_NEWS_NSE_SOURCES:
+            neg_reason = _stock_news_negative_reason(f"{title} {summary}")
+            if neg_reason:
+                rejected.append({"title": title[:120], "reason": neg_reason})
+                continue
+            if not _stock_news_title_identity_match(symbol=symbol, aliases=aliases, title=title):
+                if not _stock_news_summary_identity_match(symbol=symbol, aliases=aliases, summary=summary):
+                    rejected.append({"title": title[:120], "reason": "identity_mismatch"})
+                    continue
+        relevance = _stock_news_relevance_score(symbol=symbol, aliases=aliases, item=item)
+        top_relevance = max(top_relevance, relevance)
+        if relevance < min_relevance:
+            rejected.append({"title": title[:120], "reason": f"low_relevance:{relevance:.2f}"})
+            continue
+        out_item = dict(item)
+        out_item["relevance_score"] = relevance
+        kept.append(out_item)
+    meta = {
+        "filtered_count": len(rejected),
+        "rejection_samples": rejected[:3],
+        "relevance_top_score": round(top_relevance, 4),
+        "min_relevance": min_relevance,
+    }
+    return kept, meta
+
+
 def _stock_news_query_candidates(*, symbol: str, aliases: list[str]) -> list[str]:
     sym = str(symbol or "").strip().upper()
+    exclusions = _stock_news_query_exclusions()
+    legal_name = ""
+    for raw in aliases:
+        q = str(raw or "").strip()
+        if q and q.upper() != sym:
+            legal_name = q
+            break
     out: list[str] = []
+    if legal_name:
+        out.append(f'"{legal_name}" NSE when:7d {exclusions}')
+        out.append(f'"{legal_name}" when:7d bulk OR block OR stake OR results {exclusions}')
+    if sym:
+        out.append(f"{sym} NSE when:7d {exclusions}")
+        out.append(f"{sym} stock when:7d {exclusions}")
     for raw in [sym, *aliases]:
         q = str(raw or "").strip()
-        if not q:
+        if not q or q in out:
             continue
-        if q not in out:
-            out.append(q)
-    for suffix in (" stock", " NSE", " share"):
-        candidate = f"{sym}{suffix}".strip()
-        if sym and candidate not in out:
-            out.append(candidate)
+        out.append(q)
     return out
 
 
@@ -485,6 +795,189 @@ def _dedupe_recent_news_items(
     return out
 
 
+def _nse_date_range(days: int, *, now_utc: datetime | None = None) -> tuple[str, str]:
+    now = now_utc or datetime.now(timezone.utc)
+    start = now - timedelta(days=max(1, int(days)))
+    return start.strftime("%d-%m-%Y"), now.strftime("%d-%m-%Y")
+
+
+def _fetch_nse_api(
+    url: str,
+    *,
+    params: dict[str, str] | None = None,
+    timeout_seconds: float = 20.0,
+) -> tuple[Any | None, str]:
+    query = urllib.parse.urlencode(params or {})
+    full_url = f"{url}?{query}" if query else url
+    try:
+        urllib.request.urlopen(
+            _build_nse_payload_request(_NSE_HOME_URL),
+            timeout=timeout_seconds,
+        ).read()
+    except Exception:
+        return None, "nse_cookie_failed"
+    try:
+        with urllib.request.urlopen(
+            _build_nse_payload_request(full_url),
+            timeout=timeout_seconds,
+        ) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        return None, f"nse_http_{int(getattr(e, 'code', 0) or 0)}"
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        return None, "nse_request_error"
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None, "nse_invalid_json"
+    return payload, ""
+
+
+def _parse_nse_trade_date(raw: Any) -> datetime | None:
+    txt = str(raw or "").strip()
+    if not txt:
+        return None
+    for fmt in ("%d-%b-%Y", "%d-%m-%Y", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(txt, fmt)
+            return dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return _parse_news_timestamp(txt)
+
+
+def _normalize_nse_deal_row(row: dict[str, Any], *, deal_type: str) -> dict[str, Any] | None:
+    if not isinstance(row, dict):
+        return None
+    sym = str(row.get("BD_SYMBOL") or row.get("symbol") or "").strip().upper()
+    if not sym:
+        return None
+    side = str(row.get("BD_BUY_SELL") or row.get("buySell") or "").strip().upper()
+    qty = row.get("BD_QTY_TRD") or row.get("qty") or ""
+    price = row.get("BD_TP_WATP") or row.get("watp") or ""
+    client = str(row.get("BD_CLIENT_NAME") or row.get("clientName") or "").strip()
+    deal_label = "Block deal" if deal_type == "block_deals" else "Bulk deal"
+    title = f"{sym}: {deal_label} — {side} {qty} @ {price}".strip(" @")
+    if client:
+        title = f"{title} ({client})"
+    ts = _parse_nse_trade_date(row.get("BD_DT_DATE") or row.get("date"))
+    if ts is None:
+        ts = datetime.now(timezone.utc)
+    source = "nse_block_deals" if deal_type == "block_deals" else "nse_bulk_deals"
+    return {
+        "title": title,
+        "url": f"https://www.nseindia.com/report-detail/display-bulk-and-block-deals",
+        "summary": f"NSE {deal_label.lower()} for {sym}",
+        "source": source,
+        "published_at": ts,
+    }
+
+
+def _normalize_nse_announcement_row(row: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(row, dict):
+        return None
+    sym = str(row.get("symbol") or row.get("sm_symbol") or "").strip().upper()
+    subject = str(row.get("desc") or row.get("subject") or row.get("sm_desc") or "").strip()
+    attachment = str(row.get("attchmntText") or row.get("attchmnttext") or "").strip()
+    if not sym and not subject:
+        return None
+    title = f"{sym}: {subject}".strip(": ") if sym else subject
+    if not title:
+        return None
+    ts = _parse_nse_trade_date(row.get("an_dt") or row.get("sort_date") or row.get("exchdisstime"))
+    if ts is None:
+        ts = datetime.now(timezone.utc)
+    url = str(row.get("attchmntFile") or row.get("attchmntfile") or "").strip()
+    if url and not url.startswith("http"):
+        url = f"https://www.nseindia.com{url}" if url.startswith("/") else ""
+    return {
+        "title": title,
+        "url": url or "https://www.nseindia.com/companies-listing/corporate-filings-announcements",
+        "summary": attachment or subject,
+        "source": "nse_corporate_announcements",
+        "published_at": ts,
+    }
+
+
+def fetch_nse_bulk_block_deals(
+    symbol: str,
+    *,
+    days: int = 7,
+    timeout_seconds: float = 20.0,
+    now_utc: datetime | None = None,
+) -> dict[str, Any]:
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return {"items": [], "error": "missing_symbol"}
+    from_date, to_date = _nse_date_range(days, now_utc=now_utc)
+    items: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for deal_type in ("bulk_deals", "block_deals"):
+        payload, err = _fetch_nse_api(
+            _NSE_BULK_BLOCK_URL,
+            params={"optionType": deal_type, "from": from_date, "to": to_date},
+            timeout_seconds=timeout_seconds,
+        )
+        if payload is None:
+            errors.append(f"{deal_type}:{err or 'unknown'}")
+            continue
+        rows: list[Any]
+        if isinstance(payload, list):
+            rows = payload
+        elif isinstance(payload, dict):
+            rows = payload.get("data") if isinstance(payload.get("data"), list) else []
+        else:
+            rows = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_sym = str(row.get("BD_SYMBOL") or row.get("symbol") or "").strip().upper()
+            if row_sym != sym:
+                continue
+            normalized = _normalize_nse_deal_row(row, deal_type=deal_type)
+            if normalized is not None:
+                items.append(normalized)
+    if items:
+        return {"items": items, "error": ""}
+    if errors:
+        return {"items": [], "error": errors[0]}
+    return {"items": [], "error": "nse_empty"}
+
+
+def fetch_nse_corporate_announcements(
+    symbol: str,
+    *,
+    days: int = 30,
+    timeout_seconds: float = 20.0,
+    now_utc: datetime | None = None,
+) -> dict[str, Any]:
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return {"items": [], "error": "missing_symbol"}
+    from_date, to_date = _nse_date_range(days, now_utc=now_utc)
+    payload, err = _fetch_nse_api(
+        _NSE_CORPORATE_ANNOUNCEMENTS_URL,
+        params={
+            "index": "equities",
+            "symbol": sym,
+            "from_date": from_date,
+            "to_date": to_date,
+        },
+        timeout_seconds=timeout_seconds,
+    )
+    if payload is None:
+        return {"items": [], "error": err or "nse_request_error"}
+    rows = payload if isinstance(payload, list) else []
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        normalized = _normalize_nse_announcement_row(row)
+        if normalized is not None:
+            items.append(normalized)
+    if items:
+        return {"items": items, "error": ""}
+    return {"items": [], "error": "nse_empty"}
+
+
 def fetch_stock_news_for_symbol(
     cfg: TitanConfig,
     *,
@@ -500,6 +993,29 @@ def fetch_stock_news_for_symbol(
     last_error = ""
     used_query = ""
     used_alias = ""
+    nse_errors: list[str] = []
+    raw_items: list[dict[str, Any]] = []
+    if _stock_news_enable_nse() and str(exchange or "").strip().upper() == "NSE":
+        bulk_meta = fetch_nse_bulk_block_deals(
+            symbol,
+            days=7,
+            timeout_seconds=timeout_seconds,
+            now_utc=now,
+        )
+        if bulk_meta.get("items"):
+            raw_items.extend(bulk_meta["items"])
+        elif bulk_meta.get("error"):
+            nse_errors.append(str(bulk_meta["error"]))
+        ann_meta = fetch_nse_corporate_announcements(
+            symbol,
+            days=30,
+            timeout_seconds=timeout_seconds,
+            now_utc=now,
+        )
+        if ann_meta.get("items"):
+            raw_items.extend(ann_meta["items"])
+        elif ann_meta.get("error"):
+            nse_errors.append(str(ann_meta["error"]))
     for query in queries:
         q = urllib.parse.quote(query)
         raw, err = _http_get_text(_STOCK_NEWS_SEARCH_URL.format(query=q), timeout_seconds=timeout_seconds)
@@ -507,40 +1023,95 @@ def fetch_stock_news_for_symbol(
             last_error = str(err or "request_error")
             continue
         parsed = _parse_rss_feed_items(_STOCK_NEWS_SEARCH_URL.format(query=q), raw)
-        normalized = _dedupe_recent_news_items(parsed, now_utc=now, limit=max_items)
-        if normalized:
-            used_query = query
-            if query.strip().upper() != str(symbol).strip().upper():
-                used_alias = query
-            return {
-                "symbol": str(symbol).strip().upper(),
-                "exchange": str(exchange).strip().upper(),
-                "items": normalized,
-                "query_used": used_query,
-                "alias_used": used_alias,
-                "fallback_used": bool(used_alias),
-                "error": "",
-            }
+        if parsed:
+            raw_items.extend(parsed)
+            if not used_query:
+                used_query = query
+                if query.strip().upper() != str(symbol).strip().upper():
+                    used_alias = query
+            break
         last_error = "empty_feed"
+    normalized = _dedupe_recent_news_items(raw_items, now_utc=now, limit=max_items)
+    filter_input: list[dict[str, Any]] = []
+    for item in normalized:
+        ts_raw = item.get("published_at")
+        ts = _parse_news_timestamp(str(ts_raw)) if not isinstance(ts_raw, datetime) else ts_raw
+        filter_input.append(
+            {
+                **item,
+                "published_at": ts if ts is not None else now,
+            }
+        )
+    filtered_items, filter_meta = _filter_stock_news_items(
+        symbol=symbol,
+        aliases=aliases,
+        items=filter_input,
+    )
+    final_items: list[dict[str, Any]] = []
+    for item in filtered_items[:max_items]:
+        ts = item.get("published_at")
+        if isinstance(ts, datetime):
+            ts_out = ts.isoformat()
+        else:
+            ts_out = str(ts or "").strip()
+        final_items.append(
+            {
+                "title": str(item.get("title", "")).strip(),
+                "url": str(item.get("url", "")).strip(),
+                "summary": str(item.get("summary", "")).strip(),
+                "source": str(item.get("source", "unknown_source")).strip() or "unknown_source",
+                "published_at": ts_out,
+            }
+        )
+    fetch_error = ""
+    if not final_items:
+        fetch_error = last_error or (nse_errors[0] if nse_errors else "empty_feed")
     return {
         "symbol": str(symbol).strip().upper(),
         "exchange": str(exchange).strip().upper(),
-        "items": [],
+        "items": final_items,
         "query_used": used_query,
         "alias_used": used_alias,
         "fallback_used": bool(used_alias),
-        "error": last_error or "unavailable",
+        "error": fetch_error,
+        "filtered_count": int(filter_meta.get("filtered_count") or 0),
+        "rejection_samples": filter_meta.get("rejection_samples") or [],
+        "relevance_top_score": filter_meta.get("relevance_top_score"),
+        "nse_errors": nse_errors,
+        "aliases": aliases,
     }
 
 
-def _news_sentiment_score(text: str) -> float:
+def _news_sentiment_score(text: str, *, stock_path: bool = False) -> float:
     t = _normalize_news_text(text)
     if not t:
         return 0.0
-    pos_hits = sum(1 for k in _POSITIVE_NEWS_TERMS if k in t)
+    pos_terms = set(_POSITIVE_NEWS_TERMS)
+    if stock_path:
+        pos_terms.discard("upgrade")
+    pos_hits = sum(1 for k in pos_terms if k in t)
+    if stock_path and "upgrade" in t and any(k in t for k in _STOCK_NEWS_RECO_CONTEXT_TERMS):
+        pos_hits -= 1
     neg_hits = sum(1 for k in _NEGATIVE_NEWS_TERMS if k in t)
     raw = (pos_hits - neg_hits) / max(2.0, pos_hits + neg_hits + 1.0)
     return round(_clamp(raw, -1.0, 1.0), 4)
+
+
+def _stock_news_confidence_score(item: dict[str, Any], *, relevance: float) -> float:
+    source = str(item.get("source", "")).lower()
+    url = str(item.get("url", "")).lower()
+    blob = f"{source} {url}"
+    conf = 0.45
+    if source in _STOCK_NEWS_NSE_SOURCES:
+        conf = 0.90
+    elif any(fragment in blob for fragment in _stock_news_quality_source_fragments()):
+        conf = 0.75
+    elif any(fragment in blob for fragment in _STOCK_NEWS_AGGREGATOR_FRAGMENTS):
+        conf = 0.35
+    if str(item.get("url", "")).strip():
+        conf += 0.05
+    conf += relevance * 0.15
+    return round(_clamp(conf, 0.2, 1.0), 4)
 
 
 def _news_impact_score(text: str) -> float:
@@ -728,11 +1299,19 @@ def correlate_stock_news_with_macro(
     sector_key: str,
     stock_news_items: list[dict[str, Any]],
     snapshot: dict[str, Any],
+    aliases: list[str] | None = None,
 ) -> dict[str, Any]:
+    alias_list = aliases if isinstance(aliases, list) else []
+    filtered_items, filter_meta = _filter_stock_news_items(
+        symbol=symbol,
+        aliases=alias_list,
+        items=stock_news_items,
+    )
     stock_rows: list[dict[str, Any]] = []
     stock_contribution = 0.0
     stock_weight = 0.0
-    for item in stock_news_items:
+    min_relevance = _stock_news_min_relevance()
+    for item in filtered_items:
         if not isinstance(item, dict):
             continue
         title = str(item.get("title") or "").strip()
@@ -740,18 +1319,24 @@ def correlate_stock_news_with_macro(
         if not title:
             continue
         text = _normalize_news_text(f"{title} {summary}")
-        sentiment = _news_sentiment_score(text)
+        relevance = _safe_float(item.get("relevance_score"))
+        if math.isnan(relevance):
+            relevance = _stock_news_relevance_score(symbol=symbol, aliases=alias_list, item=item)
+        if relevance < min_relevance:
+            continue
+        sentiment = _news_sentiment_score(text, stock_path=True)
         impact = _news_impact_score(text)
-        confidence = _news_confidence_score(item)
-        contribution = sentiment * impact * confidence
+        confidence = _stock_news_confidence_score(item, relevance=relevance)
+        contribution = sentiment * impact * confidence * relevance
         stock_contribution += contribution
-        stock_weight += max(impact, 0.05)
+        stock_weight += max(impact * relevance, 0.05)
         stock_rows.append(
             {
                 "headline": title,
                 "source": str(item.get("source") or "unknown_source").strip() or "unknown_source",
                 "published_at": str(item.get("published_at") or "").strip(),
                 "impact_contribution_score": round(contribution, 4),
+                "relevance_score": round(relevance, 4),
             }
         )
     stock_rows = sorted(
@@ -798,7 +1383,9 @@ def correlate_stock_news_with_macro(
         driver_headline = str(macro_driver.get("headline") or "No recent market driver available").strip()
         driver_source = str(macro_driver.get("source") or "snapshot_unavailable").strip()
         driver = f"{driver_headline} ({driver_source})"
-        if driver_headline == "No recent market driver available":
+        if stock_news_items and not stock_rows:
+            fallback_label = "stock_news_no_relevant_items"
+        elif driver_headline == "No recent market driver available":
             fallback_label = "sector_specific_match_missing_no_market_driver"
         else:
             scope = _macro_news_scope(title=driver_headline, source=driver_source)
@@ -812,6 +1399,9 @@ def correlate_stock_news_with_macro(
         "stock_news_score": round(float(stock_score), 4),
         "net_score": round(float(blended), 4),
         "fallback_label": fallback_label,
+        "filtered_count": int(filter_meta.get("filtered_count") or 0),
+        "rejection_samples": filter_meta.get("rejection_samples") or [],
+        "relevance_top_score": filter_meta.get("relevance_top_score"),
         "evidence": {
             "net_news_impact_score": round(float(blended), 4),
             "net_news_impact_direction": direction,
