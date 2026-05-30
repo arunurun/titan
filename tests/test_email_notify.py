@@ -127,11 +127,11 @@ def test_success_html_sector_per_symbol_metrics_use_cards():
         "MTARTECH (NSE) — EXIT RISK — risk score ≥7: hard exit bar — cut exposure sharply or exit\n"
         "🟡➡ 1W outlook: 54.0 (neutral band)\n"
         "🟡➡ Technical intent: 50.0 (balanced / neutral)\n"
-        "🟡➡ Trend strength ADX14: 18.0\n"
-        "🟡➡ Breakout state (20D): to high -1.2% · above low 6.5%\n"
-        "🟡➡ Volatility regime ATR14/ATR63: 1.01\n"
-        "Tape snapshot: 1D move -1.0% · z-score 0.0 (near mean) · ATR14 2.0%\n"
-        "🟡➡ Directional volume CMF20: 0.010\n"
+        "🟡➡ Trend regime (14D): Sideways (ADX 18.0; weak (<20); source: +DI 17.0 vs -DI 16.0)\n"
+        "🟡➡ 20D Range Position: -1.2% to 20D high · 6.5% above 20D low (inside 20D range)\n"
+        "🟡➡ Volatility vs 3M baseline: 1.01x (normal; bands: <0.90 low, 0.90-1.10 normal, >1.10 high)\n"
+        "Tape snapshot: 1D move -1.0% · z-score 0.0 (near mean) · Typical daily swing (ATR14) 2.0%\n"
+        "🟡➡ Money flow trend (20D): 0.010 (neutral; bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution)\n"
         "IDEAFORGE (NSE) — Hold\n"
         "🟢⬆ 1W outlook: 60.0 (moderate constructive)\n"
         "🟢⬆ Technical intent: 55.0 (moderate long bias)\n"
@@ -139,7 +139,7 @@ def test_success_html_sector_per_symbol_metrics_use_cards():
     html = _render_success_html(body, subject="Titan sector")
     assert html.count("border-radius:10px;padding:12px 14px") == 2
     assert "MTARTECH (NSE)" in html and "IDEAFORGE (NSE)" in html
-    assert "Trend strength ADX14" in html
+    assert "Trend regime (14D)" in html
     assert "#ea4335" in html
     assert "#fbbc05" in html or "#fef7e0" in html
 
