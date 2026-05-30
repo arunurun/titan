@@ -473,3 +473,14 @@ Workflow/lint/build command caveat:
 
 - Repository exposes scripts and workflows, but no single unified lint/build command contract is explicitly defined as a mandatory pipeline command in the root docs.
 
+---
+
+## 14) May 2026 Digest Template Updates
+
+- Deterministic tick rules now apply across all key insight lines in sector digest symbol blocks.
+- Tape snapshot and sector-relative rank headers now carry deterministic section ticks derived from underlying metrics.
+- Tape and rank metric lines now show stable tick icons using fixed thresholds (not LLM narration).
+- Global news correlation is now always emitted for each sector symbol block.
+- When direct sector news matches are sparse or missing, Titan falls back to the best available global/local market driver with reduced confidence and an explicit `fallback=` label.
+- Fallback wording is intentionally explicit about source quality to avoid overstating confidence or fabricating sector-specific causality.
+
