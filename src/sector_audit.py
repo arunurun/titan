@@ -440,11 +440,13 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     lines_out: list[str] = []
     lines_out.append(f"{symbol} ({exchange}) — {_sell_signal_plain_english(str(sell_signal))}")
     nw_l = _horizon_score_label(next_week)
+    nw_icon = _metric_icon(next_week, bullish_above=55.0, bearish_below=45.0)
+    intent_icon = _metric_icon(intent, bullish_above=55.0, bearish_below=45.0)
     lines_out.append(
-        f"1W outlook: {_fmt_metric(next_week)} / 100 ({nw_l}; {_horizon_score_bands_text()})"
+        f"{nw_icon} 1W outlook: {_fmt_metric(next_week)} / 100 ({nw_l}; {_horizon_score_bands_text()})"
     )
     lines_out.append(
-        f"Technical intent: {_fmt_metric(intent)} / 100 "
+        f"{intent_icon} Technical intent: {_fmt_metric(intent)} / 100 "
         f"({_equity_technical_label(intent)}; bands: >=70 high-long, 55-69 moderate-long, 45-54 neutral, 30-44 defensive, <30 high-defensive)"
     )
     lines_out.append("")
@@ -464,20 +466,23 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
             )
     else:
         direction_rule = "direction source unavailable"
+    trend_icon = _metric_icon(adx_14, bullish_above=25.0, bearish_below=15.0)
+    range_icon = _breakout_state_icon(breakout_to_high, breakout_above_low)
+    atr_icon = _atr_regime_icon(atr_ratio)
     lines_out.append(
-        f"Trend regime (14D): {trend_regime} "
+        f"{trend_icon} Trend regime (14D): {trend_regime} "
         f"(ADX {_fmt_metric(adx_14)}; strength {_adx_strength_band(adx_14)}; "
         f"strength bands: <20 sideways, 20-24 weak trend, >=25 strong trend; direction rule: {direction_rule})"
     )
     lines_out.append("")
     lines_out.append(
-        f"20D Range Position: {_fmt_metric(breakout_to_high)}% to 20D high \u00b7 "
+        f"{range_icon} 20D Range Position: {_fmt_metric(breakout_to_high)}% to 20D high \u00b7 "
         f"{_fmt_metric(breakout_above_low)}% above 20D low "
         "(near-high (within ~1% of 20D high); thresholds: near-high >=-1%, near-low <=1%)"
     )
     lines_out.append("")
     lines_out.append(
-        f"Volatility vs 3M baseline: {_fmt_metric(atr_ratio)}x "
+        f"{atr_icon} Volatility vs 3M baseline: {_fmt_metric(atr_ratio)}x "
         f"({_atr_ratio_band(atr_ratio)}; bands: <0.90 low, 0.90-1.10 normal, >1.10 high)"
     )
     lines_out.append("")
@@ -502,8 +507,9 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
         f"Typical daily swing (ATR14): {_fmt_metric(atr_pct)}% "
         f"(bands: <2.0 calm, 2.0-4.0 moderate, >4.0 elevated)"
     )
+    cmf_icon = _metric_icon(cmf_val, bullish_above=0.05, bearish_below=-0.05)
     lines_out.append(
-        f"Money flow trend (20D): {_fmt_metric(cmf_val, 3)} "
+        f"{cmf_icon} Money flow trend (20D): {_fmt_metric(cmf_val, 3)} "
         f"({_cmf_band(cmf_val)}; bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution)"
         + (f" [{cmf_label} proxy]" if cmf_label != "CMF20" else "")
     )

@@ -76,15 +76,15 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
     assert "techScore" not in text
     assert "WELCORP (NSE)" in text
     assert "TRIM" in text or "trim" in text.lower()
-    assert "1w outlook" in text.lower()
+    assert "🟡➡ 1w outlook" in text.lower()
     assert "neutral band" in text.lower()
-    assert "trend regime (14d)" in text.lower()
+    assert "🟡➡ trend regime (14d)" in text.lower()
     assert "strength bands: <20 sideways, 20-24 weak trend, >=25 strong trend" in text.lower()
     assert "direction rule: +di" in text.lower()
-    assert "20d range position" in text.lower()
+    assert "🟢⬆ 20d range position" in text.lower()
     assert "thresholds: near-high >=-1%, near-low <=1%" in text.lower()
-    assert "volatility vs 3m baseline" in text.lower()
-    assert "money flow trend (20d)" in text.lower()
+    assert "🔴⬇ volatility vs 3m baseline" in text.lower()
+    assert "🟢⬆ money flow trend (20d)" in text.lower()
     assert "bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution" in text
     assert "sector-relative rank" in text.lower()
     assert "bands: leader >=67, average 34-66, laggard <=33" in text
@@ -102,14 +102,14 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
     assert "model read confidence" in text.lower()
     assert "bands: >=70 high, 55-69 medium, <55 low" in text
     assert (
-        "1W outlook: 51.84 / 100 (neutral band; bands: >=70 strong, 55-69 constructive, 45-54 neutral, 35-44 caution, <35 defensive)\n"
-        "  Technical intent: 50.00 / 100 (balanced / neutral; bands: >=70 high-long, 55-69 moderate-long, 45-54 neutral, 30-44 defensive, <30 high-defensive)\n"
+        "🟡➡ 1W outlook: 51.84 / 100 (neutral band; bands: >=70 strong, 55-69 constructive, 45-54 neutral, 35-44 caution, <35 defensive)\n"
+        "  🟡➡ Technical intent: 50.00 / 100 (balanced / neutral; bands: >=70 high-long, 55-69 moderate-long, 45-54 neutral, 30-44 defensive, <30 high-defensive)\n"
         "  \n"
-        "  Trend regime (14D): Buy trend (ADX 22.60; strength building (20-25); strength bands: <20 sideways, 20-24 weak trend, >=25 strong trend; direction rule: +DI 29.10 > -DI 18.40 => buy trend)\n"
+        "  🟡➡ Trend regime (14D): Buy trend (ADX 22.60; strength building (20-25); strength bands: <20 sideways, 20-24 weak trend, >=25 strong trend; direction rule: +DI 29.10 > -DI 18.40 => buy trend)\n"
         "  \n"
-        "  20D Range Position: -0.80% to 20D high \u00b7 9.40% above 20D low (near-high (within ~1% of 20D high); thresholds: near-high >=-1%, near-low <=1%)\n"
+        "  🟢⬆ 20D Range Position: -0.80% to 20D high \u00b7 9.40% above 20D low (near-high (within ~1% of 20D high); thresholds: near-high >=-1%, near-low <=1%)\n"
         "  \n"
-        "  Volatility vs 3M baseline: 1.12x (high; bands: <0.90 low, 0.90-1.10 normal, >1.10 high)\n"
+        "  🔴⬇ Volatility vs 3M baseline: 1.12x (high; bands: <0.90 low, 0.90-1.10 normal, >1.10 high)\n"
         "  \n"
         "  Tape snapshot\n"
         "  1D move: -4.28% (bands: >=+1 strong up, -1 to +1 muted, <=-1 weak)\n"
@@ -117,7 +117,7 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
         "  Distance above long-term trend (EMA200): 47.29% (bands: >+5 stretched above trend, -5 to +5 near trend, <-5 below trend)\n"
         "  Volume participation: 1.81x (high participation; bands: >=1.5 high, 1.0-1.49 above-avg, 0.7-0.99 below-avg, <0.7 thin)\n"
         "  Typical daily swing (ATR14): 3.42% (bands: <2.0 calm, 2.0-4.0 moderate, >4.0 elevated)\n"
-        "  Money flow trend (20D): 0.110 (accumulation; bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution)\n"
+        "  🟢⬆ Money flow trend (20D): 0.110 (accumulation; bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution)\n"
         "  \n"
         "  Sector-relative rank\n"
         "  Technical intent percentile: 62.00 (average; bands: leader >=67, average 34-66, laggard <=33)\n"
@@ -143,13 +143,13 @@ def test_symbol_digest_default_shows_neutral_na_for_missing_new_metrics(monkeypa
     }
     text = _format_symbol_metrics_line({"symbol": "HAL", "exchange": "NSE", "audit": audit})
     assert (
-        "Trend regime (14D): Sideways (ADX n/a; strength n/a; strength bands: <20 sideways, 20-24 weak trend, >=25 strong trend; direction rule: direction source unavailable)"
+        "🟡➡ Trend regime (14D): Sideways (ADX n/a; strength n/a; strength bands: <20 sideways, 20-24 weak trend, >=25 strong trend; direction rule: direction source unavailable)"
         in text
     )
-    assert "20D Range Position: n/a% to 20D high \u00b7 n/a% above 20D low (near-high (within ~1% of 20D high); thresholds: near-high >=-1%, near-low <=1%)" in text
-    assert "Volatility vs 3M baseline: n/ax (n/a; bands: <0.90 low, 0.90-1.10 normal, >1.10 high)" in text
+    assert "🟡➡ 20D Range Position: n/a% to 20D high \u00b7 n/a% above 20D low (near-high (within ~1% of 20D high); thresholds: near-high >=-1%, near-low <=1%)" in text
+    assert "🟡➡ Volatility vs 3M baseline: n/ax (n/a; bands: <0.90 low, 0.90-1.10 normal, >1.10 high)" in text
     assert (
-        "Money flow trend (20D): n/a "
+        "🟡➡ Money flow trend (20D): n/a "
         "(n/a; bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution)" in text
     )
 
