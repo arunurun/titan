@@ -554,6 +554,16 @@ def _news_evidence_payload(
     }
 
 
+def _stock_news_fetch_reason(corr: dict[str, Any], evidence: dict[str, Any]) -> str:
+    explicit = str(evidence.get("stock_fetch_error") or "").strip()
+    if explicit:
+        return explicit
+    stock_meta = corr.get("stock_news")
+    if isinstance(stock_meta, dict):
+        return str(stock_meta.get("fetch_error") or "").strip()
+    return ""
+
+
 def _news_evidence_line(audit: dict[str, Any]) -> str:
     corr = audit.get("news_correlation")
     if not isinstance(corr, dict):
@@ -566,10 +576,24 @@ def _news_evidence_line(audit: dict[str, Any]) -> str:
     top_headlines = evidence.get("top_headlines")
     if not isinstance(top_headlines, dict):
         top_headlines = {}
+    stock_fetch_error = _stock_news_fetch_reason(corr, evidence)
+    stock_query_used = ""
+    stock_meta = corr.get("stock_news")
+    if isinstance(stock_meta, dict):
+        stock_query_used = str(stock_meta.get("query_used") or "").strip()
 
     def _bucket_txt(name: str) -> str:
         rows = top_headlines.get(name)
         if not isinstance(rows, list) or not rows:
+            if name == "stock":
+                if stock_fetch_error:
+                    detail = f"fetch_error={stock_fetch_error}"
+                    if stock_query_used:
+                        detail += f"; query={stock_query_used}"
+                    return f"stock=none ({detail})"
+                coverage = str(corr.get("stock_news_coverage") or "").strip()
+                if coverage == "helper_unavailable":
+                    return "stock=none (fetch_error=helper_unavailable)"
             return f"{name}=none"
         parts: list[str] = []
         for row in rows[:2]:
@@ -640,14 +664,23 @@ def _news_correlation_line(audit: dict[str, Any]) -> str:
     fallback_reason = "stock_headlines_missing_using_macro_context"
     if coverage_status == "not_covered":
         fallback_reason = "stock_news_not_fetched_for_symbol_using_macro_context"
+    elif coverage_status == "helper_unavailable":
+        fallback_reason = "stock_news_helper_unavailable_using_macro_context"
+    elif coverage_status.startswith("empty:"):
+        fallback_reason = f"stock_news_{coverage_status[6:]}_using_macro_context"
     elif fallback_label:
         fallback_reason = fallback_label.replace("sector_specific_match_missing_", "")
+    stock_meta = corr.get("stock_news")
+    fetch_error = ""
+    if isinstance(stock_meta, dict):
+        fetch_error = str(stock_meta.get("fetch_error") or "").strip()
+    fetch_error_txt = f" · stock_fetch_error={fetch_error}" if fetch_error else ""
     return (
         f"Macro fallback relation: macro_driver={driver} · theme={theme_txt} · "
         f"affected_metric={metric} · direction={dir_label} · confidence={conf_txt} "
         f"({conf_band}; bands: >=0.75 high, 0.50-0.74 medium, <0.50 low) · "
         f"fallback_reason={fallback_reason} · stock_news_fetched_count={stock_news_fetched_count} "
-        f"· coverage={coverage_status}"
+        f"· coverage={coverage_status}{fetch_error_txt}"
         + (f" · fallback={fallback_label}" if fallback_label else "")
     )
 
@@ -1724,10 +1757,17 @@ def _apply_global_news_correlation(
         stock_news_meta = stock_news_by_symbol.get((symbol, exchange), {})
         stock_news_items = stock_news_meta.get("items")
         stock_news_items = stock_news_items if isinstance(stock_news_items, list) else []
-        if callable(fetch_stock_news_for_symbol):
-            coverage_status = "fetched" if (symbol, exchange) in stock_news_by_symbol else "not_covered"
-        else:
+        stock_fetch_error = str(stock_news_meta.get("error") or "").strip()
+        if not callable(fetch_stock_news_for_symbol):
             coverage_status = "helper_unavailable"
+        elif (symbol, exchange) not in stock_news_by_symbol:
+            coverage_status = "not_covered"
+        elif stock_news_items:
+            coverage_status = "fetched"
+        elif stock_fetch_error:
+            coverage_status = f"empty:{stock_fetch_error}"
+        else:
+            coverage_status = "empty:unknown"
         unavailable_reason = ""
         corr: dict[str, Any] = {}
         if callable(correlate_stock_news_with_macro):
@@ -1775,6 +1815,9 @@ def _apply_global_news_correlation(
         if fallback_label:
             fallback_count += 1
         driver_source = "stock" if stock_news_items and not fallback_label else "macro"
+        evidence = corr.get("evidence") if isinstance(corr.get("evidence"), dict) else {}
+        if stock_fetch_error and not stock_news_items:
+            evidence = {**evidence, "stock_fetch_error": stock_fetch_error}
         audit["news_correlation"] = {
             "driver": str(corr.get("driver") or "Global macro flow"),
             "affected_metric": _infer_news_affected_metric(audit),
@@ -1785,7 +1828,7 @@ def _apply_global_news_correlation(
                 if math.isnan(_safe_float(corr.get("confidence")))
                 else round(_safe_float(corr.get("confidence")), 4)
             ),
-            "evidence": corr.get("evidence") if isinstance(corr.get("evidence"), dict) else {},
+            "evidence": evidence,
             "fallback_label": fallback_label,
             "driver_source": driver_source,
             "stock_news_fetched_count": len(stock_news_items),

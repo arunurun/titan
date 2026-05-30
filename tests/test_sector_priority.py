@@ -362,6 +362,103 @@ def test_fetch_latest_global_news_dedupes_and_drops_stale(monkeypatch):
     assert items[0]["source"] == "Feed B"
 
 
+def test_fetch_stock_news_for_symbol_uses_alias_fallback(monkeypatch):
+    from sector_priority import fetch_stock_news_for_symbol
+
+    class _Query:
+        def select(self, _fields):
+            return self
+
+        def eq(self, _k, _v):
+            return self
+
+        def limit(self, _n):
+            return self
+
+        def execute(self):
+            return SimpleNamespace(data=[{"symbol": "HAL", "instrument_name": "Hindustan Aeronautics", "breeze_stock_code": "HAL"}])
+
+    class _Client:
+        def table(self, _name):
+            return _Query()
+
+    monkeypatch.setattr("sector_priority.create_client", lambda _u, _k: _Client())
+
+    def _fake_get(url, timeout_seconds=10.0):
+        if "Hindustan%20Aeronautics" in url:
+            return (
+                """<rss><channel><title>Google News</title>
+                <item><title>Hindustan Aeronautics wins order</title><link>https://x/hal</link>
+                <pubDate>Tue, 02 Jan 2026 09:00:00 GMT</pubDate><description>Order win</description></item>
+                </channel></rss>""",
+                None,
+            )
+        return "<rss><channel><title>Google News</title></channel></rss>", None
+
+    monkeypatch.setattr("sector_priority._http_get_text", _fake_get)
+    out = fetch_stock_news_for_symbol(
+        make_cfg(),
+        symbol="HAL",
+        exchange="NSE",
+        now_utc=datetime(2026, 1, 3, 0, 0, tzinfo=timezone.utc),
+    )
+    assert out["items"]
+    assert out["fallback_used"] is True
+    assert out["alias_used"] == "Hindustan Aeronautics"
+
+
+def test_correlate_stock_news_with_macro_prefers_stock_driver():
+    from sector_priority import correlate_stock_news_with_macro
+
+    snapshot = {
+        "sector_scores": {
+            "defence": {
+                "score": 0.12,
+                "confidence": 0.8,
+                "drivers_top": [
+                    {
+                        "title": "Defence demand rises globally",
+                        "source": "Reuters",
+                        "published_at": "2026-01-02T08:00:00+00:00",
+                        "contribution": 0.09,
+                    }
+                ],
+            }
+        }
+    }
+    stock_news_items = [
+        {
+            "title": "HAL signs major export contract",
+            "summary": "Contract win boosts growth visibility",
+            "source": "ET Markets",
+            "url": "https://x/hal-contract",
+            "published_at": "2026-01-02T10:00:00+00:00",
+        }
+    ]
+    out = correlate_stock_news_with_macro(
+        symbol="HAL",
+        sector_key="defence",
+        stock_news_items=stock_news_items,
+        snapshot=snapshot,
+    )
+    assert out["driver"].startswith("HAL signs major export contract")
+    assert out["fallback_label"] == ""
+    top = out["evidence"]["top_headlines"]
+    assert top["stock"]
+    assert set(["global", "local", "market", "stock"]).issubset(set(top.keys()))
+
+
+def test_stock_news_query_candidates_include_nse_suffix():
+    from sector_priority import _stock_news_query_candidates
+
+    queries = _stock_news_query_candidates(symbol="HAL", aliases=["Hindustan Aeronautics"])
+    assert "HAL" in queries
+    assert "HAL stock" in queries
+    assert "HAL NSE" in queries
+    assert "HAL share" in queries
+    assert "Hindustan Aeronautics" in queries
+
+
 def test_map_news_to_sector_scores_includes_data_centre():
     from sector_priority import map_news_to_sector_scores
 
