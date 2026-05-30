@@ -730,7 +730,7 @@ def _filter_stock_news_items(
     return kept, meta
 
 
-def _stock_news_query_candidates(*, symbol: str, aliases: list[str]) -> list[str]:
+def _stock_news_query_candidates(*, symbol: str, aliases: list[str]) -> tuple[list[str], list[str]]:
     sym = str(symbol or "").strip().upper()
     exclusions = _stock_news_query_exclusions()
     legal_name = ""
@@ -739,19 +739,66 @@ def _stock_news_query_candidates(*, symbol: str, aliases: list[str]) -> list[str
         if q and q.upper() != sym:
             legal_name = q
             break
-    out: list[str] = []
+    primary: list[str] = []
     if legal_name:
-        out.append(f'"{legal_name}" NSE when:7d {exclusions}')
-        out.append(f'"{legal_name}" when:7d bulk OR block OR stake OR results {exclusions}')
+        primary.append(f'"{legal_name}" NSE when:7d {exclusions}')
+        primary.append(f'"{legal_name}" when:7d bulk OR block OR stake OR results {exclusions}')
     if sym:
-        out.append(f"{sym} NSE when:7d {exclusions}")
-        out.append(f"{sym} stock when:7d {exclusions}")
+        primary.append(f"{sym} NSE when:7d {exclusions}")
+        primary.append(f"{sym} stock when:7d {exclusions}")
+    fallback: list[str] = []
+    if legal_name:
+        fallback.append(f'"{legal_name}" stock India')
+        fallback.append(f'"{legal_name}" NSE')
+    if sym:
+        fallback.append(f"{sym} stock India")
+        fallback.append(f"{sym} NSE")
     for raw in [sym, *aliases]:
         q = str(raw or "").strip()
-        if not q or q in out:
+        if not q:
             continue
-        out.append(q)
-    return out
+        if q not in primary and q not in fallback:
+            fallback.append(q)
+    return primary, fallback
+
+
+def _fetch_google_news_rss_items(
+    queries: list[str],
+    *,
+    timeout_seconds: float,
+    symbol: str = "",
+) -> tuple[list[dict[str, Any]], str, str, str]:
+    """Return (items, used_query, used_alias, last_error)."""
+    raw_items: list[dict[str, Any]] = []
+    used_query = ""
+    used_alias = ""
+    last_error = ""
+    last_attempted_query = ""
+    sym_upper = str(symbol or "").strip().upper()
+    for query in queries:
+        qtxt = str(query or "").strip()
+        if not qtxt:
+            continue
+        last_attempted_query = qtxt
+        q = urllib.parse.quote(qtxt)
+        feed_url = _STOCK_NEWS_SEARCH_URL.format(query=q)
+        raw, err = _http_get_text(feed_url, timeout_seconds=timeout_seconds)
+        if raw is None:
+            last_error = str(err or "request_error")
+            continue
+        parsed = _parse_rss_feed_items(feed_url, raw)
+        if parsed:
+            raw_items.extend(parsed)
+            if not used_query:
+                used_query = qtxt
+                if sym_upper and qtxt.strip().upper() != sym_upper:
+                    used_alias = qtxt
+            last_error = ""
+            break
+        last_error = "empty_feed"
+    if not used_query and last_attempted_query:
+        used_query = last_attempted_query
+    return raw_items, used_query, used_alias, last_error
 
 
 def _dedupe_recent_news_items(
@@ -978,6 +1025,27 @@ def fetch_nse_corporate_announcements(
     return {"items": [], "error": "nse_empty"}
 
 
+def _resolve_stock_news_fetch_error(
+    *,
+    final_items: list[dict[str, Any]],
+    pre_filter_count: int,
+    google_rss_found: bool,
+    last_error: str,
+    nse_errors: list[str],
+) -> str:
+    if final_items:
+        return ""
+    if pre_filter_count > 0:
+        return "all_filtered"
+    if google_rss_found:
+        return "all_filtered"
+    if last_error and last_error != "empty_feed":
+        return last_error
+    if nse_errors:
+        return nse_errors[0]
+    return last_error or "empty_feed"
+
+
 def fetch_stock_news_for_symbol(
     cfg: TitanConfig,
     *,
@@ -987,17 +1055,20 @@ def fetch_stock_news_for_symbol(
     now_utc: datetime | None = None,
 ) -> dict[str, Any]:
     now = now_utc or datetime.now(timezone.utc)
-    aliases = _instrument_alias_candidates(cfg, symbol=symbol, exchange=exchange)
-    queries = _stock_news_query_candidates(symbol=symbol, aliases=aliases)
+    sym = str(symbol or "").strip().upper()
+    aliases = _instrument_alias_candidates(cfg, symbol=sym, exchange=exchange)
+    primary_queries, fallback_queries = _stock_news_query_candidates(symbol=sym, aliases=aliases)
     max_items = _stock_news_fetch_limit()
     last_error = ""
     used_query = ""
     used_alias = ""
+    query_fallback_used = False
     nse_errors: list[str] = []
     raw_items: list[dict[str, Any]] = []
+    google_rss_found = False
     if _stock_news_enable_nse() and str(exchange or "").strip().upper() == "NSE":
         bulk_meta = fetch_nse_bulk_block_deals(
-            symbol,
+            sym,
             days=7,
             timeout_seconds=timeout_seconds,
             now_utc=now,
@@ -1005,9 +1076,9 @@ def fetch_stock_news_for_symbol(
         if bulk_meta.get("items"):
             raw_items.extend(bulk_meta["items"])
         elif bulk_meta.get("error"):
-            nse_errors.append(str(bulk_meta["error"]))
+            nse_errors.append(f"bulk_deals:{bulk_meta['error']}")
         ann_meta = fetch_nse_corporate_announcements(
-            symbol,
+            sym,
             days=30,
             timeout_seconds=timeout_seconds,
             now_utc=now,
@@ -1015,22 +1086,32 @@ def fetch_stock_news_for_symbol(
         if ann_meta.get("items"):
             raw_items.extend(ann_meta["items"])
         elif ann_meta.get("error"):
-            nse_errors.append(str(ann_meta["error"]))
-    for query in queries:
-        q = urllib.parse.quote(query)
-        raw, err = _http_get_text(_STOCK_NEWS_SEARCH_URL.format(query=q), timeout_seconds=timeout_seconds)
-        if raw is None:
-            last_error = str(err or "request_error")
-            continue
-        parsed = _parse_rss_feed_items(_STOCK_NEWS_SEARCH_URL.format(query=q), raw)
-        if parsed:
-            raw_items.extend(parsed)
-            if not used_query:
-                used_query = query
-                if query.strip().upper() != str(symbol).strip().upper():
-                    used_alias = query
-            break
-        last_error = "empty_feed"
+            nse_errors.append(f"announcements:{ann_meta['error']}")
+    google_items, used_query, used_alias, last_error = _fetch_google_news_rss_items(
+        primary_queries,
+        timeout_seconds=timeout_seconds,
+        symbol=sym,
+    )
+    if google_items:
+        google_rss_found = True
+        raw_items.extend(google_items)
+    elif fallback_queries:
+        fallback_items, fb_query, fb_alias, fb_error = _fetch_google_news_rss_items(
+            fallback_queries,
+            timeout_seconds=timeout_seconds,
+            symbol=sym,
+        )
+        if fallback_items:
+            google_rss_found = True
+            query_fallback_used = True
+            raw_items.extend(fallback_items)
+            if fb_query:
+                used_query = fb_query
+            if fb_alias:
+                used_alias = fb_alias
+            last_error = ""
+        elif fb_error:
+            last_error = fb_error
     normalized = _dedupe_recent_news_items(raw_items, now_utc=now, limit=max_items)
     filter_input: list[dict[str, Any]] = []
     for item in normalized:
@@ -1043,7 +1124,7 @@ def fetch_stock_news_for_symbol(
             }
         )
     filtered_items, filter_meta = _filter_stock_news_items(
-        symbol=symbol,
+        symbol=sym,
         aliases=aliases,
         items=filter_input,
     )
@@ -1063,22 +1144,27 @@ def fetch_stock_news_for_symbol(
                 "published_at": ts_out,
             }
         )
-    fetch_error = ""
-    if not final_items:
-        fetch_error = last_error or (nse_errors[0] if nse_errors else "empty_feed")
+    fetch_error = _resolve_stock_news_fetch_error(
+        final_items=final_items,
+        pre_filter_count=len(filter_input),
+        google_rss_found=google_rss_found,
+        last_error=last_error,
+        nse_errors=nse_errors,
+    )
     return {
-        "symbol": str(symbol).strip().upper(),
+        "symbol": sym,
         "exchange": str(exchange).strip().upper(),
         "items": final_items,
         "query_used": used_query,
         "alias_used": used_alias,
-        "fallback_used": bool(used_alias),
+        "fallback_used": bool(used_alias) or query_fallback_used,
         "error": fetch_error,
         "filtered_count": int(filter_meta.get("filtered_count") or 0),
         "rejection_samples": filter_meta.get("rejection_samples") or [],
         "relevance_top_score": filter_meta.get("relevance_top_score"),
         "nse_errors": nse_errors,
         "aliases": aliases,
+        "rss_pre_filter_count": len(filter_input),
     }
 
 

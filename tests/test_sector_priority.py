@@ -626,10 +626,120 @@ def test_correlate_stock_news_with_macro_prefers_stock_driver():
 def test_stock_news_query_candidates_include_nse_suffix():
     from sector_priority import _stock_news_query_candidates
 
-    queries = _stock_news_query_candidates(symbol="HAL", aliases=["Hindustan Aeronautics"])
-    assert any("Hindustan Aeronautics" in q and "when:7d" in q for q in queries)
-    assert any("HAL NSE when:7d" in q for q in queries)
-    assert all("-recommend" in q or q == "HAL" for q in queries if "when:7d" in q)
+    primary, fallback = _stock_news_query_candidates(symbol="HAL", aliases=["Hindustan Aeronautics"])
+    assert any("Hindustan Aeronautics" in q and "when:7d" in q for q in primary)
+    assert any("HAL NSE when:7d" in q for q in primary)
+    assert all("-recommend" in q for q in primary if "when:7d" in q)
+    assert any("HAL stock India" in q for q in fallback)
+    assert "HAL" in fallback
+
+
+def test_fetch_stock_news_reports_all_filtered_when_items_rejected(monkeypatch):
+    from sector_priority import fetch_stock_news_for_symbol
+
+    class _Query:
+        def select(self, _fields):
+            return self
+
+        def eq(self, _k, _v):
+            return self
+
+        def limit(self, _n):
+            return self
+
+        def execute(self):
+            return SimpleNamespace(data=[])
+
+    class _Client:
+        def table(self, _name):
+            return _Query()
+
+    monkeypatch.setattr("sector_priority.create_client", lambda _u, _k: _Client())
+    monkeypatch.setattr(
+        "sector_priority.fetch_nse_bulk_block_deals",
+        lambda *_args, **_kwargs: {"items": [], "error": "nse_cookie_failed"},
+    )
+    monkeypatch.setattr(
+        "sector_priority.fetch_nse_corporate_announcements",
+        lambda *_args, **_kwargs: {"items": [], "error": "nse_empty"},
+    )
+
+    rss = """<rss><channel><title>Google News</title>
+    <item><title>5 stocks to buy today including HAL</title><link>https://x/list</link>
+    <pubDate>Tue, 02 Jan 2026 09:00:00 GMT</pubDate><description>Broker picks</description></item>
+    </channel></rss>"""
+
+    monkeypatch.setattr(
+        "sector_priority._http_get_text",
+        lambda url, timeout_seconds=10.0: (rss, None),
+    )
+    out = fetch_stock_news_for_symbol(
+        make_cfg(),
+        symbol="HAL",
+        exchange="NSE",
+        now_utc=datetime(2026, 1, 3, 0, 0, tzinfo=timezone.utc),
+    )
+    assert out["items"] == []
+    assert out["error"] == "all_filtered"
+    assert out["rss_pre_filter_count"] >= 1
+    assert out["filtered_count"] >= 1
+
+
+def test_fetch_stock_news_uses_simple_fallback_when_primary_empty(monkeypatch):
+    from sector_priority import fetch_stock_news_for_symbol
+
+    class _Query:
+        def select(self, _fields):
+            return self
+
+        def eq(self, _k, _v):
+            return self
+
+        def limit(self, _n):
+            return self
+
+        def execute(self):
+            return SimpleNamespace(
+                data=[{"symbol": "HAL", "instrument_name": "Hindustan Aeronautics", "breeze_stock_code": "HAL"}]
+            )
+
+    class _Client:
+        def table(self, _name):
+            return _Query()
+
+    monkeypatch.setattr("sector_priority.create_client", lambda _u, _k: _Client())
+    monkeypatch.setattr(
+        "sector_priority.fetch_nse_bulk_block_deals",
+        lambda *_args, **_kwargs: {"items": [], "error": "nse_empty"},
+    )
+    monkeypatch.setattr(
+        "sector_priority.fetch_nse_corporate_announcements",
+        lambda *_args, **_kwargs: {"items": [], "error": "nse_empty"},
+    )
+
+    def _fake_get(url, timeout_seconds=10.0):
+        if "when%3A7d" in url or "when:7d" in url:
+            return "<rss><channel><title>Google News</title></channel></rss>", None
+        if "stock+India" in url or "Hindustan" in url:
+            return (
+                """<rss><channel><title>Google News</title>
+                <item><title>Hindustan Aeronautics wins export order</title><link>https://x/hal</link>
+                <pubDate>Tue, 02 Jan 2026 09:00:00 GMT</pubDate><description>Order win</description></item>
+                </channel></rss>""",
+                None,
+            )
+        return "<rss><channel><title>Google News</title></channel></rss>", None
+
+    monkeypatch.setattr("sector_priority._http_get_text", _fake_get)
+    out = fetch_stock_news_for_symbol(
+        make_cfg(),
+        symbol="HAL",
+        exchange="NSE",
+        now_utc=datetime(2026, 1, 3, 0, 0, tzinfo=timezone.utc),
+    )
+    assert out["items"]
+    assert out["fallback_used"] is True
+    assert "stock India" in out["query_used"] or "Hindustan" in out["query_used"]
 
 
 def test_map_news_to_sector_scores_includes_data_centre():
