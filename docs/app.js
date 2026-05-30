@@ -690,7 +690,7 @@ function buildRunTitanInputs() {
 }
 
 function buildReconcileInputs() {
-  const scope = String(el("reconcileScope")?.value || "all-stocks").trim().toLowerCase();
+  const scope = String(el("reconcileScope")?.value || "sector").trim().toLowerCase();
   if (!["all-stocks", "sector"].includes(scope)) {
     throw new Error("Reconcile scope is invalid.");
   }
@@ -1185,8 +1185,8 @@ function wireEvents() {
         await dispatchWorkflow(
           WORKFLOWS.runReconcile,
           inputs,
-          "Reconcile workflow dispatched. This trigger is report-only and sends compact EOD email/report output.",
-          "reconcile",
+          "Reconcile workflow dispatched on main. Report-only email when data is matured; expect insufficient-data messaging until Titan runs populate Supabase.",
+          "main",
         );
       } catch (e) {
         setStatus(`Reconcile dispatch failed:\n${e.message}`);
@@ -1291,6 +1291,7 @@ function wireEvents() {
 async function initStorage() {
   initProxyLine();
   await initSectorOptions("sectorId");
+  await initSectorOptions("reconcileSectorId");
   const runModeEl = el("runMode");
   if (runModeEl) {
     setSectorModeUi(runModeEl.value);
