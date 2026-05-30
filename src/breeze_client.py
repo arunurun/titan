@@ -37,6 +37,23 @@ class BreezeHistoricalTimeoutError(RuntimeError):
     """Raised when Breeze historical data call exceeds hard timeout."""
 
 
+def _reconcile_mode_enabled() -> bool:
+    return (os.environ.get("TITAN_RECONCILE_MODE") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _ensure_breeze_allowed(action: str) -> None:
+    if _reconcile_mode_enabled():
+        raise RuntimeError(
+            f"[ReconcileGuard] Breeze market fetch blocked in reconcile mode ({action}). "
+            "Use the dedicated Supabase-only reconcile runner."
+        )
+
+
 def _min_hist_call_interval_seconds() -> float:
     raw = os.environ.get("BREEZE_HIST_CALL_INTERVAL_SECONDS", "").strip()
     if not raw:
@@ -113,6 +130,7 @@ def _rate_limited_historical_call(breeze: BreezeConnect, **kwargs: Any) -> Any:
 
 def create_breeze_session(config: _BreezeCredentials) -> BreezeConnect:
     """Create a Breeze client and authenticate (reuse for multiple API calls in one run)."""
+    _ensure_breeze_allowed("create_breeze_session")
     breeze = BreezeConnect(api_key=config.breeze_api_key)
     try:
         breeze.generate_session(
@@ -208,6 +226,7 @@ def fetch_nifty_option_metrics(
     Total call/put open interest and a strike×OI frame for find_oi_walls (nearest expiry chain).
     Two requests: full call side and full put side (Breeze requires explicit right when expiry is set).
     """
+    _ensure_breeze_allowed("fetch_nifty_option_metrics")
     common = dict(
         stock_code="NIFTY",
         exchange_code="NFO",
@@ -322,6 +341,7 @@ def fetch_equity_data(
     Fetch cash OHLC (and volume) for an equity symbol on NSE or BSE.
     Retries up to `max_retries` times with exponential backoff on failure.
     """
+    _ensure_breeze_allowed("fetch_equity_data")
     breeze = breeze or create_breeze_session(config)
     sc_raw = stock_code.strip().upper()
     ex = exchange_code.strip().upper()
@@ -418,6 +438,7 @@ def fetch_nifty_data(
     Retries up to `max_retries` times with exponential backoff on failure.
     Raises RuntimeError if all attempts fail (caller may mark task BLOCKED).
     """
+    _ensure_breeze_allowed("fetch_nifty_data")
     breeze = breeze or create_breeze_session(config)
     return fetch_equity_data(
         config,

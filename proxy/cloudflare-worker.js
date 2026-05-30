@@ -13,6 +13,7 @@
 
 const ALLOWED_WORKFLOWS = new Set([
   "run_titan_now.yml",
+  "daily_post_market_reconcile.yml",
   "validate_breeze_token_manual.yml",
   "persist_breeze_token_manual.yml",
   "refresh_sector_rankings_weekly.yml",
@@ -578,6 +579,27 @@ function sanitizeBreezeTokenInput(raw) {
 function sanitizeDispatchPayload(workflow, inputs) {
   if (workflow === "run_titan_now.yml") {
     return sanitizeRunTitanInputs(inputs);
+  }
+  if (workflow === "daily_post_market_reconcile.yml") {
+    const scope = toStringInput(inputs?.scope).toLowerCase() || "all-stocks";
+    if (!["all-stocks", "sector"].includes(scope)) {
+      throw new Error("scope must be all-stocks or sector");
+    }
+    const out = {
+      scope,
+      sector_id: "",
+      workers: parseBoundedInt(inputs?.workers, "workers", { min: 1, max: 32 }),
+      backfill_days: parseBoundedInt(inputs?.backfill_days, "backfill_days", { min: 0, max: 365 }),
+      backfill_only: toStringInput(inputs?.backfill_only).toLowerCase() === "true" ? "true" : "false",
+    };
+    if (scope === "sector") {
+      const sectorId = toStringInput(inputs?.sector_id).toLowerCase();
+      if (!sectorId || !SECTOR_ID_RE.test(sectorId)) {
+        throw new Error("sector_id is required and must match [a-z0-9_]{1,64} when scope=sector");
+      }
+      out.sector_id = sectorId;
+    }
+    return out;
   }
   if (workflow === "refresh_sector_rankings_weekly.yml") {
     return sanitizeRefreshRankingsInputs(inputs);

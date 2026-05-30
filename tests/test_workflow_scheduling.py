@@ -29,3 +29,5 @@ def test_daily_post_market_reconcile_workflow_schedule_and_script() -> None:
     assert 'cron: "5 11 * * 1-5"' in text
     assert "Run post-market stock reconcile" in text
     assert "python scripts/run_post_market_reconcile.py $ARGS" in text
+    assert "inject_breeze_session_from_supabase.py" not in text
+    assert "BREEZE_API_KEY" not in text

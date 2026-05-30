@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -11,31 +9,17 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from config_loader import load_config
-from analysis_store import persist_reconcile_backfill
-
-
-def _run_live_reconcile(
-    *,
-    sector: str,
-    max_symbols: int | None,
-    workers: int | None,
-) -> int:
-    cmd = [sys.executable, "main.py", "--sector", sector, "--sector-digest"]
-    if max_symbols is not None:
-        cmd.extend(["--sector-max-symbols", str(max(1, int(max_symbols)))])
-    if workers is not None:
-        cmd.extend(["--sector-workers", str(max(1, int(workers)))])
-    env = dict(os.environ)
-    env["TITAN_ENABLE_ANALYSIS_STORE"] = env.get("TITAN_ENABLE_ANALYSIS_STORE", "1")
-    print(f"[reconcile] running: {' '.join(cmd)}")
-    proc = subprocess.run(cmd, cwd=ROOT, env=env, check=False)
-    return int(proc.returncode)
+from reconcile_runner import run_reconcile_report
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Run post-market stock-level reconcile and optional backfill persistence."
+    parser = argparse.ArgumentParser(description="Run Supabase-only post-market reconcile.")
+    parser.add_argument(
+        "--scope",
+        type=str,
+        choices=("all-stocks", "sector"),
+        default="all-stocks",
+        help="Reconcile scope. Default is all-stocks (all active sectors/universe).",
     )
     parser.add_argument("--sector", type=str, default="defence")
     parser.add_argument("--max-symbols", type=int, default=None)
@@ -49,34 +33,39 @@ def main() -> int:
     parser.add_argument(
         "--backfill-only",
         action="store_true",
-        help="Skip live sector run and only persist backfill reconcile summaries.",
+        help="Skip reconcile report generation and only persist backfill reconcile summaries.",
     )
     args = parser.parse_args()
 
+    all_stocks_scope = str(args.scope).strip().lower() == "all-stocks"
     sector = args.sector.strip().lower()
-    if not sector:
-        raise ValueError("sector must be a non-empty string")
+    if not all_stocks_scope and not sector:
+        raise ValueError("sector must be a non-empty string when --scope=sector")
 
-    if not args.backfill_only:
-        rc = _run_live_reconcile(
-            sector=sector,
-            max_symbols=args.max_symbols,
-            workers=args.workers,
-        )
-        if rc != 0:
-            return rc
-
-    if int(args.backfill_days or 0) > 0:
-        cfg = load_config()
-        out = persist_reconcile_backfill(
-            cfg,
-            sector=sector,
-            days=max(1, int(args.backfill_days)),
-        )
+    if args.max_symbols is not None:
         print(
-            "[reconcile] backfill persisted="
-            f"{out.get('persisted', 0)} days={out.get('days', 0)} sector={sector}"
+            "[reconcile] note: --max-symbols is ignored in Supabase-only reconcile mode "
+            "(report is based on stored table inputs)."
         )
+    if args.workers is not None:
+        print(
+            "[reconcile] note: --workers is ignored in Supabase-only reconcile mode "
+            "(no live market execution)."
+        )
+    if args.backfill_only:
+        run_reconcile_report(
+            sector=sector if not all_stocks_scope else None,
+            all_stocks=all_stocks_scope,
+            backfill_days=max(1, int(args.backfill_days or 1)),
+            generate_report=False,
+            email_subject_prefix="Titan V12.0 reconcile backfill",
+        )
+        return 0
+    run_reconcile_report(
+        sector=sector if not all_stocks_scope else None,
+        all_stocks=all_stocks_scope,
+        backfill_days=max(0, int(args.backfill_days or 0)),
+    )
     return 0
 
 

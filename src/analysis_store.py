@@ -943,14 +943,488 @@ def _safe_tape_extras(row: dict[str, Any]) -> dict[str, Any]:
     return x if isinstance(x, dict) else {}
 
 
+def _safe_json_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _safe_json_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _parse_news_direction(news_correlation: Any) -> str:
+    corr = _safe_json_dict(news_correlation)
+    direction = str(corr.get("direction") or "").strip().lower()
+    if direction in ("tailwind", "positive", "up", "bullish"):
+        return "up"
+    if direction in ("headwind", "negative", "down", "bearish"):
+        return "down"
+    return "neutral"
+
+
+def _symbol_row_key(*, sector: str, symbol: str, exchange: str) -> str:
+    sec = str(sector or "unknown").strip().lower() or "unknown"
+    sym = str(symbol or "").strip().upper()
+    exch = str(exchange or "NSE").strip().upper() or "NSE"
+    return f"{sec}|{sym}|{exch}"
+
+
+def _display_symbol(row: dict[str, Any]) -> str:
+    symbol = str(row.get("symbol") or "").strip().upper()
+    sector = str(row.get("sector") or "").strip().lower()
+    if not symbol:
+        return "unknown"
+    if sector:
+        return f"{symbol}({sector})"
+    return symbol
+
+
+def _rate_pct(num: int, den: int) -> float | None:
+    if den <= 0:
+        return None
+    return round((100.0 * num) / den, 1)
+
+
+def _classify_failure_reason(*, row: dict[str, Any], transition_row: dict[str, Any]) -> str:
+    if bool(transition_row.get("is_whipsaw_transition")):
+        return "whipsaw"
+    news_direction = str(row.get("news_direction") or "neutral").strip().lower()
+    if news_direction == "down":
+        return "news_shock"
+    stability = _safe_float(transition_row.get("transition_stability_score"))
+    if not math.isnan(stability) and stability < 40.0:
+        return "volatility_regime_mismatch"
+    return "technical_overfit"
+
+
+def _fetch_reconcile_table_inputs(
+    cfg: TitanConfig,
+    *,
+    sector: str | None = None,
+    all_stocks: bool = False,
+    as_of_trade_date: str | None = None,
+    lookback_days: int = 120,
+) -> dict[str, Any]:
+    client = create_client(cfg.supabase_url, cfg.supabase_key)
+    end_date = _parse_date(as_of_trade_date) or datetime.now(IST).date()
+    start_date = end_date - timedelta(days=max(20, int(lookback_days)))
+    out: dict[str, Any] = {
+        "sector": (str(sector or "").strip().lower() if not all_stocks else "all-stocks"),
+        "scope": "all-stocks" if all_stocks else "sector",
+        "as_of_trade_date": end_date.isoformat(),
+        "symbol_daily_features": [],
+        "stock_signal_transition_analytics": [],
+        "sector_daily_winners": [],
+        "sector_daily_rollup": [],
+        "global_news_snapshots": [],
+        "llm_digest_memory": [],
+    }
+    feature_select_candidates = [
+        "trade_date,symbol,exchange,action_signal,return_1d_pct,tape_extras,next_day_score,next_week_score",
+        "trade_date,symbol,exchange,action_signal,return_1d_pct,tape_extras",
+        "trade_date,symbol,exchange,action_signal,return_1d_pct",
+    ]
+    for feature_select in feature_select_candidates:
+        try:
+            features_res = (
+                client.table("symbol_daily_features")
+                .select(feature_select)
+                .gte("trade_date", start_date.isoformat())
+                .lte("trade_date", end_date.isoformat())
+                .order("trade_date", desc=True)
+            )
+            if not all_stocks:
+                features_res = features_res.eq("sector", str(sector or "").strip().lower())
+            features_res = features_res.execute()
+            out["symbol_daily_features"] = list(getattr(features_res, "data", None) or [])
+            break
+        except Exception as e:  # pragma: no cover
+            logger.warning(
+                "Reconcile fetch failed for symbol_daily_features %s (%s): %s",
+                sector,
+                feature_select,
+                e,
+            )
+    try:
+        transition_res = (
+            client.table("stock_signal_transition_analytics")
+            .select(
+                "trade_date,symbol,exchange,previous_signal,current_signal,transition_type,"
+                "transition_stability_score,is_whipsaw_transition,whipsaw_transition_count,"
+                "matured_1w_available,matured_1w_outcome,matured_1w_realized_return_pct,"
+                "matured_1m_available,matured_1m_outcome,matured_1m_realized_return_pct"
+            )
+            .eq("trailing_window_days", DEFAULT_TRANSITION_TRAILING_WINDOW_DAYS)
+            .gte("trade_date", start_date.isoformat())
+            .lte("trade_date", end_date.isoformat())
+            .order("trade_date", desc=True)
+        )
+        if not all_stocks:
+            transition_res = transition_res.eq("sector", str(sector or "").strip().lower())
+        transition_res = transition_res.execute()
+        out["stock_signal_transition_analytics"] = list(getattr(transition_res, "data", None) or [])
+    except Exception as e:  # pragma: no cover
+        logger.warning("Reconcile fetch failed for stock_signal_transition_analytics %s: %s", sector, e)
+    try:
+        winners_res = (
+            client.table("sector_daily_winners")
+            .select("as_of_date,symbol,exchange,winner_rank,rank_score,score_breakdown,source_meta")
+            .gte("as_of_date", start_date.isoformat())
+            .lte("as_of_date", end_date.isoformat())
+            .order("as_of_date", desc=True)
+            .order("winner_rank")
+        )
+        if not all_stocks:
+            winners_res = winners_res.eq("sector_key", str(sector or "").strip().lower())
+        winners_res = winners_res.execute()
+        out["sector_daily_winners"] = list(getattr(winners_res, "data", None) or [])
+    except Exception as e:  # pragma: no cover
+        logger.warning("Reconcile fetch failed for sector_daily_winners %s: %s", sector, e)
+    try:
+        rollup_res = (
+            client.table("sector_daily_rollup")
+            .select("trade_date,sector,symbol_count,avg_effective_intent_score,breadth_above_ema200_pct,pct_absorption_gt_1")
+            .gte("trade_date", start_date.isoformat())
+            .lte("trade_date", end_date.isoformat())
+            .order("trade_date", desc=True)
+        )
+        if not all_stocks:
+            rollup_res = rollup_res.eq("sector", str(sector or "").strip().lower())
+        rollup_res = rollup_res.execute()
+        out["sector_daily_rollup"] = list(getattr(rollup_res, "data", None) or [])
+    except Exception as e:  # pragma: no cover
+        logger.warning("Reconcile fetch failed for sector_daily_rollup %s: %s", sector, e)
+    try:
+        news_res = (
+            client.table("global_news_snapshots")
+            .select("refreshed_at,item_count,fetch_status,news_items,sector_scores")
+            .order("refreshed_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        out["global_news_snapshots"] = list(getattr(news_res, "data", None) or [])
+    except Exception as e:  # pragma: no cover
+        logger.warning("Reconcile fetch failed for global_news_snapshots: %s", e)
+    # Optional narrative context only; do not make reconcile dependent on this table.
+    try:
+        memory_res = (
+            client.table("llm_digest_memory")
+            .select("run_id,recorded_at,output_text,full_digest")
+            .order("recorded_at", desc=True)
+            .limit(1)
+        )
+        if not all_stocks:
+            memory_res = memory_res.eq("sector", str(sector or "").strip().lower())
+        memory_res = memory_res.execute()
+        out["llm_digest_memory"] = list(getattr(memory_res, "data", None) or [])
+    except Exception:  # pragma: no cover
+        out["llm_digest_memory"] = []
+    return out
+
+
 def build_stock_reconcile_snapshot(
     audits: Sequence[dict[str, Any]],
     *,
-    historical_rows_by_symbol: dict[str, list[dict[str, Any]]],
+    historical_rows_by_symbol: dict[str, list[dict[str, Any]]] | None = None,
+    table_inputs: dict[str, Any] | None = None,
+    as_of_trade_date: str | None = None,
 ) -> dict[str, Any]:
+    if table_inputs:
+        as_of = _parse_date(as_of_trade_date or table_inputs.get("as_of_trade_date")) or datetime.now(IST).date()
+        as_of_iso = as_of.isoformat()
+        features_all = [
+            row
+            for row in _safe_json_list(table_inputs.get("symbol_daily_features"))
+            if isinstance(row, dict)
+        ]
+        features_by_symbol: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in features_all:
+            td = _parse_date(row.get("trade_date"))
+            if td is None or td > as_of:
+                continue
+            symbol = str(row.get("symbol") or "").strip().upper()
+            if not symbol:
+                continue
+            features_by_symbol[symbol].append(row)
+        for symbol in list(features_by_symbol.keys()):
+            features_by_symbol[symbol].sort(
+                key=lambda row: _parse_date(row.get("trade_date")) or date.min,
+                reverse=True,
+            )
+
+        transitions_for_day = [
+            row
+            for row in _safe_json_list(table_inputs.get("stock_signal_transition_analytics"))
+            if isinstance(row, dict) and str(row.get("trade_date") or "") == as_of_iso
+        ]
+        transition_by_symbol: dict[str, dict[str, Any]] = {}
+        for row in transitions_for_day:
+            symbol = str(row.get("symbol") or "").strip().upper()
+            if symbol:
+                transition_by_symbol[symbol] = row
+
+        winners_for_day = [
+            row
+            for row in _safe_json_list(table_inputs.get("sector_daily_winners"))
+            if isinstance(row, dict) and str(row.get("as_of_date") or "") == as_of_iso
+        ]
+        winner_symbols = {
+            str(row.get("symbol") or "").strip().upper()
+            for row in winners_for_day
+            if str(row.get("symbol") or "").strip()
+        }
+
+        rollup_today = next(
+            (
+                row
+                for row in _safe_json_list(table_inputs.get("sector_daily_rollup"))
+                if isinstance(row, dict) and str(row.get("trade_date") or "") == as_of_iso
+            ),
+            {},
+        )
+        news_snapshot = next(
+            (
+                row
+                for row in _safe_json_list(table_inputs.get("global_news_snapshots"))
+                if isinstance(row, dict)
+            ),
+            {},
+        )
+
+        accuracy: dict[str, dict[str, dict[str, int]]] = defaultdict(
+            lambda: {"next_day": {"hit": 0, "total": 0}, "next_week": {"hit": 0, "total": 0}}
+        )
+        success_symbols: list[str] = []
+        failure_symbols: list[str] = []
+        failure_reason_counts: dict[str, int] = defaultdict(int)
+        transition_quality: dict[str, int] = defaultdict(int)
+        transition_outcome_1w: dict[str, int] = defaultdict(int)
+        transition_outcome_1m: dict[str, int] = defaultdict(int)
+        per_symbol: dict[str, dict[str, Any]] = {}
+        news_rows: list[dict[str, Any]] = []
+
+        whipsaw_total = 0
+        whipsaw_symbols = 0
+        stability_scores: list[float] = []
+        shortlist_total = 0
+        shortlist_1d_hit = 0
+        shortlist_5d_hit = 0
+        shortlist_5d_cov = 0
+        news_total = 0
+        news_aligned = 0
+
+        symbols_to_process = set(features_by_symbol.keys()) | {
+            str(audit.get("symbol") or "").strip().upper()
+            for audit in audits
+            if str(audit.get("symbol") or "").strip()
+        }
+        for symbol in sorted(symbols_to_process):
+            symbol_rows = features_by_symbol.get(symbol, [])
+            current = symbol_rows[0] if symbol_rows else {}
+            if str((current or {}).get("trade_date") or "") != as_of_iso and symbol_rows:
+                current = next(
+                    (row for row in symbol_rows if str(row.get("trade_date") or "") == as_of_iso),
+                    {},
+                )
+            previous = symbol_rows[1] if len(symbol_rows) >= 2 else {}
+            week_ref = symbol_rows[5] if len(symbol_rows) >= 6 else {}
+            current_tape = _safe_tape_extras(current)
+            previous_tape = _safe_tape_extras(previous)
+            week_tape = _safe_tape_extras(week_ref)
+
+            signal = _normalize_action_signal(
+                current.get("action_signal")
+                or current_tape.get("sell_signal")
+                or previous.get("action_signal")
+                or "hold"
+            )
+            pred_1d = _score_direction(previous_tape.get("next_day_score"))
+            realized_1d = _return_direction(current.get("return_1d_pct"))
+            hit_1d = _direction_hit(pred_1d, realized_1d)
+
+            pred_1w = _score_direction(week_tape.get("next_week_score"))
+            realized_1w = _return_direction(current_tape.get("return_5d_pct"))
+            hit_1w = _direction_hit(pred_1w, realized_1w)
+            if hit_1d is not None:
+                accuracy[signal]["next_day"]["total"] += 1
+                accuracy[signal]["next_day"]["hit"] += int(hit_1d)
+            if hit_1w is not None:
+                accuracy[signal]["next_week"]["total"] += 1
+                accuracy[signal]["next_week"]["hit"] += int(hit_1w)
+
+            tr = transition_by_symbol.get(symbol, {})
+            prev_signal = _normalize_action_signal(tr.get("previous_signal") or previous.get("action_signal"))
+            current_signal = _normalize_action_signal(tr.get("current_signal") or signal)
+            is_actual_transition = prev_signal != current_signal
+            transition_label = str(tr.get("transition_type") or f"{prev_signal}_to_{signal}")
+            tr_quality = str(tr.get("matured_1w_outcome") or "unknown").lower()
+            transition_quality[tr_quality] += 1
+            transition_outcome_1w[str(tr.get("matured_1w_outcome") or "unknown").lower()] += 1
+            transition_outcome_1m[str(tr.get("matured_1m_outcome") or "unknown").lower()] += 1
+
+            whipsaw_total += int(tr.get("whipsaw_transition_count") or 0)
+            if bool(tr.get("is_whipsaw_transition")):
+                whipsaw_symbols += 1
+            stability = _safe_float(tr.get("transition_stability_score"))
+            if not math.isnan(stability):
+                stability_scores.append(stability)
+
+            is_shortlist = symbol in winner_symbols
+            if is_shortlist:
+                shortlist_total += 1
+                ret_1d = _safe_float(current.get("return_1d_pct"))
+                ret_5d = _safe_float(current_tape.get("return_5d_pct"))
+                if not math.isnan(ret_1d) and ret_1d > 0:
+                    shortlist_1d_hit += 1
+                if not math.isnan(ret_5d):
+                    shortlist_5d_cov += 1
+                    if ret_5d > 0:
+                        shortlist_5d_hit += 1
+
+            news_correlation = current_tape.get("news_correlation")
+            news_dir = _parse_news_direction(news_correlation)
+            if news_dir != "neutral":
+                news_total += 1
+                if news_dir == realized_1d:
+                    news_aligned += 1
+            news_summary = _news_summary_from_audit({"news_correlation": news_correlation})
+            symbol_label = _display_symbol(
+                {
+                    "symbol": symbol,
+                    "sector": current.get("sector") or previous.get("sector"),
+                }
+            )
+            matured_1w_available = bool(tr.get("matured_1w_available"))
+            matured_1m_available = bool(tr.get("matured_1m_available"))
+            transition_evaluable = (
+                matured_1w_available
+                or matured_1m_available
+                or (hit_1d is not None)
+                or (hit_1w is not None)
+            )
+            transition_beneficial: bool | None
+            if transition_evaluable:
+                transition_beneficial = (
+                    tr_quality == "favorable"
+                    or (hit_1d is True and hit_1w in (True, None))
+                )
+            else:
+                transition_beneficial = None
+            transition_outcome_label = (
+                "beneficial"
+                if transition_beneficial is True
+                else ("not-beneficial" if transition_beneficial is False else "not_evaluable")
+            )
+            symbol_success = (hit_1d is True) or (hit_1w is True)
+            symbol_failure = (hit_1d is False) or (hit_1w is False)
+            failure_reason = (
+                _classify_failure_reason(row={"news_direction": news_dir}, transition_row=tr)
+                if symbol_failure
+                else ""
+            )
+            if symbol_success:
+                success_symbols.append(symbol_label)
+            if symbol_failure:
+                failure_symbols.append(symbol_label)
+                if failure_reason:
+                    failure_reason_counts[failure_reason] += 1
+
+            row = {
+                "symbol": symbol,
+                "sector": str(current.get("sector") or previous.get("sector") or "").strip().lower(),
+                "signal": signal,
+                "pred_next_day": pred_1d,
+                "realized_next_day": realized_1d,
+                "hit_next_day": hit_1d,
+                "pred_next_week": pred_1w,
+                "realized_next_week": realized_1w,
+                "hit_next_week": hit_1w,
+                "signal_transition": transition_label.replace("_to_", "->"),
+                "previous_signal": prev_signal,
+                "current_signal": current_signal,
+                "is_actual_transition": bool(is_actual_transition),
+                "transition_evaluable": bool(transition_evaluable),
+                "transition_quality": tr_quality,
+                "transition_beneficial": transition_beneficial,
+                "transition_outcome_label": transition_outcome_label,
+                "news_summary": news_summary,
+                "news_direction": news_dir,
+                "failure_reason": failure_reason,
+                "is_success": bool(symbol_success),
+                "is_failure": bool(symbol_failure),
+                "shortlist_member": is_shortlist,
+            }
+            per_symbol[symbol] = row
+            if news_summary != "news: n/a":
+                news_rows.append({"symbol": symbol, "signal": signal, "summary": news_summary})
+
+        coverage_1d = sum(v["next_day"]["total"] for v in accuracy.values())
+        coverage_1w = sum(v["next_week"]["total"] for v in accuracy.values())
+        whipsaw_rate = (100.0 * whipsaw_symbols / len(per_symbol)) if per_symbol else None
+        avg_stability = round(sum(stability_scores) / len(stability_scores), 2) if stability_scores else None
+        shortlist_1d_rate = (100.0 * shortlist_1d_hit / shortlist_total) if shortlist_total else None
+        shortlist_5d_rate = (100.0 * shortlist_5d_hit / shortlist_5d_cov) if shortlist_5d_cov else None
+        news_alignment_rate = (100.0 * news_aligned / news_total) if news_total else None
+        narrative_context = next(
+            (
+                str(row.get("output_text") or row.get("full_digest") or "").strip()
+                for row in _safe_json_list(table_inputs.get("llm_digest_memory"))
+                if isinstance(row, dict)
+            ),
+            "",
+        )
+        return sanitize_for_json(
+            {
+                "as_of_trade_date": as_of_iso,
+                "symbol_count": len(per_symbol),
+                "scope": str(table_inputs.get("scope") or "sector"),
+                "coverage_next_day": coverage_1d,
+                "coverage_next_week": coverage_1w,
+                "success_count": len(success_symbols),
+                "failure_count": len(failure_symbols),
+                "success_symbols": success_symbols[:30],
+                "failure_symbols": failure_symbols[:30],
+                "failure_reason_counts": {k: int(v) for k, v in failure_reason_counts.items()},
+                "accuracy_by_signal_horizon": {k: v for k, v in accuracy.items()},
+                "transition_quality": {k: int(v) for k, v in transition_quality.items()},
+                "transition_outcome_1w": {k: int(v) for k, v in transition_outcome_1w.items()},
+                "transition_outcome_1m": {k: int(v) for k, v in transition_outcome_1m.items()},
+                "whipsaw_transition_total": int(whipsaw_total),
+                "whipsaw_symbol_rate_pct": round(whipsaw_rate, 2) if whipsaw_rate is not None else None,
+                "avg_transition_stability_score": avg_stability,
+                "shortlist_efficacy": {
+                    "count": shortlist_total,
+                    "hit_1d": shortlist_1d_hit,
+                    "hit_rate_1d_pct": (round(shortlist_1d_rate, 2) if shortlist_1d_rate is not None else None),
+                    "coverage_5d": shortlist_5d_cov,
+                    "hit_5d": shortlist_5d_hit,
+                    "hit_rate_5d_pct": (round(shortlist_5d_rate, 2) if shortlist_5d_rate is not None else None),
+                },
+                "news_attribution_efficacy": {
+                    "evaluated_symbols": news_total,
+                    "aligned_symbols": news_aligned,
+                    "alignment_rate_pct": (
+                        round(news_alignment_rate, 2) if news_alignment_rate is not None else None
+                    ),
+                    "snapshot_status": str(news_snapshot.get("fetch_status") or "n/a"),
+                    "snapshot_refreshed_at": str(news_snapshot.get("refreshed_at") or ""),
+                    "sector_score": _safe_json_dict(news_snapshot.get("sector_scores")).get(
+                        str(table_inputs.get("sector") or "")
+                    ),
+                },
+                "regime_context": rollup_today if isinstance(rollup_today, dict) else {},
+                "news_attribution_summaries": news_rows[:20],
+                "narrative_context": narrative_context[:500],
+                "per_symbol": per_symbol,
+            }
+        )
+
+    historical_rows_by_symbol = historical_rows_by_symbol or {}
     accuracy: dict[str, dict[str, dict[str, int]]] = defaultdict(
         lambda: {"next_day": {"hit": 0, "total": 0}, "next_week": {"hit": 0, "total": 0}}
     )
+    success_symbols: list[str] = []
+    failure_symbols: list[str] = []
+    failure_reason_counts: dict[str, int] = defaultdict(int)
     transition_counts: dict[str, int] = defaultdict(int)
     per_symbol: dict[str, dict[str, Any]] = {}
     news_rows: list[dict[str, Any]] = []
@@ -989,10 +1463,40 @@ def build_stock_reconcile_snapshot(
         q = _transition_quality(prev_week, curr_week)
         transition_counts[q] += 1
         signal_transition = f"{prev_signal}->{signal}"
+        is_actual_transition = prev_signal != signal
         news_summary = _news_summary_from_audit(audit)
+        news_dir = _parse_news_direction(audit.get("news_correlation"))
+        transition_evaluable = (hit_1d is not None) or (hit_1w is not None)
+        transition_beneficial: bool | None
+        if transition_evaluable:
+            transition_beneficial = q in ("improving", "favorable")
+        else:
+            transition_beneficial = None
+        transition_outcome_label = (
+            "beneficial"
+            if transition_beneficial is True
+            else ("not-beneficial" if transition_beneficial is False else "not_evaluable")
+        )
+        symbol_success = (hit_1d is True) or (hit_1w is True)
+        symbol_failure = (hit_1d is False) or (hit_1w is False)
+        failure_reason = (
+            _classify_failure_reason(
+                row={"news_direction": news_dir},
+                transition_row={"is_whipsaw_transition": q == "deteriorating"},
+            )
+            if symbol_failure
+            else ""
+        )
+        if symbol_success:
+            success_symbols.append(symbol)
+        if symbol_failure:
+            failure_symbols.append(symbol)
+            if failure_reason:
+                failure_reason_counts[failure_reason] += 1
 
         row = {
             "symbol": symbol,
+            "sector": str(audit.get("sector") or "").strip().lower(),
             "signal": signal,
             "pred_next_day": pred_1d,
             "realized_next_day": realized_1d,
@@ -1001,8 +1505,18 @@ def build_stock_reconcile_snapshot(
             "realized_next_week": realized_1w,
             "hit_next_week": hit_1w,
             "signal_transition": signal_transition,
+            "previous_signal": prev_signal,
+            "current_signal": signal,
+            "is_actual_transition": bool(is_actual_transition),
+            "transition_evaluable": bool(transition_evaluable),
             "transition_quality": q,
+            "transition_beneficial": transition_beneficial,
+            "transition_outcome_label": transition_outcome_label,
             "news_summary": news_summary,
+            "news_direction": news_dir,
+            "failure_reason": failure_reason,
+            "is_success": bool(symbol_success),
+            "is_failure": bool(symbol_failure),
         }
         per_symbol[symbol] = row
         news_rows.append(
@@ -1020,8 +1534,14 @@ def build_stock_reconcile_snapshot(
     return sanitize_for_json(
         {
             "symbol_count": len(per_symbol),
+            "scope": "sector",
             "coverage_next_day": coverage_1d,
             "coverage_next_week": coverage_1w,
+            "success_count": len(success_symbols),
+            "failure_count": len(failure_symbols),
+            "success_symbols": success_symbols[:30],
+            "failure_symbols": failure_symbols[:30],
+            "failure_reason_counts": {k: int(v) for k, v in failure_reason_counts.items()},
             "accuracy_by_signal_horizon": acc_json,
             "transition_quality": transition_json,
             "news_attribution_summaries": news_rows[:20],
@@ -1063,57 +1583,217 @@ def _fetch_symbol_history_by_sector(
 
 
 def build_reconcile_digest_lines(summary: dict[str, Any]) -> list[str]:
-    lines = ["--- Stock-level reconcile ---"]
-    lines.append(
-        f"Coverage: symbols={int(summary.get('symbol_count') or 0)} | "
-        f"next-day={int(summary.get('coverage_next_day') or 0)} | "
-        f"next-week={int(summary.get('coverage_next_week') or 0)}"
+    def _symbols_text(symbols: list[str], *, max_symbols: int = 10) -> str:
+        if not symbols:
+            return "none"
+        uniq = sorted({str(symbol).strip() for symbol in symbols if str(symbol).strip()})
+        if not uniq:
+            return "none"
+        if len(uniq) <= max_symbols:
+            return ", ".join(uniq)
+        shown = ", ".join(uniq[:max_symbols])
+        return f"{shown} (+{len(uniq) - max_symbols} more)"
+
+    def _avg_return(rows: list[dict[str, Any]], key: str) -> float | None:
+        vals = [_safe_float(r.get(key)) for r in rows]
+        vals = [x for x in vals if not math.isnan(x)]
+        if not vals:
+            return None
+        return round(sum(vals) / len(vals), 2)
+
+    def _pct(n: int, d: int) -> str:
+        p = _rate_pct(n, d)
+        return "n/a" if p is None else f"{p:.1f}%"
+
+    lines = ["--- EOD Reconcile (Decision-first) ---"]
+    as_of = str(summary.get("as_of_trade_date") or "").strip()
+    if as_of:
+        lines.append(f"As-of trade date: {as_of}")
+    scope = str(summary.get("scope") or "sector")
+    symbol_count = int(summary.get("symbol_count") or 0)
+    coverage_next_day = int(summary.get("coverage_next_day") or 0)
+    coverage_next_week = int(summary.get("coverage_next_week") or 0)
+    no_matured_coverage = coverage_next_day <= 0 and coverage_next_week <= 0
+    news_eff = summary.get("news_attribution_efficacy")
+    news_eff = news_eff if isinstance(news_eff, dict) else {}
+    confidence = news_eff.get("alignment_rate_pct")
+    confidence_txt = "n/a" if confidence is None else f"{confidence}%"
+    cov_1d_txt = str(coverage_next_day) if coverage_next_day > 0 else "insufficient matured data"
+    cov_1w_txt = str(coverage_next_week) if coverage_next_week > 0 else "insufficient matured data"
+    lines.extend(
+        [
+            "",
+            "A) Coverage and confidence",
+            f"Scope: {scope} | universe symbols: {symbol_count}",
+            f"Evaluated: next-day {cov_1d_txt} | next-week {cov_1w_txt} | news-correlation confidence: {confidence_txt}",
+        ]
     )
-    acc = summary.get("accuracy_by_signal_horizon")
-    if isinstance(acc, dict):
-        for signal in ("buy", "hold", "trim", "exit-risk"):
-            row = acc.get(signal) if isinstance(acc.get(signal), dict) else {}
-            d1 = row.get("next_day") if isinstance(row, dict) else {}
-            d7 = row.get("next_week") if isinstance(row, dict) else {}
-            d1_hit = int((d1 or {}).get("hit") or 0)
-            d1_total = int((d1 or {}).get("total") or 0)
-            d7_hit = int((d7 or {}).get("hit") or 0)
-            d7_total = int((d7 or {}).get("total") or 0)
-            d1_pct = round((100.0 * d1_hit / d1_total), 1) if d1_total else None
-            d7_pct = round((100.0 * d7_hit / d7_total), 1) if d7_total else None
+
+    per_symbol = summary.get("per_symbol")
+    per_symbol = per_symbol if isinstance(per_symbol, dict) else {}
+    rows = [r for r in per_symbol.values() if isinstance(r, dict)]
+    success_rows = [r for r in rows if bool(r.get("is_success"))]
+    failure_rows = [r for r in rows if bool(r.get("is_failure"))]
+
+    lines.extend(
+        [
+            "",
+            "B) Success summary",
+            (
+                f"Count: {len(success_rows)} ({_pct(len(success_rows), len(rows))}) | avg 1D return: {_avg_return(success_rows, 'realized_next_day')} | avg 1W return: {_avg_return(success_rows, 'realized_next_week')}"
+                if not no_matured_coverage
+                else f"Count: {len(success_rows)} (insufficient matured data) | avg 1D return: n/a | avg 1W return: n/a"
+            ),
+            (
+                "Top symbols: " + _symbols_text([_display_symbol(r) for r in success_rows])
+                if not no_matured_coverage
+                else f"Top symbols: none (0 evaluable symbols out of {len(rows)})"
+            ),
+        ]
+    )
+
+    reason_counts: dict[str, int] = defaultdict(int)
+    news_headwind_symbols: list[str] = []
+    for r in failure_rows:
+        reason = str(r.get("failure_reason") or "technical_overfit").strip().lower()
+        reason_counts[reason] += 1
+        if str(r.get("news_direction") or "neutral").strip().lower() == "down":
+            news_headwind_symbols.append(_display_symbol(r))
+    lines.extend(
+        [
+            "",
+            "C) Failure summary",
+            (
+                f"Count: {len(failure_rows)} ({_pct(len(failure_rows), len(rows))}) | avg 1D return: {_avg_return(failure_rows, 'realized_next_day')} | avg 1W return: {_avg_return(failure_rows, 'realized_next_week')}"
+                if not no_matured_coverage
+                else f"Count: {len(failure_rows)} (insufficient matured data) | avg 1D return: n/a | avg 1W return: n/a"
+            ),
+            (
+                "Top symbols: " + _symbols_text([_display_symbol(r) for r in failure_rows])
+                if not no_matured_coverage
+                else f"Top symbols: none (0 evaluable symbols out of {len(rows)})"
+            ),
+            (
+                "Failure reasons: "
+                + (
+                    ", ".join(
+                        f"{k}={v}" for k, v in sorted(reason_counts.items(), key=lambda x: (-x[1], x[0]))
+                    )
+                    if reason_counts
+                    else "none"
+                )
+                if not no_matured_coverage
+                else "Failure reasons: insufficient matured data"
+            ),
+            (
+                "News headwind evidence: " + _symbols_text(news_headwind_symbols)
+                if not no_matured_coverage
+                else "News headwind evidence: insufficient matured data"
+            ),
+        ]
+    )
+
+    transition_matrix: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {"beneficial": 0, "not_beneficial": 0, "not_evaluable": 0, "symbols": []}
+    )
+    for r in rows:
+        previous_signal = _normalize_action_signal(r.get("previous_signal"))
+        current_signal = _normalize_action_signal(r.get("current_signal") or r.get("signal"))
+        if previous_signal == current_signal:
+            continue
+        label = str(r.get("signal_transition") or "unknown->unknown").strip().upper()
+        outcome_label = str(r.get("transition_outcome_label") or "").strip().lower().replace("-", "_")
+        row = transition_matrix[label]
+        if outcome_label == "beneficial":
+            row["beneficial"] += 1
+        elif outcome_label == "not_beneficial":
+            row["not_beneficial"] += 1
+        else:
+            row["not_evaluable"] += 1
+        row["symbols"].append(_display_symbol(r))
+
+    lines.extend(["", "D) Signal transition matrix"])
+    if transition_matrix:
+        for tr_label, tr_row in sorted(
+            transition_matrix.items(),
+            key=lambda kv: -(
+                int(kv[1]["beneficial"])
+                + int(kv[1]["not_beneficial"])
+                + int(kv[1]["not_evaluable"])
+            ),
+        )[:8]:
+            total_evaluable = int(tr_row["beneficial"]) + int(tr_row["not_beneficial"])
+            not_evaluable = int(tr_row["not_evaluable"])
+            if total_evaluable <= 0:
+                lines.append(
+                    f"{tr_label}: insufficient matured data | not-evaluable {not_evaluable} | symbols: {_symbols_text(tr_row['symbols'], max_symbols=5)}"
+                )
+            else:
+                lines.append(
+                    f"{tr_label}: beneficial {tr_row['beneficial']} ({_pct(int(tr_row['beneficial']), total_evaluable)}) | not-beneficial {tr_row['not_beneficial']} ({_pct(int(tr_row['not_beneficial']), total_evaluable)}) | not-evaluable {not_evaluable} | symbols: {_symbols_text(tr_row['symbols'])}"
+                )
+    else:
+        lines.append("No transition rows available.")
+
+    lines.extend(["", "E) Key transition examples"])
+    evaluable_rows = [
+        r
+        for r in rows
+        if _normalize_action_signal(r.get("previous_signal")) != _normalize_action_signal(r.get("current_signal") or r.get("signal"))
+        and str(r.get("transition_outcome_label") or "").strip().lower().replace("-", "_") != "not_evaluable"
+    ]
+    example_rows = sorted(
+        evaluable_rows,
+        key=lambda r: (
+            0 if bool(r.get("transition_beneficial")) else 1,
+            str(r.get("failure_reason") or ""),
+        ),
+    )[:5]
+    if example_rows:
+        for r in example_rows:
             lines.append(
-                f"{signal}: 1D {d1_hit}/{d1_total} ({d1_pct if d1_pct is not None else 'n/a'}%) | "
-                f"1W {d7_hit}/{d7_total} ({d7_pct if d7_pct is not None else 'n/a'}%)"
+                f"{_display_symbol(r)} {str(r.get('signal_transition') or 'unknown->unknown').upper()} | {str(r.get('transition_outcome_label') or 'n/a')} | why: {str(r.get('failure_reason') or 'model_aligned')} | {str(r.get('news_summary') or 'news: n/a')}"
             )
-    tq = summary.get("transition_quality")
-    if isinstance(tq, dict):
-        lines.append(
-            "Transition quality: "
-            f"improving={int(tq.get('improving') or 0)}, "
-            f"stable={int(tq.get('stable') or 0)}, "
-            f"deteriorating={int(tq.get('deteriorating') or 0)}"
-        )
-    news = summary.get("news_attribution_summaries")
-    if isinstance(news, list) and news:
-        lines.append("News attribution highlights:")
-        for row in news[:8]:
-            if not isinstance(row, dict):
-                continue
-            lines.append(
-                f"{str(row.get('symbol') or '').upper()} [{str(row.get('signal') or 'hold').lower()}] "
-                f"{str(row.get('summary') or 'news: n/a')}"
-            )
+    else:
+        lines.append("No evaluable transition examples (insufficient matured data).")
+
+    flags: list[str] = []
+    total_failures = len(failure_rows)
+    if total_failures > 0:
+        for reason_name in ("technical_overfit", "news_shock", "volatility_regime_mismatch", "whipsaw"):
+            cnt = int(reason_counts.get(reason_name) or 0)
+            pct = _rate_pct(cnt, total_failures)
+            if pct is not None and pct >= 20.0:
+                flags.append(f"{reason_name} elevated ({cnt}/{total_failures})")
+    if news_headwind_symbols:
+        flags.append(f"news headwind linked failures ({len(news_headwind_symbols)})")
+    lines.extend(["", "F) Actionable model-improvement flags", "; ".join(flags) if flags else "No dominant risk flag."])
     return lines
 
 
 def enrich_audits_with_stock_reconcile(
     cfg: TitanConfig,
     *,
-    sector: str,
+    sector: str | None,
+    all_stocks: bool = False,
     audits: Sequence[dict[str, Any]],
 ) -> dict[str, Any]:
-    history = _fetch_symbol_history_by_sector(cfg, sector=sector)
-    summary = build_stock_reconcile_snapshot(audits, historical_rows_by_symbol=history)
+    table_inputs = _fetch_reconcile_table_inputs(
+        cfg,
+        sector=sector,
+        all_stocks=all_stocks,
+        lookback_days=120,
+    )
+    summary = build_stock_reconcile_snapshot(
+        audits,
+        historical_rows_by_symbol=None,
+        table_inputs=table_inputs,
+        as_of_trade_date=table_inputs.get("as_of_trade_date"),
+    )
+    # Backward-compatible fallback for environments without the new structured tables.
+    if int(summary.get("symbol_count") or 0) <= 0 and not all_stocks and sector:
+        history = _fetch_symbol_history_by_sector(cfg, sector=str(sector))
+        summary = build_stock_reconcile_snapshot(audits, historical_rows_by_symbol=history)
     per_symbol = summary.get("per_symbol")
     if not isinstance(per_symbol, dict):
         return summary
@@ -1135,63 +1815,43 @@ def enrich_audits_with_stock_reconcile(
 def persist_reconcile_backfill(
     cfg: TitanConfig,
     *,
-    sector: str,
+    sector: str | None,
+    all_stocks: bool = False,
     days: int,
 ) -> dict[str, Any]:
     if days <= 0:
         return {"persisted": 0, "days": 0}
     client = create_client(cfg.supabase_url, cfg.supabase_key)
-    try:
-        rows_res = (
-            client.table("symbol_daily_features")
-            .select("trade_date,symbol,sector,action_signal,return_1d_pct,tape_extras")
-            .eq("sector", sector)
-            .order("trade_date", desc=True)
-            .limit(max(60, days * 20))
-            .execute()
-        )
-    except Exception as e:  # pragma: no cover
-        logger.warning("Reconcile backfill fetch failed: %s", e)
-        return {"persisted": 0, "days": days, "reason": "fetch_failed"}
-    rows = [r for r in list(getattr(rows_res, "data", None) or []) if isinstance(r, dict)]
-    if not rows:
-        return {"persisted": 0, "days": days, "reason": "no_rows"}
-    by_date: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    by_symbol: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in rows:
-        td = str(row.get("trade_date") or "").strip()
-        sym = str(row.get("symbol") or "").strip().upper()
-        if not td or not sym:
-            continue
-        by_date[td].append(row)
-        by_symbol[sym].append(row)
-    trade_dates = sorted(by_date.keys(), reverse=True)[:days]
+    table_inputs = _fetch_reconcile_table_inputs(
+        cfg,
+        sector=sector,
+        all_stocks=all_stocks,
+        lookback_days=max(120, int(days) + 15),
+    )
+    features = [
+        row
+        for row in _safe_json_list(table_inputs.get("symbol_daily_features"))
+        if isinstance(row, dict) and str(row.get("trade_date") or "").strip()
+    ]
+    trade_dates = sorted({str(row.get("trade_date")) for row in features}, reverse=True)[:days]
+    if not trade_dates:
+        return {"persisted": 0, "days": 0, "reason": "no_trade_dates"}
     persisted = 0
+    samples: list[dict[str, Any]] = []
     for td in trade_dates:
-        audits: list[dict[str, Any]] = []
-        hist: dict[str, list[dict[str, Any]]] = {}
-        for row in by_date.get(td, []):
-            sym = str(row.get("symbol") or "").strip().upper()
-            tape = _safe_tape_extras(row)
-            audits.append(
-                {
-                    "symbol": sym,
-                    "action_signal": row.get("action_signal"),
-                    "sell_signal": tape.get("sell_signal"),
-                    "next_week_score": tape.get("next_week_score"),
-                    "return_1d_pct": row.get("return_1d_pct"),
-                    "return_5d_pct": tape.get("return_5d_pct"),
-                    "news_correlation": tape.get("news_correlation"),
-                }
-            )
-            hist[sym] = [x for x in by_symbol.get(sym, []) if str(x.get("trade_date")) < td]
-        summary = build_stock_reconcile_snapshot(audits, historical_rows_by_symbol=hist)
+        summary = build_stock_reconcile_snapshot(
+            [],
+            historical_rows_by_symbol=None,
+            table_inputs=table_inputs,
+            as_of_trade_date=td,
+        )
         lines = build_reconcile_digest_lines(summary)
-        run_id = f"reconcile-backfill-{sector}-{td}"
+        scope_label = "all-stocks" if all_stocks else str(sector or "unknown")
+        run_id = f"reconcile-backfill-{scope_label}-{td}"
         payload = sanitize_for_json(
             {
                 "run_id": run_id,
-                "sector": sector,
+                "sector": (str(sector or "all-stocks")),
                 "prompt_facts": {"trade_date": td, "reconcile_summary": summary},
                 "output_text": "\n".join(lines),
                 "full_digest": "\n".join(lines),
@@ -1203,9 +1863,17 @@ def persist_reconcile_backfill(
         try:
             client.table("llm_digest_memory").upsert(payload, on_conflict="run_id").execute()
             persisted += 1
+            if len(samples) < 2:
+                samples.append(
+                    {
+                        "trade_date": td,
+                        "line_count": len(lines),
+                        "digest_preview": "\n".join(lines[:20]),
+                    }
+                )
         except Exception as e:  # pragma: no cover
-            logger.warning("Reconcile backfill upsert failed for %s/%s: %s", sector, td, e)
-    return {"persisted": persisted, "days": len(trade_dates)}
+            logger.warning("Reconcile backfill upsert failed for %s/%s: %s", scope_label, td, e)
+    return {"persisted": persisted, "days": len(trade_dates), "samples": samples}
 
 
 def persist_llm_digest_memory(

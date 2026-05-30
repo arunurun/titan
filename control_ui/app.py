@@ -180,6 +180,28 @@ TEMPLATE = """
     </div>
 
     <div class="card">
+      <h3>Run Reconcile Report (Supabase-only)</h3>
+      <form method="post" action="/run-reconcile">
+        <label>Reconcile scope</label>
+        <select name="reconcile_scope">
+          <option value="all-stocks" {% if reconcile_scope == "all-stocks" %}selected{% endif %}>All stocks</option>
+          <option value="sector" {% if reconcile_scope == "sector" %}selected{% endif %}>Single sector</option>
+        </select>
+        <label>Sector ID (when scope = sector)</label>
+        <select name="reconcile_sector_id">
+          {% for sid in sectors %}
+            <option value="{{ sid }}" {% if reconcile_selected_sector == sid %}selected{% endif %}>{{ sid }}</option>
+          {% endfor %}
+        </select>
+        <label>Backfill days (optional)</label>
+        <input name="reconcile_backfill_days" value="{{ reconcile_backfill_days or '0' }}" />
+        <label><input type="checkbox" name="reconcile_backfill_only" {% if reconcile_backfill_only %}checked{% endif %} /> Backfill only (skip report generation)</label>
+        <button type="submit">Run Reconcile</button>
+      </form>
+      <p class="hint">Uses Supabase analytics tables only. Breeze/market fetch is blocked in reconcile mode.</p>
+    </div>
+
+    <div class="card">
       <h3>Validate Breeze Token (from Supabase session_config)</h3>
       <form method="post" action="/validate-token">
         <button type="submit">Validate Token</button>
@@ -322,6 +344,36 @@ def _run_titan_now(
     return proc.returncode, output.strip()
 
 
+def _run_reconcile_now(
+    scope: str,
+    sector_id: str,
+    backfill_days: str,
+    backfill_only: bool,
+) -> tuple[int, str]:
+    scope_norm = (scope or "all-stocks").strip().lower()
+    if scope_norm not in ("all-stocks", "sector"):
+        scope_norm = "all-stocks"
+    cmd = [sys.executable, "scripts/run_post_market_reconcile.py", "--scope", scope_norm]
+    if scope_norm == "sector":
+        sid = (sector_id or "").strip() or "defence"
+        cmd.extend(["--sector", sid])
+    backfill_days_raw = (backfill_days or "").strip()
+    if backfill_days_raw:
+        cmd.extend(["--backfill-days", backfill_days_raw])
+    if backfill_only:
+        cmd.append("--backfill-only")
+    proc = subprocess.run(
+        cmd,
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=1800,
+        env=dict(os.environ),
+    )
+    output = (proc.stdout or "") + ("\n" if proc.stdout and proc.stderr else "") + (proc.stderr or "")
+    return proc.returncode, output.strip()
+
+
 def _sector_choices() -> list[str]:
     try:
         sectors = [
@@ -367,6 +419,14 @@ def _render_page(**kwargs):
     if selected_sector not in sectors:
         selected_sector = sectors[0] if sectors else "defence"
     run_mode = str(kwargs.pop("run_mode", None) or "sector")
+    reconcile_scope = str(kwargs.pop("reconcile_scope", None) or "all-stocks")
+    if reconcile_scope not in ("all-stocks", "sector"):
+        reconcile_scope = "all-stocks"
+    reconcile_selected_sector = str(kwargs.pop("reconcile_selected_sector", None) or "defence")
+    if reconcile_selected_sector not in sectors:
+        reconcile_selected_sector = sectors[0] if sectors else "defence"
+    reconcile_backfill_days = str(kwargs.pop("reconcile_backfill_days", None) or "0")
+    reconcile_backfill_only = bool(kwargs.pop("reconcile_backfill_only", None) or False)
     portfolio_pdf_path = str(kwargs.pop("portfolio_pdf_path", None) or "")
     portfolio_holdings_text = str(kwargs.pop("portfolio_holdings_text", None) or "")
     titan_scope = str(kwargs.pop("titan_scope", None) or "priority")
@@ -378,6 +438,10 @@ def _render_page(**kwargs):
         sectors=sectors,
         selected_sector=selected_sector,
         run_mode=run_mode,
+        reconcile_scope=reconcile_scope,
+        reconcile_selected_sector=reconcile_selected_sector,
+        reconcile_backfill_days=reconcile_backfill_days,
+        reconcile_backfill_only=reconcile_backfill_only,
         titan_scope=titan_scope,
         breeze_login_url=breeze_login_url,
         portfolio_pdf_path=portfolio_pdf_path,
@@ -423,6 +487,39 @@ def run_analysis():
             run_mode=mode,
             selected_sector=sector_id,
             titan_scope=titan_scope,
+            breeze_login_url=_safe_breeze_login_url(),
+        )
+
+
+@app.post("/run-reconcile")
+def run_reconcile():
+    load_dotenv(ROOT / ".env", override=False)
+    scope = request.form.get("reconcile_scope", "all-stocks").strip()
+    sector_id = request.form.get("reconcile_sector_id", "defence").strip()
+    backfill_days = request.form.get("reconcile_backfill_days", "0").strip()
+    backfill_only = request.form.get("reconcile_backfill_only") == "on"
+    try:
+        code, output = _run_reconcile_now(scope, sector_id, backfill_days, backfill_only)
+        level = "ok" if code == 0 else "err"
+        msg = f"Reconcile finished with exit code {code}."
+        return _render_page(
+            message=msg,
+            level=level,
+            run_output=output,
+            reconcile_scope=scope,
+            reconcile_selected_sector=sector_id,
+            reconcile_backfill_days=backfill_days or "0",
+            reconcile_backfill_only=backfill_only,
+            breeze_login_url=_safe_breeze_login_url(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _render_page(
+            message=f"Reconcile failed: {exc}",
+            level="err",
+            reconcile_scope=scope,
+            reconcile_selected_sector=sector_id,
+            reconcile_backfill_days=backfill_days or "0",
+            reconcile_backfill_only=backfill_only,
             breeze_login_url=_safe_breeze_login_url(),
         )
 

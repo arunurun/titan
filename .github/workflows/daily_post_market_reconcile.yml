@@ -3,10 +3,14 @@ name: Daily post-market reconcile
 on:
   workflow_dispatch:
     inputs:
-      sector_id:
-        description: "Sector id to reconcile (e.g. defence)"
+      scope:
+        description: "Reconcile scope: all-stocks or sector"
         required: false
-        default: "defence"
+        default: "all-stocks"
+      sector_id:
+        description: "Sector id when scope=sector (e.g. defence)"
+        required: false
+        default: ""
       max_symbols:
         description: "Optional cap for symbols"
         required: false
@@ -48,25 +52,15 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Load Breeze token from Supabase
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python scripts/inject_breeze_session_from_supabase.py
-
       - name: Run post-market stock reconcile
         env:
           GITHUB_RUN_ID: ${{ github.run_id }}
           GITHUB_RUN_NUMBER: ${{ github.run_number }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          BREEZE_API_KEY: ${{ secrets.BREEZE_API_KEY }}
-          BREEZE_SECRET: ${{ secrets.BREEZE_SECRET }}
           TITAN_ENABLE_ANALYSIS_STORE: "1"
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
-          GEMINI_MIN_CALL_INTERVAL_SECONDS: "45"
-          GEMINI_SECTOR_DIGEST_FAIL_OPEN: "true"
+          TITAN_RECONCILE_MODE: "1"
+          TITAN_RECONCILE_REPORT_ONLY: "1"
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
@@ -75,11 +69,18 @@ jobs:
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           SMTP_USE_TLS: ${{ secrets.SMTP_USE_TLS }}
         run: |
-          SECTOR_ID="${{ inputs.sector_id }}"
-          if [ -z "$SECTOR_ID" ]; then
-            SECTOR_ID="defence"
+          SCOPE="${{ inputs.scope }}"
+          if [ -z "$SCOPE" ]; then
+            SCOPE="all-stocks"
           fi
-          ARGS="--sector $SECTOR_ID"
+          ARGS="--scope $SCOPE"
+          if [ "$SCOPE" = "sector" ]; then
+            SECTOR_ID="${{ inputs.sector_id }}"
+            if [ -z "$SECTOR_ID" ]; then
+              SECTOR_ID="defence"
+            fi
+            ARGS="$ARGS --sector $SECTOR_ID"
+          fi
           if [ -n "${{ inputs.max_symbols }}" ]; then
             ARGS="$ARGS --max-symbols ${{ inputs.max_symbols }}"
           fi

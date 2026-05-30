@@ -56,3 +56,66 @@ def test_load_config_missing_raises(monkeypatch, tmp_path):
     assert not missing.exists()
     with pytest.raises(ValueError, match="Missing or empty required environment variable"):
         load_config(missing)
+
+
+def test_load_config_reconcile_mode_skips_breeze_requirements(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "GEMINI_API_KEY=g\nSUPABASE_URL=https://x.supabase.co\nSUPABASE_KEY=k\n",
+        encoding="utf-8",
+    )
+    for k in list(os.environ.keys()):
+        if k.startswith("BREEZE"):
+            monkeypatch.delenv(k, raising=False)
+        if k.startswith("GEMINI"):
+            monkeypatch.delenv(k, raising=False)
+    cfg = load_config(env_file, require_breeze=False)
+    assert cfg.breeze_api_key == ""
+    assert cfg.breeze_secret == ""
+    assert cfg.breeze_session_token == ""
+    assert cfg.gemini_api_keys == ("g",)
+    assert cfg.supabase_key == "k"
+
+
+def test_load_config_non_reconcile_still_requires_breeze(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "GEMINI_API_KEY=g\nSUPABASE_URL=https://x.supabase.co\nSUPABASE_KEY=k\n",
+        encoding="utf-8",
+    )
+    for k in list(os.environ.keys()):
+        if k.startswith("BREEZE"):
+            monkeypatch.delenv(k, raising=False)
+    with pytest.raises(ValueError, match="BREEZE_API_KEY"):
+        load_config(env_file)
+
+
+def test_load_config_reconcile_mode_skips_gemini_requirements(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "SUPABASE_URL=https://x.supabase.co\nSUPABASE_KEY=k\n",
+        encoding="utf-8",
+    )
+    for k in list(os.environ.keys()):
+        if k.startswith("BREEZE") or k.startswith("GEMINI"):
+            monkeypatch.delenv(k, raising=False)
+    cfg = load_config(env_file, require_breeze=False, require_gemini=False)
+    assert cfg.breeze_api_key == ""
+    assert cfg.breeze_secret == ""
+    assert cfg.breeze_session_token == ""
+    assert cfg.gemini_api_keys == ()
+    assert cfg.supabase_key == "k"
+
+
+def test_load_config_non_reconcile_still_requires_gemini(monkeypatch, tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "BREEZE_API_KEY=a\nBREEZE_SECRET=b\nBREEZE_SESSION_TOKEN=c\n"
+        "SUPABASE_URL=https://x.supabase.co\nSUPABASE_KEY=k\n",
+        encoding="utf-8",
+    )
+    for k in list(os.environ.keys()):
+        if k.startswith("GEMINI"):
+            monkeypatch.delenv(k, raising=False)
+    with pytest.raises(ValueError, match="Missing Gemini API key"):
+        load_config(env_file)

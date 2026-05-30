@@ -1,5 +1,6 @@
 const WORKFLOWS = {
   runTitan: "run_titan_now.yml",
+  runReconcile: "daily_post_market_reconcile.yml",
   validate: "validate_breeze_token_manual.yml",
   persist: "persist_breeze_token_manual.yml",
   refreshRankings: "refresh_sector_rankings_weekly.yml",
@@ -264,8 +265,8 @@ async function checkConnection({ showSuccess = false } = {}) {
   return health;
 }
 
-async function dispatchWorkflow(filename, inputs = {}, statusSuffix = "") {
-  await ghApi("/dispatch", "POST", { workflow: filename, ref: "main", inputs });
+async function dispatchWorkflow(filename, inputs = {}, statusSuffix = "", ref = "main") {
+  await ghApi("/dispatch", "POST", { workflow: filename, ref, inputs });
   const extra = statusSuffix ? `\n\n${statusSuffix}` : "";
   setStatus(`Dispatched ${filename} successfully.${extra}`);
 }
@@ -625,6 +626,42 @@ function buildRunTitanInputs() {
     inputs.custom_exchange = "NSE";
   }
 
+  return inputs;
+}
+
+function buildReconcileInputs() {
+  const scope = String(el("reconcileScope")?.value || "all-stocks").trim().toLowerCase();
+  if (!["all-stocks", "sector"].includes(scope)) {
+    throw new Error("Reconcile scope is invalid.");
+  }
+  const sector = String(el("reconcileSectorId")?.value || "").trim().toLowerCase();
+  const workers = String(el("reconcileWorkers")?.value || "").trim();
+  const backfillDays = String(el("reconcileBackfillDays")?.value || "").trim();
+  const inputs = {
+    scope,
+    sector_id: "",
+    workers: "",
+    backfill_days: "",
+    backfill_only: "false",
+  };
+  if (scope === "sector") {
+    if (!sector || !SECTOR_INPUT_RE.test(sector)) {
+      throw new Error("Reconcile sector is required for scope=sector.");
+    }
+    inputs.sector_id = sector;
+  }
+  if (workers) {
+    if (!/^\d+$/.test(workers)) {
+      throw new Error("Reconcile workers must be numeric.");
+    }
+    inputs.workers = workers;
+  }
+  if (backfillDays) {
+    if (!/^\d+$/.test(backfillDays)) {
+      throw new Error("Backfill days must be numeric.");
+    }
+    inputs.backfill_days = backfillDays;
+  }
   return inputs;
 }
 
@@ -1060,6 +1097,39 @@ function wireEvents() {
         await dispatchWorkflow(WORKFLOWS.runTitan, inputs, suffix);
       } catch (e) {
         setStatus(`Run Titan dispatch failed:\n${e.message}`);
+      }
+    });
+  }
+
+  const reconcileScopeEl = el("reconcileScope");
+  if (reconcileScopeEl) {
+    reconcileScopeEl.addEventListener("change", () => {
+      const hint = el("reconcileSectorHint");
+      if (hint) {
+        hint.textContent =
+          reconcileScopeEl.value === "sector"
+            ? "Used only when scope=sector."
+            : "Ignored for all-stocks scope.";
+      }
+    });
+  }
+
+  const runReconcileBtn = el("runReconcileBtn");
+  if (runReconcileBtn) {
+    runReconcileBtn.addEventListener("click", async () => {
+      try {
+        setWorking("Validate reconcile inputs");
+        const inputs = buildReconcileInputs();
+        setWorking("Dispatch EOD reconcile");
+        await checkConnection();
+        await dispatchWorkflow(
+          WORKFLOWS.runReconcile,
+          inputs,
+          "Reconcile workflow dispatched. This trigger is report-only and sends compact EOD email/report output.",
+          "reconcile",
+        );
+      } catch (e) {
+        setStatus(`Reconcile dispatch failed:\n${e.message}`);
       }
     });
   }

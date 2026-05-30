@@ -263,6 +263,7 @@ def test_build_stock_reconcile_snapshot_computes_hits():
 
 def test_build_reconcile_digest_lines_contains_sections():
     summary = {
+        "as_of_trade_date": "2026-04-12",
         "symbol_count": 2,
         "coverage_next_day": 2,
         "coverage_next_week": 1,
@@ -270,15 +271,46 @@ def test_build_reconcile_digest_lines_contains_sections():
             "buy": {"next_day": {"hit": 1, "total": 1}, "next_week": {"hit": 1, "total": 1}},
             "hold": {"next_day": {"hit": 0, "total": 1}, "next_week": {"hit": 0, "total": 0}},
         },
-        "transition_quality": {"improving": 1, "stable": 1, "deteriorating": 0},
+        "transition_outcome_1w": {"favorable": 1, "neutral": 0, "unfavorable": 0},
+        "transition_outcome_1m": {"favorable": 0, "neutral": 1, "unfavorable": 0},
+        "whipsaw_transition_total": 1,
+        "whipsaw_symbol_rate_pct": 50.0,
+        "avg_transition_stability_score": 73.4,
         "news_attribution_summaries": [{"symbol": "HAL", "signal": "buy", "summary": "news: tailwind"}],
+    }
+    summary["per_symbol"] = {
+        "HAL": {
+            "symbol": "HAL",
+            "sector": "defence",
+            "signal_transition": "hold->buy",
+            "transition_beneficial": True,
+            "transition_outcome_label": "beneficial",
+            "is_success": True,
+            "is_failure": False,
+            "news_summary": "news: tailwind",
+        },
+        "BEL": {
+            "symbol": "BEL",
+            "sector": "defence",
+            "signal_transition": "buy->hold",
+            "transition_beneficial": False,
+            "transition_outcome_label": "not-beneficial",
+            "is_success": False,
+            "is_failure": True,
+            "failure_reason": "news_shock",
+            "news_direction": "down",
+            "news_summary": "news: headwind",
+        },
     }
     lines = build_reconcile_digest_lines(summary)
     text = "\n".join(lines)
-    assert "--- Stock-level reconcile ---" in text
-    assert "buy: 1D 1/1 (100.0%)" in text
-    assert "Transition quality:" in text
-    assert "News attribution highlights:" in text
+    assert "--- EOD Reconcile (Decision-first) ---" in text
+    assert "A) Coverage and confidence" in text
+    assert "B) Success summary" in text
+    assert "C) Failure summary" in text
+    assert "D) Signal transition matrix" in text
+    assert "E) Key transition examples" in text
+    assert "F) Actionable model-improvement flags" in text
 
 
 def test_enrich_audits_with_stock_reconcile_updates_audit(monkeypatch):
@@ -301,3 +333,308 @@ def test_enrich_audits_with_stock_reconcile_updates_audit(monkeypatch):
     assert summary["symbol_count"] == 1
     assert "reconcile_next_day_hit" in audits[0]
     assert "reconcile_transition_quality" in audits[0]
+
+
+def test_build_stock_reconcile_snapshot_prefers_table_inputs():
+    table_inputs = {
+        "sector": "defence",
+        "as_of_trade_date": "2026-04-12",
+        "symbol_daily_features": [
+            {
+                "trade_date": "2026-04-12",
+                "symbol": "HAL",
+                "exchange": "NSE",
+                "action_signal": "buy",
+                "return_1d_pct": 1.4,
+                "tape_extras": {
+                    "return_5d_pct": 2.0,
+                    "news_correlation": {"direction": "tailwind", "driver": "Orders"},
+                },
+            },
+            {
+                "trade_date": "2026-04-11",
+                "symbol": "HAL",
+                "exchange": "NSE",
+                "action_signal": "hold",
+                "tape_extras": {"next_day_score": 60.0},
+            },
+            {
+                "trade_date": "2026-04-06",
+                "symbol": "HAL",
+                "exchange": "NSE",
+                "action_signal": "hold",
+                "tape_extras": {"next_week_score": 58.0},
+            },
+        ],
+        "stock_signal_transition_analytics": [
+            {
+                "trade_date": "2026-04-12",
+                "symbol": "HAL",
+                "exchange": "NSE",
+                "previous_signal": "hold",
+                "current_signal": "buy",
+                "transition_type": "hold_to_buy",
+                "transition_stability_score": 78.0,
+                "is_whipsaw_transition": False,
+                "whipsaw_transition_count": 0,
+                "matured_1w_outcome": "favorable",
+                "matured_1m_outcome": "favorable",
+            }
+        ],
+        "sector_daily_winners": [
+            {
+                "as_of_date": "2026-04-12",
+                "symbol": "HAL",
+                "exchange": "NSE",
+                "winner_rank": 1,
+            }
+        ],
+        "sector_daily_rollup": [
+            {
+                "trade_date": "2026-04-12",
+                "symbol_count": 12,
+                "avg_effective_intent_score": 55.0,
+                "breadth_above_ema200_pct": 61.0,
+            }
+        ],
+        "global_news_snapshots": [
+            {
+                "refreshed_at": "2026-04-12T10:00:00+00:00",
+                "fetch_status": "ok",
+                "sector_scores": {"defence": 0.42},
+            }
+        ],
+        "llm_digest_memory": [{"output_text": "optional context"}],
+    }
+    snap = build_stock_reconcile_snapshot(
+        [],
+        table_inputs=table_inputs,
+        as_of_trade_date="2026-04-12",
+    )
+    assert snap["symbol_count"] == 1
+    assert snap["success_count"] == 1
+    assert snap["failure_count"] == 0
+    assert snap["transition_quality"]["favorable"] == 1
+    assert snap["shortlist_efficacy"]["count"] == 1
+    assert snap["shortlist_efficacy"]["hit_1d"] == 1
+    assert snap["news_attribution_efficacy"]["evaluated_symbols"] == 1
+    assert snap["news_attribution_efficacy"]["aligned_symbols"] == 1
+    assert snap["per_symbol"]["HAL"]["transition_beneficial"] is True
+
+
+def test_build_reconcile_digest_lines_includes_efficacy_sections():
+    summary = {
+        "as_of_trade_date": "2026-04-12",
+        "symbol_count": 3,
+        "coverage_next_day": 2,
+        "coverage_next_week": 2,
+        "accuracy_by_signal_horizon": {
+            "buy": {"next_day": {"hit": 1, "total": 1}, "next_week": {"hit": 1, "total": 1}},
+            "hold": {"next_day": {"hit": 0, "total": 1}, "next_week": {"hit": 0, "total": 1}},
+        },
+        "scope": "all-stocks",
+        "transition_quality": {"favorable": 1, "neutral": 1},
+        "transition_outcome_1w": {"favorable": 1},
+        "transition_outcome_1m": {"neutral": 1},
+        "whipsaw_transition_total": 1,
+        "whipsaw_symbol_rate_pct": 50.0,
+        "avg_transition_stability_score": 70.0,
+        "shortlist_efficacy": {"count": 2, "hit_1d": 1, "hit_rate_1d_pct": 50.0, "coverage_5d": 2, "hit_5d": 1, "hit_rate_5d_pct": 50.0},
+        "news_attribution_efficacy": {
+            "evaluated_symbols": 2,
+            "aligned_symbols": 1,
+            "alignment_rate_pct": 50.0,
+            "snapshot_status": "ok",
+            "snapshot_refreshed_at": "2026-04-12T10:00:00+00:00",
+        },
+        "per_symbol": {
+            "HAL": {
+                "symbol": "HAL",
+                "sector": "defence",
+                "signal": "buy",
+                "hit_next_day": True,
+                "hit_next_week": True,
+                "signal_transition": "hold->buy",
+                "transition_quality": "favorable",
+                "transition_beneficial": True,
+                "transition_outcome_label": "beneficial",
+                "is_success": True,
+                "is_failure": False,
+                "news_summary": "news: tailwind",
+            },
+            "BEL": {
+                "symbol": "BEL",
+                "sector": "defence",
+                "signal": "hold",
+                "hit_next_day": False,
+                "hit_next_week": False,
+                "signal_transition": "buy->hold",
+                "transition_quality": "unfavorable",
+                "transition_beneficial": False,
+                "transition_outcome_label": "not-beneficial",
+                "is_success": False,
+                "is_failure": True,
+                "failure_reason": "whipsaw",
+                "news_summary": "news: headwind",
+                "news_direction": "down",
+            },
+        },
+        "regime_context": {"symbol_count": 10, "avg_effective_intent_score": 54.0, "breadth_above_ema200_pct": 60.0},
+        "news_attribution_summaries": [{"symbol": "HAL", "signal": "buy", "summary": "news: tailwind"}],
+    }
+    text = "\n".join(build_reconcile_digest_lines(summary))
+    assert "As-of trade date: 2026-04-12" in text
+    assert "Scope: all-stocks" in text
+    assert "Failure reasons:" in text
+    assert "Signal transition matrix" in text
+    assert "beneficial" in text
+
+
+def test_build_reconcile_digest_lines_handles_insufficient_matured_data():
+    summary = {
+        "as_of_trade_date": "2026-04-15",
+        "scope": "all-stocks",
+        "symbol_count": 3,
+        "coverage_next_day": 0,
+        "coverage_next_week": 0,
+        "per_symbol": {
+            "HAL": {
+                "symbol": "HAL",
+                "sector": "defence",
+                "signal_transition": "hold->buy",
+                "previous_signal": "hold",
+                "current_signal": "buy",
+                "transition_beneficial": None,
+                "transition_outcome_label": "not_evaluable",
+                "is_success": False,
+                "is_failure": False,
+                "news_summary": "news: n/a",
+            },
+            "BEL": {
+                "symbol": "BEL",
+                "sector": "defence",
+                "signal_transition": "buy->hold",
+                "previous_signal": "buy",
+                "current_signal": "hold",
+                "transition_beneficial": None,
+                "transition_outcome_label": "not_evaluable",
+                "is_success": False,
+                "is_failure": False,
+                "news_summary": "news: n/a",
+            },
+            "BHEL": {
+                "symbol": "BHEL",
+                "sector": "defence",
+                "signal_transition": "hold->hold",
+                "previous_signal": "hold",
+                "current_signal": "hold",
+                "transition_beneficial": True,
+                "transition_outcome_label": "beneficial",
+                "is_success": True,
+                "is_failure": False,
+                "news_summary": "news: n/a",
+            },
+        },
+    }
+    text = "\n".join(build_reconcile_digest_lines(summary))
+    assert "Evaluated: next-day insufficient matured data | next-week insufficient matured data" in text
+    assert "Count: 1 (insufficient matured data)" in text
+    assert "Top symbols: none (0 evaluable symbols out of 3)" in text
+    assert "HOLD->BUY: insufficient matured data | not-evaluable 1" in text
+    assert "BUY->HOLD: insufficient matured data | not-evaluable 1" in text
+    assert "HOLD->HOLD" not in text
+    assert "No evaluable transition examples (insufficient matured data)." in text
+
+
+def test_build_reconcile_digest_lines_transition_matrix_only_actual_transitions():
+    summary = {
+        "coverage_next_day": 2,
+        "coverage_next_week": 2,
+        "symbol_count": 3,
+        "per_symbol": {
+            "HAL": {
+                "symbol": "HAL",
+                "sector": "defence",
+                "signal_transition": "hold->buy",
+                "previous_signal": "hold",
+                "current_signal": "buy",
+                "transition_beneficial": True,
+                "transition_outcome_label": "beneficial",
+                "is_success": True,
+                "is_failure": False,
+            },
+            "BEL": {
+                "symbol": "BEL",
+                "sector": "defence",
+                "signal_transition": "buy->hold",
+                "previous_signal": "buy",
+                "current_signal": "hold",
+                "transition_beneficial": False,
+                "transition_outcome_label": "not-beneficial",
+                "is_success": False,
+                "is_failure": True,
+            },
+            "BHEL": {
+                "symbol": "BHEL",
+                "sector": "defence",
+                "signal_transition": "hold->hold",
+                "previous_signal": "hold",
+                "current_signal": "hold",
+                "transition_beneficial": True,
+                "transition_outcome_label": "beneficial",
+                "is_success": True,
+                "is_failure": False,
+            },
+        },
+    }
+    text = "\n".join(build_reconcile_digest_lines(summary))
+    assert "HOLD->BUY: beneficial 1 (100.0%) | not-beneficial 0 (0.0%) | not-evaluable 0" in text
+    assert "BUY->HOLD: beneficial 0 (0.0%) | not-beneficial 1 (100.0%) | not-evaluable 0" in text
+    assert "HOLD->HOLD" not in text
+
+
+def test_build_stock_reconcile_snapshot_marks_not_evaluable_for_non_matured_rows():
+    table_inputs = {
+        "sector": "defence",
+        "as_of_trade_date": "2026-04-12",
+        "symbol_daily_features": [
+            {
+                "trade_date": "2026-04-12",
+                "symbol": "HAL",
+                "exchange": "NSE",
+                "action_signal": "buy",
+                "return_1d_pct": 1.0,
+                "tape_extras": {"news_correlation": {"direction": "neutral"}},
+            },
+            {
+                "trade_date": "2026-04-11",
+                "symbol": "HAL",
+                "exchange": "NSE",
+                "action_signal": "hold",
+                "tape_extras": {},
+            },
+        ],
+        "stock_signal_transition_analytics": [
+            {
+                "trade_date": "2026-04-12",
+                "symbol": "HAL",
+                "exchange": "NSE",
+                "previous_signal": "hold",
+                "current_signal": "buy",
+                "transition_type": "hold_to_buy",
+                "matured_1w_available": False,
+                "matured_1m_available": False,
+                "matured_1w_outcome": None,
+                "matured_1m_outcome": None,
+            }
+        ],
+        "sector_daily_winners": [],
+        "sector_daily_rollup": [],
+        "global_news_snapshots": [],
+        "llm_digest_memory": [],
+    }
+    snap = build_stock_reconcile_snapshot([], table_inputs=table_inputs, as_of_trade_date="2026-04-12")
+    row = snap["per_symbol"]["HAL"]
+    assert row["transition_evaluable"] is False
+    assert row["transition_beneficial"] is None
+    assert row["transition_outcome_label"] == "not_evaluable"
