@@ -183,6 +183,78 @@ def _atr_regime_icon(ratio: Any) -> str:
     return "🟡➡"
 
 
+def _adx_strength_band(adx_val: Any) -> str:
+    adx = _safe_float(adx_val)
+    if math.isnan(adx):
+        return "n/a"
+    if adx >= 25.0:
+        return "strong (>=25)"
+    if adx >= 20.0:
+        return "building (20-25)"
+    return "weak (<20)"
+
+
+def _trend_regime_label(adx_val: Any, plus_di_val: Any, minus_di_val: Any) -> str:
+    adx = _safe_float(adx_val)
+    plus_di = _safe_float(plus_di_val)
+    minus_di = _safe_float(minus_di_val)
+    if math.isnan(adx):
+        return "Sideways"
+    if adx < 20.0:
+        return "Sideways"
+    if not math.isnan(plus_di) and not math.isnan(minus_di):
+        if plus_di > minus_di:
+            return "Buy trend"
+        if minus_di > plus_di:
+            return "Sell trend"
+    return "Sideways"
+
+
+def _atr_ratio_band(atr_ratio: Any) -> str:
+    ratio = _safe_float(atr_ratio)
+    if math.isnan(ratio):
+        return "n/a"
+    if ratio < 0.9:
+        return "low"
+    if ratio <= 1.1:
+        return "normal"
+    return "high"
+
+
+def _cmf_band(cmf_val: Any) -> str:
+    cmf = _safe_float(cmf_val)
+    if math.isnan(cmf):
+        return "n/a"
+    if cmf > 0.05:
+        return "accumulation"
+    if cmf < -0.05:
+        return "distribution"
+    return "neutral"
+
+
+def _sector_rank_band(percentile: Any) -> str:
+    p = _safe_float(percentile)
+    if math.isnan(p):
+        return "n/a"
+    if p >= 67.0:
+        return "leader"
+    if p <= 33.0:
+        return "laggard"
+    return "average"
+
+
+def _range_position_context(pct_to_high: Any, pct_above_low: Any) -> str:
+    to_high = _safe_float(pct_to_high)
+    above_low = _safe_float(pct_above_low)
+    if math.isnan(to_high) and math.isnan(above_low):
+        return "range context unavailable"
+    if not math.isnan(to_high) and to_high >= -1.0:
+        return "near-high (within ~1% of 20D high)"
+    if not math.isnan(above_low) and above_low <= 1.0:
+        return "near-low (within ~1% of 20D low)"
+    return "inside 20D range"
+
+
 def _cmf_or_obv_for_digest(audit: dict[str, Any]) -> tuple[str, float]:
     cmf = _safe_float(audit.get("cmf_20"))
     if not math.isnan(cmf):
@@ -334,6 +406,8 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     breakout_to_high = audit.get("breakout_20d_distance_pct_to_high")
     breakout_above_low = audit.get("breakout_20d_distance_pct_above_low")
     atr_ratio = audit.get("atr_14_over_atr_63")
+    plus_di_14 = audit.get("adx_plus_di_14")
+    minus_di_14 = audit.get("adx_minus_di_14")
     cmf_label, cmf_val = _cmf_or_obv_for_digest(audit)
     next_week = audit.get("next_week_score")
     ema_dist = audit.get("ema_200_distance_pct")
@@ -358,39 +432,55 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
         f"{_metric_icon(intent, bullish_above=55.0, bearish_below=45.0)} "
         f"Technical intent: {_fmt_metric(intent)} ({_equity_technical_label(intent)})"
     )
+    trend_regime = _trend_regime_label(adx_14, plus_di_14, minus_di_14)
+    trend_source = (
+        f"+DI {_fmt_metric(plus_di_14)} vs -DI {_fmt_metric(minus_di_14)}"
+        if (not math.isnan(_safe_float(plus_di_14)) and not math.isnan(_safe_float(minus_di_14)))
+        else "direction source unavailable"
+    )
     lines_out.append(
         f"{_metric_icon(adx_14, bullish_above=25.0, bearish_below=15.0)} "
-        f"Trend strength ADX14: {_fmt_metric(adx_14)}"
+        f"Trend regime (14D): {trend_regime} "
+        f"(ADX {_fmt_metric(adx_14)}; {_adx_strength_band(adx_14)}; source: {trend_source})"
     )
     lines_out.append(
         f"{_breakout_state_icon(breakout_to_high, breakout_above_low)} "
-        f"Breakout state (20D): to high {_fmt_metric(breakout_to_high)}% · above low {_fmt_metric(breakout_above_low)}%"
+        f"20D Range Position: {_fmt_metric(breakout_to_high)}% to 20D high · "
+        f"{_fmt_metric(breakout_above_low)}% above 20D low "
+        f"({_range_position_context(breakout_to_high, breakout_above_low)})"
     )
     lines_out.append(
         f"{_atr_regime_icon(atr_ratio)} "
-        f"Volatility regime ATR14/ATR63: {_fmt_metric(atr_ratio)}"
+        f"Volatility vs 3M baseline: {_fmt_metric(atr_ratio)}x "
+        f"({_atr_ratio_band(atr_ratio)}; bands: <0.90 low, 0.90-1.10 normal, >1.10 high)"
     )
 
     tape_bits = [f"1D move {_fmt_metric(ret1d)}%", f"z-score {_fmt_metric(z)} ({_z_label(z)})"]
     if not math.isnan(_safe_float(ema_dist)):
-        tape_bits.append(f"vs EMA200 {_fmt_metric(ema_dist)}%")
+        tape_bits.append(f"Distance above long-term trend (EMA200) {_fmt_metric(ema_dist)}%")
     tape_bits.append(
         f"volume participation {_fmt_metric(vpr_label_src)}x ({_volume_participation_label(vpr_label_src)})"
     )
-    tape_bits.append(f"ATR14 {_fmt_metric(atr_pct)}%")
+    tape_bits.append(f"Typical daily swing (ATR14) {_fmt_metric(atr_pct)}%")
     lines_out.append("Tape snapshot: " + " · ".join(tape_bits))
     lines_out.append(
         f"{_metric_icon(cmf_val, bullish_above=0.05, bearish_below=-0.05)} "
-        f"Directional volume {cmf_label}: {_fmt_metric(cmf_val, 3)}"
+        f"Money flow trend (20D): {_fmt_metric(cmf_val, 3)} "
+        f"({_cmf_band(cmf_val)}; bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution)"
+        + (f" [{cmf_label} proxy]" if cmf_label != "CMF20" else "")
     )
 
     rank_bits: list[str] = []
     sp_int = audit.get("sector_pctile_effective_intent")
     if not math.isnan(_safe_float(sp_int)):
-        rank_bits.append(f"technical intent vs sector peers pctile {_fmt_metric(sp_int)}")
+        rank_bits.append(
+            f"technical intent {_fmt_metric(sp_int)} ({_sector_rank_band(sp_int)})"
+        )
     sp_nw = audit.get("sector_pctile_next_week_score")
     if not math.isnan(_safe_float(sp_nw)):
-        rank_bits.append(f"next-week vs sector pctile {_fmt_metric(sp_nw)}")
+        rank_bits.append(
+            f"next-week score {_fmt_metric(sp_nw)} ({_sector_rank_band(sp_nw)})"
+        )
     for label, key in (
         ("vs NIFTY 5d", "rel_return_5d_vs_nifty_pct"),
         ("vs NIFTY 20d", "rel_return_20d_vs_nifty_pct"),
@@ -399,7 +489,11 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
         if not math.isnan(v):
             rank_bits.append(f"{label} {_fmt_metric(v)}%")
     if rank_bits:
-        lines_out.append("Sector / benchmark · " + " · ".join(rank_bits[:4]))
+        lines_out.append(
+            "Sector-relative rank: "
+            + " · ".join(rank_bits[:4])
+            + " (leader >=67, average 34-66, laggard <=33)"
+        )
 
     if not math.isnan(_safe_float(nf)):
         nd_l = _horizon_score_label(nf)
@@ -1385,6 +1479,7 @@ def build_equity_live_audit(
         calculate_cmf,
         calculate_ema,
         calculate_equity_technical_score,
+        calculate_latest_di,
         calculate_obv_slope,
     )
 
@@ -1477,6 +1572,7 @@ def build_equity_live_audit(
     )
     atr_14 = calculate_atr(df, window=14)
     adx_14 = calculate_adx(df, window=14)
+    adx_plus_di_14, adx_minus_di_14 = calculate_latest_di(df, window=14)
     breakout_to_high, breakout_above_low = calculate_breakout_20d_distances_pct(df)
     atr_14_over_atr_63 = calculate_atr_ratio(df, short_window=14, long_window=63)
     cmf_20 = calculate_cmf(df, window=20)
@@ -1540,6 +1636,8 @@ def build_equity_live_audit(
         "atr_14": atr_14,
         "atr_14_pct": atr_14_pct,
         "adx_14": adx_14,
+        "adx_plus_di_14": adx_plus_di_14,
+        "adx_minus_di_14": adx_minus_di_14,
         "breakout_20d_distance_pct_to_high": breakout_to_high,
         "breakout_20d_distance_pct_above_low": breakout_above_low,
         "atr_14_over_atr_63": atr_14_over_atr_63,

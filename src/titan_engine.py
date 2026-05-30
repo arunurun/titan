@@ -99,6 +99,43 @@ def calculate_adx(data: pd.DataFrame, window: int = 14) -> float:
     return out if not math.isnan(out) else float("nan")
 
 
+def calculate_latest_di(data: pd.DataFrame, window: int = 14) -> tuple[float, float]:
+    """
+    Returns latest (+DI, -DI) for the chosen window.
+    """
+    if data.empty:
+        return float("nan"), float("nan")
+    req = {"high", "low", "close"}
+    if not req.issubset(set(data.columns)):
+        return float("nan"), float("nan")
+
+    h = pd.to_numeric(data["high"], errors="coerce")
+    l = pd.to_numeric(data["low"], errors="coerce")
+    c = pd.to_numeric(data["close"], errors="coerce")
+    prev_h = h.shift(1)
+    prev_l = l.shift(1)
+    prev_c = c.shift(1)
+
+    tr = pd.concat([(h - l).abs(), (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    plus_dm = (h - prev_h).where((h - prev_h) > (prev_l - l), 0.0).clip(lower=0.0)
+    minus_dm = (prev_l - l).where((prev_l - l) > (h - prev_h), 0.0).clip(lower=0.0)
+
+    roll = min(window, len(data))
+    tr_n = tr.rolling(window=roll, min_periods=1).sum()
+    plus_n = plus_dm.rolling(window=roll, min_periods=1).sum()
+    minus_n = minus_dm.rolling(window=roll, min_periods=1).sum()
+    if tr_n.empty:
+        return float("nan"), float("nan")
+
+    plus_di = 100.0 * (plus_n / tr_n.replace(0.0, np.nan))
+    minus_di = 100.0 * (minus_n / tr_n.replace(0.0, np.nan))
+    plus_series = plus_di.dropna()
+    minus_series = minus_di.dropna()
+    plus_out = float(plus_series.iloc[-1]) if not plus_series.empty else float("nan")
+    minus_out = float(minus_series.iloc[-1]) if not minus_series.empty else float("nan")
+    return plus_out, minus_out
+
+
 def calculate_breakout_20d_distances_pct(data: pd.DataFrame) -> tuple[float, float]:
     """
     Returns (pct_to_20d_high, pct_above_20d_low) for latest close.

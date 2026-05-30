@@ -34,6 +34,8 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
         "ema_200_distance_pct": 47.29,
         "atr_14_pct": 3.42,
         "adx_14": 22.6,
+        "adx_plus_di_14": 29.1,
+        "adx_minus_di_14": 18.4,
         "breakout_20d_distance_pct_to_high": -0.8,
         "breakout_20d_distance_pct_above_low": 9.4,
         "atr_14_over_atr_63": 1.12,
@@ -77,10 +79,13 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
     assert "1w outlook" in text.lower()
     assert "neutral band" in text.lower()
     assert "🟢⬆" in text or "🟡➡" in text or "🔴⬇" in text
-    assert "trend strength adx14" in text.lower()
-    assert "breakout state (20d)" in text.lower()
-    assert "volatility regime atr14/atr63" in text.lower()
-    assert "directional volume cmf20" in text.lower()
+    assert "trend regime (14d)" in text.lower()
+    assert "source: +di" in text.lower()
+    assert "20d range position" in text.lower()
+    assert "volatility vs 3m baseline" in text.lower()
+    assert "money flow trend (20d)" in text.lower()
+    assert "distance above long-term trend (ema200)" in text.lower()
+    assert "typical daily swing (atr14)" in text.lower()
     assert "tape snapshot" in text.lower()
     assert "Why this action" in text
     assert "\n" in text
@@ -103,10 +108,13 @@ def test_symbol_digest_default_shows_neutral_na_for_missing_new_metrics(monkeypa
         "prediction_breakdown": {"week": {}, "day": {}, "penalties": []},
     }
     text = _format_symbol_metrics_line({"symbol": "HAL", "exchange": "NSE", "audit": audit})
-    assert "🟡➡ Trend strength ADX14: n/a" in text
-    assert "🟡➡ Breakout state (20D): to high n/a% · above low n/a%" in text
-    assert "🟡➡ Volatility regime ATR14/ATR63: n/a" in text
-    assert "🟡➡ Directional volume CMF20: n/a" in text
+    assert "🟡➡ Trend regime (14D): Sideways (ADX n/a; n/a; source: direction source unavailable)" in text
+    assert "🟡➡ 20D Range Position: n/a% to 20D high · n/a% above 20D low (range context unavailable)" in text
+    assert "🟡➡ Volatility vs 3M baseline: n/ax (n/a; bands: <0.90 low, 0.90-1.10 normal, >1.10 high)" in text
+    assert (
+        "🟡➡ Money flow trend (20D): n/a "
+        "(n/a; bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution)" in text
+    )
 
 
 def test_symbol_digest_includes_global_news_correlation_line(monkeypatch):
