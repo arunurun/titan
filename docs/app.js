@@ -405,9 +405,31 @@ function humanizeAgeMinutes(age) {
   return `${hrs}h ${mins}m ago`;
 }
 
+function renderGlobalNewsLoading() {
+  const host = el("globalNewsFreshness");
+  if (!host) return;
+  host.setAttribute("aria-busy", "true");
+  host.innerHTML =
+    '<span class="chip chip-busy">Refreshing macro news…</span>' +
+    '<span class="chip chip-muted">~5s · proxy</span>';
+  host.title = "Fetching macro RSS via POST /news/refresh (no GitHub Actions run).";
+}
+
+function renderGlobalNewsError(message) {
+  const host = el("globalNewsFreshness");
+  if (!host) return;
+  host.removeAttribute("aria-busy");
+  const msg = escapeHtml(String(message || "Refresh failed"));
+  host.innerHTML =
+    `<span class="chip chip-error">Refresh failed</span>` +
+    `<span class="chip chip-muted">${msg}</span>`;
+  host.title = String(message || "Refresh failed");
+}
+
 function renderGlobalNewsFreshness(statusPayload) {
   const host = el("globalNewsFreshness");
   if (!host) return;
+  host.removeAttribute("aria-busy");
   const ttl = Number(statusPayload?.ttl_hours || 2);
   const age = statusPayload?.age_minutes;
   const snap = statusPayload?.snapshot || null;
@@ -1294,16 +1316,27 @@ function wireEvents() {
   const refreshGlobalNewsBtn = el("refreshGlobalNewsBtn");
   if (refreshGlobalNewsBtn) {
     refreshGlobalNewsBtn.addEventListener("click", async () => {
+      const btn = refreshGlobalNewsBtn;
       try {
-        setWorking("Refresh global news snapshot");
+        btn.disabled = true;
+        renderGlobalNewsLoading();
+        setStatus(
+          "Refreshing macro news via proxy (POST /news/refresh). " +
+            "This does not start a GitHub Actions run — watch the chips above, not Latest workflow runs.",
+        );
         const out = await refreshGlobalNewsSnapshot();
         setStatus(
-          `Global news refreshed.\nRefreshed at: ${out.refresh.refreshed_at || "n/a"}\n` +
+          `Macro news snapshot updated (no GitHub Actions run).\n` +
+            `Refreshed at: ${out.refresh.refreshed_at || "n/a"}\n` +
             `Fetched items: ${out.refresh.item_count ?? "?"}\n` +
-            `Fresh now: ${out.status.fresh === true ? "yes" : "no"}`,
+            `Fresh now: ${out.status.fresh === true ? "yes" : "no"}\n` +
+            `Fetch status: ${out.refresh.fetch_status || "n/a"}`,
         );
       } catch (e) {
-        setStatus(`Global news refresh failed:\n${e.message}`);
+        renderGlobalNewsError(e.message);
+        setStatus(`Global news refresh failed (proxy POST /news/refresh):\n${e.message}`);
+      } finally {
+        btn.disabled = false;
       }
     });
   }

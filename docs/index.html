@@ -192,6 +192,11 @@
       border-color: #f5c6c2;
       color: #c5221f;
     }
+    .news-status .chip-busy {
+      background: #e8f0fe;
+      border-color: #c6dafc;
+      color: #1967d2;
+    }
     /* Run Titan card */
     .run-titan-lead { margin: 0 0 10px; }
     .run-titan-panel { margin-top: 4px; }
@@ -361,7 +366,7 @@
 
     <div class="card" aria-labelledby="newsCardTitle">
       <h3 id="newsCardTitle">News</h3>
-      <p class="small news-lead">Refresh macro headlines before dispatch if stale. Symbol news runs on its own workflow.</p>
+      <p class="small news-lead">Global news updates the macro snapshot on the proxy (~5s, no GitHub Actions). Symbol news dispatches <code>news_fetch.yml</code>.</p>
       <div class="news-actions" role="group" aria-label="News actions">
         <div class="news-action">
           <button
@@ -369,9 +374,9 @@
             class="secondary btn-sm"
             id="refreshGlobalNewsBtn"
             aria-label="Refresh global news snapshot"
-            title="Macro RSS snapshot · ~2h TTL"
+            title="Updates macro snapshot via proxy (~5s). Does not start GitHub Actions."
           >Global news</button>
-          <span class="news-action-hint">Macro RSS snapshot · ~2h TTL</span>
+          <span class="news-action-hint">Updates macro snapshot (~5s) · not a workflow</span>
         </div>
         <div class="news-action">
           <button
@@ -381,7 +386,7 @@
             aria-label="Fetch symbol news for all sectors"
             title="All sectors batch → news_feed"
           >Symbol news</button>
-          <span class="news-action-hint">All sectors batch → news_feed</span>
+          <span class="news-action-hint">Dispatches news_fetch.yml → news_feed</span>
         </div>
       </div>
       <div class="news-status" id="globalNewsFreshness" role="status" aria-live="polite">
