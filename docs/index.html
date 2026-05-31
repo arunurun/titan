@@ -130,6 +130,87 @@
     .row { display: grid; grid-template-columns: 1fr; gap: 8px; }
     .hidden { display: none; }
     @media (min-width: 760px) { .row.two { grid-template-columns: 1fr 1fr; } }
+    /* News subsection (Run Titan card) */
+    .news-subsection {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #f8f9fa;
+      padding: 10px;
+      margin-bottom: 12px;
+    }
+    .subsection-title {
+      margin: 0 0 4px;
+      font-size: 0.88rem;
+      font-weight: 700;
+      color: var(--text);
+      letter-spacing: 0.01em;
+    }
+    .news-lead { margin: 0 0 10px; }
+    .news-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    @media (max-width: 400px) {
+      .news-actions { grid-template-columns: 1fr; }
+    }
+    .news-action { display: flex; flex-direction: column; gap: 4px; }
+    .news-action button.btn-sm {
+      width: 100%;
+      margin-top: 0;
+    }
+    .news-action-hint {
+      font-size: 0.74rem;
+      color: var(--muted);
+      line-height: 1.25;
+      padding: 0 2px;
+    }
+    .news-status {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+      margin-top: 10px;
+      min-height: 1.4rem;
+    }
+    .news-status .chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 0.74rem;
+      font-weight: 600;
+      line-height: 1.2;
+      border: 1px solid var(--border);
+      background: #fff;
+      color: var(--text);
+    }
+    .news-status .chip-fresh {
+      background: #e6f4ea;
+      border-color: #c6e7d0;
+      color: #137333;
+    }
+    .news-status .chip-stale {
+      background: #fef7e0;
+      border-color: #f9e6a8;
+      color: #b06000;
+    }
+    .news-status .chip-muted {
+      background: #f1f3f4;
+      border-color: #e0e3e7;
+      color: var(--muted);
+      font-weight: 500;
+    }
+    .news-status .chip-error {
+      background: #fce8e6;
+      border-color: #f5c6c2;
+      color: #c5221f;
+    }
+    .card-divider {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 0 0 12px;
+    }
   </style>
 </head>
 <body data-page="control">
@@ -154,12 +235,36 @@
 
     <div class="card">
       <h3>Run Titan Now</h3>
-      <p class="small">Global news snapshot is TTL-based (fresh for 2h). Refresh it before dispatch when needed. Per-symbol news uses a separate workflow.</p>
-      <div class="btn-toolbar">
-        <button type="button" class="secondary btn-sm" id="refreshGlobalNewsBtn">Refresh Global News</button>
-        <button type="button" class="secondary btn-sm" id="fetchSymbolNewsBtn">Fetch symbol news</button>
-      </div>
-      <div class="small" id="globalNewsFreshness">Global news snapshot: checking...</div>
+      <section class="news-subsection" aria-labelledby="newsSubsectionTitle">
+        <h4 class="subsection-title" id="newsSubsectionTitle">News</h4>
+        <p class="small news-lead">Refresh macro headlines before dispatch if stale. Symbol news runs on its own workflow.</p>
+        <div class="news-actions" role="group" aria-label="News actions">
+          <div class="news-action">
+            <button
+              type="button"
+              class="secondary btn-sm"
+              id="refreshGlobalNewsBtn"
+              aria-label="Refresh global news snapshot"
+              title="Macro RSS snapshot · ~2h TTL"
+            >Global news</button>
+            <span class="news-action-hint">Macro RSS snapshot · ~2h TTL</span>
+          </div>
+          <div class="news-action">
+            <button
+              type="button"
+              class="secondary btn-sm"
+              id="fetchSymbolNewsBtn"
+              aria-label="Fetch symbol news for all sectors"
+              title="All sectors batch → news_feed"
+            >Symbol news</button>
+            <span class="news-action-hint">All sectors batch → news_feed</span>
+          </div>
+        </div>
+        <div class="news-status" id="globalNewsFreshness" role="status" aria-live="polite">
+          <span class="chip chip-muted">Checking…</span>
+        </div>
+      </section>
+      <hr class="card-divider" aria-hidden="true" />
       <div class="row two">
         <div>
           <label>Mode</label>
@@ -267,6 +372,6 @@
     </div>
   </div>
 
-  <script defer src="./app.js?v=20260530-1"></script>
+  <script defer src="./app.js?v=20260531-1"></script>
 </body>
 </html>

@@ -332,6 +332,17 @@ async function dispatchWorkflow(filename, inputs = {}, statusSuffix = "", ref = 
   setStatus(`Dispatched ${filename} successfully.${extra}`);
 }
 
+function humanizeAgeMinutes(age) {
+  const n = Number(age);
+  if (!Number.isFinite(n) || n < 0) return null;
+  if (n < 1) return "just now";
+  if (n < 60) return `${Math.round(n)} min ago`;
+  const hrs = Math.floor(n / 60);
+  const mins = Math.round(n % 60);
+  if (mins === 0) return `${hrs}h ago`;
+  return `${hrs}h ${mins}m ago`;
+}
+
 function renderGlobalNewsFreshness(statusPayload) {
   const host = el("globalNewsFreshness");
   if (!host) return;
@@ -339,16 +350,34 @@ function renderGlobalNewsFreshness(statusPayload) {
   const age = statusPayload?.age_minutes;
   const snap = statusPayload?.snapshot || null;
   const fresh = statusPayload?.fresh === true;
+  const chips = [];
   if (!snap) {
-    host.textContent = `Global news snapshot: none found yet (TTL ${ttl}h). Tap "Refresh Global News".`;
+    chips.push('<span class="chip chip-stale">No snapshot</span>');
+    chips.push(`<span class="chip chip-muted">TTL ${ttl}h</span>`);
+    host.innerHTML = chips.join("");
+    host.title = "No global news snapshot yet. Tap Global news to refresh.";
     return;
   }
-  const ageTxt = Number.isFinite(Number(age)) ? `${Number(age).toFixed(1)} min` : "n/a";
-  const refreshed = snap.refreshed_at || "n/a";
-  const status = snap.fetch_status || "unknown";
-  host.textContent =
-    `Global news snapshot: ${fresh ? "fresh" : "stale"} | age ${ageTxt} | refreshed ${refreshed} | ` +
-    `items ${snap.item_count ?? "?"} | status ${status}`;
+  const ageLabel = humanizeAgeMinutes(age);
+  const refreshed = snap.refreshed_at || "";
+  const itemCount = snap.item_count ?? "?";
+  const fetchStatus = String(snap.fetch_status || "unknown").toLowerCase();
+  chips.push(
+    fresh
+      ? '<span class="chip chip-fresh">Fresh</span>'
+      : '<span class="chip chip-stale">Stale</span>',
+  );
+  if (ageLabel) {
+    chips.push(`<span class="chip chip-muted">${escapeHtml(ageLabel)}</span>`);
+  }
+  chips.push(`<span class="chip chip-muted">${escapeHtml(String(itemCount))} items</span>`);
+  if (fetchStatus && fetchStatus !== "ok") {
+    chips.push(`<span class="chip chip-error">${escapeHtml(fetchStatus)}</span>`);
+  }
+  host.innerHTML = chips.join("");
+  const titleParts = [`Refreshed ${refreshed || "n/a"}`, `TTL ${ttl}h`];
+  if (fetchStatus) titleParts.push(`Status ${fetchStatus}`);
+  host.title = titleParts.join(" · ");
 }
 
 async function fetchGlobalNewsStatus() {
@@ -1318,7 +1347,8 @@ async function initStorage() {
   fetchGlobalNewsStatus().catch((e) => {
     const host = el("globalNewsFreshness");
     if (host) {
-      host.textContent = `Global news snapshot status unavailable: ${e.message}`;
+      host.innerHTML = '<span class="chip chip-error">Status unavailable</span>';
+      host.title = String(e.message || e);
     }
   });
 }
