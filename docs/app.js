@@ -118,38 +118,100 @@ function cfg() {
   return { proxyBase };
 }
 
+const RUN_TITAN_DISPATCH_LABELS = {
+  sector: "Run sector digest",
+  all_sectors: "Run all sectors",
+  custom: "Run custom symbols",
+};
+
+const RECONCILE_DISPATCH_LABELS = {
+  sector: "Run sector reconcile",
+  "all-stocks": "Run all-stocks reconcile",
+};
+
+function setPanelVisible(panelEl, visible) {
+  if (!panelEl) return;
+  panelEl.classList.toggle("hidden", !visible);
+}
+
 function setSectorModeUi(mode) {
   const sectorEl = el("sectorId");
-  const hintEl = el("sectorHint");
+  const sectorGroup = el("runTitanSectorGroup");
+  const scopeGroup = el("runTitanScopeGroup");
+  const customGroup = el("runTitanCustomGroup");
+  const allSectorsNote = el("runTitanAllSectorsNote");
+  const customDisabledNote = el("runTitanCustomDisabledNote");
   const customSymbolsEl = el("customSymbols");
-  const customSymbolsHintEl = el("customSymbolsHint");
-  if (!sectorEl) return;
+  const customExchangeEl = el("customExchange");
+  const runModeHint = el("runModeHint");
+  const titanScopeEl = el("titanScope");
+  const titanScopeHintEl = el("titanScopeHint");
+  const runTitanBtn = el("runTitanBtn");
+
   const isSectorMode = mode === "sector";
+  const isAllSectorsMode = mode === "all_sectors";
   const isCustomMode = mode === "custom";
-  sectorEl.disabled = !isSectorMode;
+  const isSectorOrAll = isSectorMode || isAllSectorsMode;
+
+  if (sectorEl) {
+    sectorEl.disabled = !isSectorMode;
+  }
+  setPanelVisible(sectorGroup, isSectorMode);
+  setPanelVisible(scopeGroup, isSectorOrAll);
+  setPanelVisible(allSectorsNote, isAllSectorsMode);
+  setPanelVisible(customGroup, isCustomMode);
+  setPanelVisible(customDisabledNote, !isCustomMode);
+
   if (customSymbolsEl) {
     customSymbolsEl.disabled = !isCustomMode;
   }
-  if (hintEl) {
-    hintEl.textContent = isSectorMode
-      ? "Used only when mode=sector."
-      : "Ignored for selected mode.";
+  if (customExchangeEl) {
+    customExchangeEl.disabled = !isCustomMode;
   }
-  if (customSymbolsHintEl) {
-    customSymbolsHintEl.textContent = isCustomMode
-      ? "Used only when mode=custom (NSE)."
-      : "Ignored for selected mode.";
-  }
-  const titanScopeEl = el("titanScope");
-  const titanScopeHintEl = el("titanScopeHint");
-  const isSectorOrAll = mode === "sector" || mode === "all_sectors";
   if (titanScopeEl) {
     titanScopeEl.disabled = !isSectorOrAll;
   }
   if (titanScopeHintEl) {
     titanScopeHintEl.textContent = isSectorOrAll
-      ? "Uses sector_priority_rankings; weekly refresh on Saturdays. Priority mode uses top 10."
-      : "Not used for this mode.";
+      ? "Weekend rankings · refresh Saturdays"
+      : "";
+    titanScopeHintEl.classList.toggle("hidden", !isSectorOrAll);
+  }
+  if (runModeHint) {
+    runModeHint.textContent = isSectorMode
+      ? "Pick a sector and scope, then dispatch."
+      : isAllSectorsMode
+        ? "Batch run across active sectors; pick scope below."
+        : "Enter symbols and exchange for a one-off run.";
+  }
+  if (runTitanBtn) {
+    const label = RUN_TITAN_DISPATCH_LABELS[mode] || "Run Titan Now";
+    runTitanBtn.textContent = label;
+    runTitanBtn.setAttribute("aria-label", label);
+  }
+}
+
+function setReconcileScopeUi(scope) {
+  const normalized = String(scope || "sector").trim().toLowerCase();
+  const isSectorScope = normalized === "sector";
+  const sectorGroup = el("reconcileSectorGroup");
+  const sectorEl = el("reconcileSectorId");
+  const scopeHint = el("reconcileScopeHint");
+  const runBtn = el("runReconcileBtn");
+
+  setPanelVisible(sectorGroup, isSectorScope);
+  if (sectorEl) {
+    sectorEl.disabled = !isSectorScope;
+  }
+  if (scopeHint) {
+    scopeHint.textContent = isSectorScope
+      ? "Pick a sector, then dispatch reconcile on main."
+      : "Runs reconcile across all stocks in Supabase.";
+  }
+  if (runBtn) {
+    const label = RECONCILE_DISPATCH_LABELS[normalized] || "Run reconcile";
+    runBtn.textContent = label;
+    runBtn.setAttribute("aria-label", label);
   }
 }
 
@@ -332,23 +394,74 @@ async function dispatchWorkflow(filename, inputs = {}, statusSuffix = "", ref = 
   setStatus(`Dispatched ${filename} successfully.${extra}`);
 }
 
+function humanizeAgeMinutes(age) {
+  const n = Number(age);
+  if (!Number.isFinite(n) || n < 0) return null;
+  if (n < 1) return "just now";
+  if (n < 60) return `${Math.round(n)} min ago`;
+  const hrs = Math.floor(n / 60);
+  const mins = Math.round(n % 60);
+  if (mins === 0) return `${hrs}h ago`;
+  return `${hrs}h ${mins}m ago`;
+}
+
+function renderGlobalNewsLoading() {
+  const host = el("globalNewsFreshness");
+  if (!host) return;
+  host.setAttribute("aria-busy", "true");
+  host.innerHTML =
+    '<span class="chip chip-busy">Refreshing macro news…</span>' +
+    '<span class="chip chip-muted">~5s · proxy</span>';
+  host.title = "Fetching macro RSS via POST /news/refresh (no GitHub Actions run).";
+}
+
+function renderGlobalNewsError(message) {
+  const host = el("globalNewsFreshness");
+  if (!host) return;
+  host.removeAttribute("aria-busy");
+  const msg = escapeHtml(String(message || "Refresh failed"));
+  host.innerHTML =
+    `<span class="chip chip-error">Refresh failed</span>` +
+    `<span class="chip chip-muted">${msg}</span>`;
+  host.title = String(message || "Refresh failed");
+}
+
 function renderGlobalNewsFreshness(statusPayload) {
   const host = el("globalNewsFreshness");
   if (!host) return;
+  host.removeAttribute("aria-busy");
   const ttl = Number(statusPayload?.ttl_hours || 2);
   const age = statusPayload?.age_minutes;
   const snap = statusPayload?.snapshot || null;
   const fresh = statusPayload?.fresh === true;
+  const chips = [];
   if (!snap) {
-    host.textContent = `Global news snapshot: none found yet (TTL ${ttl}h). Tap "Refresh Global News".`;
+    chips.push('<span class="chip chip-stale">No snapshot</span>');
+    chips.push(`<span class="chip chip-muted">TTL ${ttl}h</span>`);
+    host.innerHTML = chips.join("");
+    host.title = "No global news snapshot yet. Tap Global news to refresh.";
     return;
   }
-  const ageTxt = Number.isFinite(Number(age)) ? `${Number(age).toFixed(1)} min` : "n/a";
-  const refreshed = snap.refreshed_at || "n/a";
-  const status = snap.fetch_status || "unknown";
-  host.textContent =
-    `Global news snapshot: ${fresh ? "fresh" : "stale"} | age ${ageTxt} | refreshed ${refreshed} | ` +
-    `items ${snap.item_count ?? "?"} | status ${status}`;
+  const ageLabel = humanizeAgeMinutes(age);
+  const refreshed = snap.refreshed_at || "";
+  const itemCount = snap.item_count ?? "?";
+  const fetchStatus = String(snap.fetch_status || "unknown").toLowerCase();
+  chips.push(
+    fresh
+      ? '<span class="chip chip-fresh">Fresh</span>'
+      : '<span class="chip chip-stale">Stale</span>',
+  );
+  if (ageLabel) {
+    chips.push(`<span class="chip chip-muted">${escapeHtml(ageLabel)}</span>`);
+  }
+  chips.push(`<span class="chip chip-muted">${escapeHtml(String(itemCount))} items</span>`);
+  if (fetchStatus && fetchStatus !== "ok") {
+    chips.push(`<span class="chip chip-error">${escapeHtml(fetchStatus)}</span>`);
+  }
+  host.innerHTML = chips.join("");
+  const titleParts = [`Refreshed ${refreshed || "n/a"}`, `TTL ${ttl}h`];
+  if (fetchStatus) titleParts.push(`Status ${fetchStatus}`);
+  host.title = titleParts.join(" · ");
 }
 
 async function fetchGlobalNewsStatus() {
@@ -682,9 +795,15 @@ function buildRunTitanInputs() {
   if (mode === "custom") {
     const parsed = parseCustomSymbols(el("customSymbols")?.value || "");
     const customSectorId = sectorId || "custom_ui";
+    const exchange = String(el("customExchange")?.value || "NSE")
+      .trim()
+      .toUpperCase();
+    if (!EXCHANGE_OPTIONS.has(exchange)) {
+      throw new Error("Exchange must be NSE or BSE.");
+    }
     inputs.sector_id = customSectorId;
     inputs.custom_symbols = parsed.join(",");
-    inputs.custom_exchange = "NSE";
+    inputs.custom_exchange = exchange;
   }
 
   return inputs;
@@ -1165,13 +1284,7 @@ function wireEvents() {
   const reconcileScopeEl = el("reconcileScope");
   if (reconcileScopeEl) {
     reconcileScopeEl.addEventListener("change", () => {
-      const hint = el("reconcileSectorHint");
-      if (hint) {
-        hint.textContent =
-          reconcileScopeEl.value === "sector"
-            ? "Used only when scope=sector."
-            : "Ignored for all-stocks scope.";
-      }
+      setReconcileScopeUi(reconcileScopeEl.value);
     });
   }
 
@@ -1181,12 +1294,17 @@ function wireEvents() {
       try {
         setWorking("Validate reconcile inputs");
         const inputs = buildReconcileInputs();
-        setWorking("Dispatch EOD reconcile");
+        const scope = String(inputs.scope || "sector");
+        setWorking(`Dispatch reconcile (${scope})`);
         await checkConnection();
+        const scopeNote =
+          scope === "sector"
+            ? `Sector: ${inputs.sector_id || "?"}`
+            : "Scope: all-stocks";
         await dispatchWorkflow(
           WORKFLOWS.runReconcile,
           inputs,
-          "Reconcile workflow dispatched on main. Report-only email when data is matured; expect insufficient-data messaging until Titan runs populate Supabase.",
+          `Dispatched on main branch.\n${scopeNote}\nReport-only email when data is ready; early runs may show insufficient-data until Titan populates Supabase.`,
           "main",
         );
       } catch (e) {
@@ -1198,16 +1316,27 @@ function wireEvents() {
   const refreshGlobalNewsBtn = el("refreshGlobalNewsBtn");
   if (refreshGlobalNewsBtn) {
     refreshGlobalNewsBtn.addEventListener("click", async () => {
+      const btn = refreshGlobalNewsBtn;
       try {
-        setWorking("Refresh global news snapshot");
+        btn.disabled = true;
+        renderGlobalNewsLoading();
+        setStatus(
+          "Refreshing macro news via proxy (POST /news/refresh). " +
+            "This does not start a GitHub Actions run — watch the chips above, not Latest workflow runs.",
+        );
         const out = await refreshGlobalNewsSnapshot();
         setStatus(
-          `Global news refreshed.\nRefreshed at: ${out.refresh.refreshed_at || "n/a"}\n` +
+          `Macro news snapshot updated (no GitHub Actions run).\n` +
+            `Refreshed at: ${out.refresh.refreshed_at || "n/a"}\n` +
             `Fetched items: ${out.refresh.item_count ?? "?"}\n` +
-            `Fresh now: ${out.status.fresh === true ? "yes" : "no"}`,
+            `Fresh now: ${out.status.fresh === true ? "yes" : "no"}\n` +
+            `Fetch status: ${out.refresh.fetch_status || "n/a"}`,
         );
       } catch (e) {
-        setStatus(`Global news refresh failed:\n${e.message}`);
+        renderGlobalNewsError(e.message);
+        setStatus(`Global news refresh failed (proxy POST /news/refresh):\n${e.message}`);
+      } finally {
+        btn.disabled = false;
       }
     });
   }
@@ -1276,6 +1405,15 @@ function wireEvents() {
     });
   }
 
+  const portfolioPdfFile = el("portfolioPdfFile");
+  const portfolioPdfFileName = el("portfolioPdfFileName");
+  if (portfolioPdfFile && portfolioPdfFileName) {
+    portfolioPdfFile.addEventListener("change", () => {
+      const file = portfolioPdfFile.files?.[0] || null;
+      portfolioPdfFileName.textContent = file ? file.name : "";
+    });
+  }
+
   const portfolioScanBtn = el("portfolioScanBtn");
   if (portfolioScanBtn) {
     portfolioScanBtn.addEventListener("click", async () => {
@@ -1315,10 +1453,15 @@ async function initStorage() {
   if (runModeEl) {
     setSectorModeUi(runModeEl.value);
   }
+  const reconcileScopeEl = el("reconcileScope");
+  if (reconcileScopeEl) {
+    setReconcileScopeUi(reconcileScopeEl.value);
+  }
   fetchGlobalNewsStatus().catch((e) => {
     const host = el("globalNewsFreshness");
     if (host) {
-      host.textContent = `Global news snapshot status unavailable: ${e.message}`;
+      host.innerHTML = '<span class="chip chip-error">Status unavailable</span>';
+      host.title = String(e.message || e);
     }
   });
 }

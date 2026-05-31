@@ -4,6 +4,7 @@
 Usage:
   python scripts/fetch_news_batch.py --sectors all --refresh-snapshots
   python scripts/fetch_news_batch.py --sectors defence,banking --workers 4
+  python scripts/fetch_news_batch.py --sector defence --priority-only
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from news_client import fetch_all_news_for_symbol
 from news_config import prepare_news_script_config
 from news_store import get_symbol_news_snapshot, store_news_items
+from sector_priority import load_priority_instruments
 from sector_registry import list_active_sector_ids, load_sector_instruments
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -33,20 +35,33 @@ def fetch_and_store_for_symbol(
     *,
     refresh_snapshots: bool,
 ) -> dict:
+    sym = str(symbol or "").strip().upper()
+    ex = str(exchange or "NSE").strip().upper()
+    logger.info("[news] %s (%s) — fetch start", sym, ex)
     try:
         items = fetch_all_news_for_symbol(symbol, exchange, cfg=cfg)
         store_result = store_news_items(cfg, items)
         inserted = int(store_result.get("inserted") or 0)
+        duplicates = int(store_result.get("duplicates_skipped") or 0)
         if refresh_snapshots and inserted > 0:
             get_symbol_news_snapshot(cfg, symbol, force_refresh=True, exchange=exchange)
+        logger.info(
+            "[news] %s (%s) — stored %s items (fetched=%s, duplicates=%s)",
+            sym,
+            ex,
+            inserted,
+            len(items),
+            duplicates,
+        )
         return {
             "symbol": symbol,
             "fetched": len(items),
             "stored": inserted,
-            "duplicates": int(store_result.get("duplicates_skipped") or 0),
+            "duplicates": duplicates,
             "error": None,
         }
     except Exception as exc:
+        logger.info("[news] %s (%s) — failed: %s", sym, ex, exc)
         return {
             "symbol": symbol,
             "fetched": 0,
@@ -63,9 +78,59 @@ def _resolve_sector_ids(raw: str) -> list[str]:
     return [part.strip().lower() for part in text.split(",") if part.strip()]
 
 
+def _collect_symbol_pairs(
+    cfg,
+    sector_ids: list[str],
+    *,
+    priority_only: bool,
+    priority_top_n: int | None,
+) -> list[tuple[str, str, str]]:
+    pairs: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for sector_id in sector_ids:
+        if priority_only:
+            instruments = load_priority_instruments(
+                cfg,
+                sector_key=sector_id,
+                top_n=priority_top_n,
+            )
+            if not instruments:
+                logger.error(
+                    "No priority rankings for sector=%s (today or latest as_of_date); "
+                    "skipping sector (--priority-only, no full-universe fallback).",
+                    sector_id,
+                )
+                continue
+        else:
+            instruments = load_sector_instruments(sector_id)
+        for inst in instruments:
+            key = (inst.symbol.strip().upper(), inst.exchange.strip().upper())
+            if not key[0] or key in seen:
+                continue
+            seen.add(key)
+            pairs.append((inst.symbol, inst.exchange, sector_id))
+    return pairs
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Fetch and store news for sector symbols.")
-    parser.add_argument("--sectors", default="all", help="Comma-separated sector ids or 'all'.")
+    parser.add_argument("--sectors", default="", help="Comma-separated sector ids or 'all'.")
+    parser.add_argument(
+        "--sector",
+        default="",
+        help="Single sector id (alternative to --sectors for scoped prefetch).",
+    )
+    parser.add_argument(
+        "--priority-only",
+        action="store_true",
+        help="Fetch only persisted priority symbols for the sector(s).",
+    )
+    parser.add_argument(
+        "--priority-top-n",
+        type=int,
+        default=None,
+        help="Top N priority symbols when --priority-only is set.",
+    )
     parser.add_argument(
         "--refresh-snapshots",
         action="store_true",
@@ -75,20 +140,21 @@ def main() -> int:
     args = parser.parse_args()
 
     cfg = prepare_news_script_config()
-    sector_ids = _resolve_sector_ids(args.sectors)
+    if str(args.sector or "").strip():
+        sector_ids = [str(args.sector).strip().lower()]
+    else:
+        sectors_raw = str(args.sectors or "all").strip()
+        sector_ids = _resolve_sector_ids(sectors_raw)
     if not sector_ids:
-        logger.error("No sectors resolved from --sectors=%r", args.sectors)
+        logger.error("No sectors resolved from --sector/--sectors")
         return 1
 
-    pairs: list[tuple[str, str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for sector_id in sector_ids:
-        for inst in load_sector_instruments(sector_id):
-            key = (inst.symbol.strip().upper(), inst.exchange.strip().upper())
-            if not key[0] or key in seen:
-                continue
-            seen.add(key)
-            pairs.append((inst.symbol, inst.exchange, sector_id))
+    pairs = _collect_symbol_pairs(
+        cfg,
+        sector_ids,
+        priority_only=bool(args.priority_only),
+        priority_top_n=args.priority_top_n,
+    )
 
     if not pairs:
         logger.error("No symbols found for sectors: %s", ", ".join(sector_ids))

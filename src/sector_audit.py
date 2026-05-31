@@ -1677,6 +1677,121 @@ def _stock_news_coverage_top_n() -> int:
         return 5
 
 
+def _news_feed_rows_to_correlator_items(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Map news_feed rows to the item shape expected by correlate_stock_news_with_macro."""
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title") or "").strip()
+        if not title:
+            continue
+        items.append(
+            {
+                "title": title,
+                "summary": str(row.get("summary") or "").strip(),
+                "source": str(row.get("source") or "news_feed").strip() or "news_feed",
+                "url": str(row.get("url") or "").strip(),
+                "published_at": str(row.get("published_at") or "").strip(),
+            }
+        )
+    return items
+
+
+def _resolve_stock_news_for_symbol(
+    cfg: TitanConfig,
+    *,
+    symbol: str,
+    exchange: str,
+    allow_live_fetch: bool,
+    fetch_stock_news_for_symbol: Any,
+) -> dict[str, Any]:
+    """Prefer cached news_feed rows; fall back to live Google RSS when allowed."""
+    sym = str(symbol).strip().upper()
+    ex = str(exchange).strip().upper()
+    try:
+        from news_store import get_recent_news_for_symbol
+    except ImportError as exc:
+        logger.warning("news_store unavailable for %s (%s): %s", sym, ex, exc)
+        get_recent_news_for_symbol = None  # type: ignore[misc, assignment]
+
+    if get_recent_news_for_symbol is not None:
+        try:
+            lookback_hours = int(os.environ.get("TITAN_NEWS_MAX_AGE_HOURS", 36))
+            fetch_limit = int(os.environ.get("TITAN_NEWS_FETCH_LIMIT", 40))
+            cached_rows = get_recent_news_for_symbol(
+                cfg,
+                sym,
+                ex,
+                lookback_hours=lookback_hours,
+                limit=fetch_limit,
+            )
+            cached_items = _news_feed_rows_to_correlator_items(cached_rows)
+            if cached_items:
+                return {
+                    "symbol": sym,
+                    "exchange": ex,
+                    "items": cached_items,
+                    "query_used": "",
+                    "alias_used": "",
+                    "fallback_used": False,
+                    "error": "",
+                    "data_source": "news_feed_cache",
+                }
+        except Exception as exc:
+            logger.warning("Cached news read failed for %s (%s): %s", sym, ex, exc)
+
+    if not allow_live_fetch:
+        return {
+            "symbol": sym,
+            "exchange": ex,
+            "items": [],
+            "query_used": "",
+            "alias_used": "",
+            "fallback_used": False,
+            "error": "cache_empty_live_skipped",
+            "data_source": "none",
+        }
+
+    if not callable(fetch_stock_news_for_symbol):
+        return {
+            "symbol": sym,
+            "exchange": ex,
+            "items": [],
+            "query_used": "",
+            "alias_used": "",
+            "fallback_used": False,
+            "error": "helper_unavailable",
+            "data_source": "none",
+        }
+    try:
+        live = fetch_stock_news_for_symbol(cfg, symbol=sym, exchange=ex)
+        if isinstance(live, dict):
+            live = {**live, "data_source": "google_rss_live"}
+            return live
+    except Exception as exc:
+        return {
+            "symbol": sym,
+            "exchange": ex,
+            "items": [],
+            "query_used": "",
+            "alias_used": "",
+            "fallback_used": False,
+            "error": f"unexpected:{exc}",
+            "data_source": "none",
+        }
+    return {
+        "symbol": sym,
+        "exchange": ex,
+        "items": [],
+        "query_used": "",
+        "alias_used": "",
+        "fallback_used": False,
+        "error": "unavailable",
+        "data_source": "none",
+    }
+
+
 def _apply_global_news_correlation(
     cfg: TitanConfig,
     *,
@@ -1760,29 +1875,22 @@ def _apply_global_news_correlation(
         if symbol and exchange in ("NSE", "BSE"):
             coverage_pairs.add((symbol, exchange))
     stock_news_by_symbol: dict[tuple[str, str], dict[str, Any]] = {}
-    if callable(fetch_stock_news_for_symbol):
-        for symbol, exchange in coverage_pairs:
-            if not symbol or exchange not in ("NSE", "BSE"):
-                continue
-            try:
-                stock_news_by_symbol[(symbol, exchange)] = fetch_stock_news_for_symbol(
-                    cfg,
-                    symbol=symbol,
-                    exchange=exchange,
-                )
-            except Exception as exc:
-                stock_news_by_symbol[(symbol, exchange)] = {
-                    "symbol": symbol,
-                    "exchange": exchange,
-                    "items": [],
-                    "query_used": "",
-                    "alias_used": "",
-                    "fallback_used": False,
-                    "error": f"unexpected:{exc}",
-                }
-    else:
+    coverage_top_n = _stock_news_coverage_top_n()
+    live_fetch_pairs = set(sorted(coverage_pairs)[:coverage_top_n])
+    for symbol, exchange in coverage_pairs:
+        if not symbol or exchange not in ("NSE", "BSE"):
+            continue
+        allow_live = (symbol, exchange) in live_fetch_pairs
+        stock_news_by_symbol[(symbol, exchange)] = _resolve_stock_news_for_symbol(
+            cfg,
+            symbol=symbol,
+            exchange=exchange,
+            allow_live_fetch=allow_live,
+            fetch_stock_news_for_symbol=fetch_stock_news_for_symbol,
+        )
+    if not callable(fetch_stock_news_for_symbol):
         logger.warning(
-            "News correlation stock-level fetch skipped; helper unavailable for %s symbols",
+            "News correlation live Google RSS helper unavailable; cache-only for %s symbols",
             len(coverage_pairs),
         )
 
@@ -1809,12 +1917,15 @@ def _apply_global_news_correlation(
         stock_aliases = stock_news_meta.get("aliases")
         stock_aliases = stock_aliases if isinstance(stock_aliases, list) else []
         stock_fetch_error = str(stock_news_meta.get("error") or "").strip()
-        if not callable(fetch_stock_news_for_symbol):
-            coverage_status = "helper_unavailable"
-        elif (symbol, exchange) not in stock_news_by_symbol:
+        data_source = str(stock_news_meta.get("data_source") or "").strip()
+        if (symbol, exchange) not in stock_news_by_symbol:
             coverage_status = "not_covered"
         elif stock_news_items:
-            coverage_status = "fetched"
+            coverage_status = "cached" if data_source == "news_feed_cache" else "fetched"
+        elif stock_fetch_error == "cache_empty_live_skipped":
+            coverage_status = "empty:cache_miss_live_skipped"
+        elif stock_fetch_error == "helper_unavailable":
+            coverage_status = "helper_unavailable"
         elif stock_fetch_error:
             coverage_status = f"empty:{stock_fetch_error}"
         else:
@@ -2331,7 +2442,6 @@ def build_equity_live_audit(
     audit["fundamental_score"] = fundamental.get("score")
     audit["fundamental_reasons"] = fundamental.get("reasons", [])
     _refresh_symbol_scoring_outputs(audit)
-    _enrich_audit_with_symbol_news(cfg, inst, audit)
     if not with_narrative:
         return audit, ""
     from brain import generate_titan_narrative

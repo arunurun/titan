@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime, timezone
 import pytest
@@ -9,8 +10,10 @@ import pytest
 from news_client import (
     _finnhub_symbol,
     deduplicate_news_items,
+    fetch_all_news_for_symbol,
     fetch_news_from_newsapi,
     normalize_news_item,
+    reset_paid_api_circuit,
 )
 
 
@@ -67,6 +70,79 @@ def test_finnhub_symbol_maps_nse_bse():
 def test_fetch_news_from_newsapi_skips_without_key(monkeypatch):
     monkeypatch.delenv("NEWSAPI_API_KEY", raising=False)
     assert fetch_news_from_newsapi("INFY", api_key="") == []
+
+
+def test_fetch_news_from_newsapi_rate_limit_trips_circuit(monkeypatch):
+    reset_paid_api_circuit()
+    monkeypatch.delenv("TITAN_NEWS_SKIP_PAID_APIS", raising=False)
+
+    class _BoomClient:
+        def __init__(self, api_key):
+            pass
+
+        def get_everything(self, **kwargs):
+            raise RuntimeError("rateLimited - developer plan")
+
+    monkeypatch.setattr("newsapi.NewsApiClient", _BoomClient)
+    first = fetch_news_from_newsapi("INFY", api_key="test-key")
+    second = fetch_news_from_newsapi("TCS", api_key="test-key")
+    assert first == []
+    assert second == []
+    reset_paid_api_circuit()
+
+
+def test_fetch_all_news_for_symbol_fail_open_rss_only(monkeypatch):
+    reset_paid_api_circuit()
+    monkeypatch.setenv("TITAN_NEWS_SKIP_PAID_APIS", "1")
+    monkeypatch.setattr(
+        "news_client.fetch_news_from_rss_feeds",
+        lambda **kwargs: [
+            {
+                "symbol": "HAL",
+                "exchange": "NSE",
+                "title": "HAL wins major order",
+                "url": "https://example.com/hal-order",
+                "source": "rss:moneycontrol",
+                "published_at": "2026-05-31T10:00:00+00:00",
+                "summary": "HAL contract update",
+                "relevance_score": 0.9,
+            }
+        ],
+    )
+    items = fetch_all_news_for_symbol("HAL", "NSE")
+    assert items
+    assert str(items[0].get("title") or "").startswith("HAL")
+    reset_paid_api_circuit()
+    monkeypatch.delenv("TITAN_NEWS_SKIP_PAID_APIS", raising=False)
+
+
+def test_fetch_all_news_for_symbol_logs_source_summary(caplog, monkeypatch):
+    reset_paid_api_circuit()
+    monkeypatch.setenv("TITAN_NEWS_SKIP_PAID_APIS", "1")
+    monkeypatch.setattr(
+        "news_client.fetch_news_from_rss_feeds",
+        lambda **kwargs: [
+            {
+                "symbol": "HAL",
+                "exchange": "NSE",
+                "title": "HAL wins major order",
+                "url": "https://example.com/hal-order",
+                "source": "rss:moneycontrol",
+                "published_at": "2026-05-31T10:00:00+00:00",
+                "summary": "HAL contract update",
+                "relevance_score": 0.9,
+            }
+        ],
+    )
+    with caplog.at_level(logging.INFO, logger="news_client"):
+        fetch_all_news_for_symbol("HAL", "NSE")
+    messages = [rec.getMessage() for rec in caplog.records if rec.name == "news_client"]
+    assert any(
+        "[news] HAL (NSE) — sources: rss=1 newsapi=skipped finnhub=skipped" in msg
+        for msg in messages
+    )
+    reset_paid_api_circuit()
+    monkeypatch.delenv("TITAN_NEWS_SKIP_PAID_APIS", raising=False)
 
 
 @pytest.mark.skipif(

@@ -2166,30 +2166,7 @@ def persist_sector_rankings(cfg: TitanConfig, rows: list[dict[str, Any]]) -> dic
         return {"persisted": False, "reason": "api_error", "message": msg}
 
 
-def load_priority_instruments(
-    cfg: TitanConfig,
-    *,
-    sector_key: str,
-    top_n: int | None = None,
-) -> list[SectorInstrument]:
-    client = create_client(cfg.supabase_url, cfg.supabase_key)
-    as_of = datetime.now(IST).date().isoformat()
-    q = (
-        client.table("sector_priority_rankings")
-        .select("symbol,exchange,rank_in_sector")
-        .eq("sector_key", sector_key)
-        .eq("as_of_date", as_of)
-        .eq("is_priority", True)
-        .order("rank_in_sector")
-    )
-    if top_n is not None:
-        q = q.limit(max(1, int(top_n)))
-    try:
-        res = q.execute()
-    except Exception as exc:
-        logger.warning("Priority load failed for sector=%s: %s", sector_key, exc)
-        return []
-    data = list(getattr(res, "data", None) or [])
+def _priority_rows_to_instruments(data: list[dict[str, Any]]) -> list[SectorInstrument]:
     out: list[SectorInstrument] = []
     for row in data:
         if not isinstance(row, dict):
@@ -2200,6 +2177,100 @@ def load_priority_instruments(
             continue
         out.append(SectorInstrument(symbol=sym, exchange=ex))
     return out
+
+
+def _fetch_priority_ranking_rows(
+    client: Any,
+    *,
+    sector_key: str,
+    as_of_date: str,
+    top_n: int | None,
+) -> list[dict[str, Any]]:
+    q = (
+        client.table("sector_priority_rankings")
+        .select("symbol,exchange,rank_in_sector")
+        .eq("sector_key", sector_key)
+        .eq("as_of_date", as_of_date)
+        .eq("is_priority", True)
+        .order("rank_in_sector")
+    )
+    if top_n is not None:
+        q = q.limit(max(1, int(top_n)))
+    res = q.execute()
+    rows = list(getattr(res, "data", None) or [])
+    return [x for x in rows if isinstance(x, dict)]
+
+
+def _latest_priority_as_of_date(client: Any, *, sector_key: str) -> str | None:
+    try:
+        res = (
+            client.table("sector_priority_rankings")
+            .select("as_of_date")
+            .eq("sector_key", sector_key)
+            .eq("is_priority", True)
+            .order("as_of_date", desc=True)
+            .limit(1)
+            .execute()
+        )
+    except Exception as exc:
+        logger.warning("Latest priority as_of_date lookup failed for sector=%s: %s", sector_key, exc)
+        return None
+    rows = list(getattr(res, "data", None) or [])
+    if not rows or not isinstance(rows[0], dict):
+        return None
+    return str(rows[0].get("as_of_date") or "").strip() or None
+
+
+def load_priority_instruments(
+    cfg: TitanConfig,
+    *,
+    sector_key: str,
+    top_n: int | None = None,
+) -> list[SectorInstrument]:
+    """Load persisted priority symbols for a sector.
+
+    Tries today's IST ``as_of_date`` first, then the latest date with priority rows
+    (weekend refresh may not have run yet on a new calendar day).
+    """
+    client = create_client(cfg.supabase_url, cfg.supabase_key)
+    as_of_today = datetime.now(IST).date().isoformat()
+    try:
+        data = _fetch_priority_ranking_rows(
+            client,
+            sector_key=sector_key,
+            as_of_date=as_of_today,
+            top_n=top_n,
+        )
+    except Exception as exc:
+        logger.warning("Priority load failed for sector=%s as_of=%s: %s", sector_key, as_of_today, exc)
+        data = []
+    if not data:
+        latest = _latest_priority_as_of_date(client, sector_key=sector_key)
+        if latest and latest != as_of_today:
+            try:
+                data = _fetch_priority_ranking_rows(
+                    client,
+                    sector_key=sector_key,
+                    as_of_date=latest,
+                    top_n=top_n,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Priority load failed for sector=%s as_of=%s: %s",
+                    sector_key,
+                    latest,
+                    exc,
+                )
+                data = []
+            if data:
+                logger.info(
+                    "Priority list for sector=%s: no rows for as_of=%s; using latest as_of=%s (%s symbols)",
+                    sector_key,
+                    as_of_today,
+                    latest,
+                    len(data),
+                )
+    return _priority_rows_to_instruments(data)
 
 
 def persist_daily_winners(

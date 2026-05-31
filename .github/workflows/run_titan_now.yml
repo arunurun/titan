@@ -58,6 +58,16 @@ on:
         description: "Top N symbols when titan_scope=priority (empty = 10 for sector, 5 for all_sectors)"
         required: false
         default: ""
+      refresh_global_news:
+        description: "Refresh macro global_news_snapshots before run"
+        required: false
+        default: false
+        type: boolean
+      prefetch_symbol_news:
+        description: "Prefetch symbol news for sector via fetch_news_batch"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -83,6 +93,88 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python scripts/inject_breeze_session_from_supabase.py
 
+      - name: Load news/CI config from Supabase
+        if: inputs.refresh_global_news == true || inputs.prefetch_symbol_news == true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: python scripts/load_ci_config_from_supabase.py
+
+      - name: News preflight
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          TITAN_NEWS_SNAPSHOT_TTL_HOURS: "2"
+          TITAN_NEWS_MAX_AGE_HOURS: "36"
+          TITAN_NEWS_FETCH_LIMIT: "40"
+          TITAN_NEWS_DRIVER_LIMIT: "3"
+          TITAN_STOCK_NEWS_COVERAGE_TOP_N: "5"
+        run: |
+          SCOPE="${{ inputs.titan_scope }}"
+          if [ -z "$SCOPE" ]; then SCOPE="priority"; fi
+          ARGS=""
+          if [ "${{ inputs.mode }}" = "sector" ] || [ "${{ inputs.mode }}" = "custom" ]; then
+            ARGS="--sector ${{ inputs.sector_id }}"
+            if [ "$SCOPE" = "priority" ]; then
+              ARGS="$ARGS --priority-only"
+              TOPN="${{ inputs.priority_top_n }}"
+              if [ -n "$TOPN" ]; then
+                ARGS="$ARGS --priority-top-n $TOPN"
+              fi
+            fi
+          fi
+          python scripts/preflight_news.py $ARGS
+
+      - name: Refresh global news snapshot
+        if: inputs.refresh_global_news == true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          TITAN_NEWS_SNAPSHOT_TTL_HOURS: "2"
+          TITAN_NEWS_MAX_AGE_HOURS: "36"
+          TITAN_NEWS_FETCH_LIMIT: "40"
+          TITAN_NEWS_DRIVER_LIMIT: "3"
+        run: |
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, str(Path(".").resolve() / "src"))
+          from news_config import prepare_news_script_config
+          from sector_priority import refresh_global_news_snapshot
+          cfg = prepare_news_script_config()
+          result = refresh_global_news_snapshot(cfg)
+          print(
+              "Global news refresh:",
+              f"items={result.get('item_count')}",
+              f"persisted={result.get('persisted')}",
+              f"status={result.get('fetch_status')}",
+          )
+          if not result.get("item_count"):
+              print("WARNING: global news refresh returned no items", file=sys.stderr)
+          PY
+
+      - name: Prefetch symbol news
+        if: inputs.prefetch_symbol_news == true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          TITAN_NEWS_MAX_AGE_HOURS: "36"
+          TITAN_NEWS_FETCH_LIMIT: "40"
+          TITAN_NEWS_SNAPSHOT_TTL_HOURS: "2"
+        run: |
+          SCOPE="${{ inputs.titan_scope }}"
+          if [ -z "$SCOPE" ]; then SCOPE="priority"; fi
+          ARGS="--sector ${{ inputs.sector_id }} --refresh-snapshots --workers 4"
+          if [ "$SCOPE" = "priority" ]; then
+            ARGS="$ARGS --priority-only"
+            TOPN="${{ inputs.priority_top_n }}"
+            if [ -n "$TOPN" ]; then
+              ARGS="$ARGS --priority-top-n $TOPN"
+            fi
+          fi
+          python scripts/fetch_news_batch.py $ARGS
+
       - name: Run Titan
         env:
           GITHUB_RUN_ID: ${{ github.run_id }}
@@ -106,6 +198,11 @@ jobs:
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           SMTP_USE_TLS: ${{ secrets.SMTP_USE_TLS }}
           GH_INPUT_PORTFOLIO_JSON: ${{ inputs.portfolio_holdings_json }}
+          TITAN_NEWS_MAX_AGE_HOURS: "36"
+          TITAN_NEWS_SNAPSHOT_TTL_HOURS: "2"
+          TITAN_NEWS_FETCH_LIMIT: "40"
+          TITAN_NEWS_DRIVER_LIMIT: "3"
+          TITAN_STOCK_NEWS_COVERAGE_TOP_N: "5"
         run: |
           SCOPE="${{ inputs.titan_scope }}"
           if [ -z "$SCOPE" ]; then SCOPE="priority"; fi

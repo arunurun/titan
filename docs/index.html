@@ -130,6 +130,218 @@
     .row { display: grid; grid-template-columns: 1fr; gap: 8px; }
     .hidden { display: none; }
     @media (min-width: 760px) { .row.two { grid-template-columns: 1fr 1fr; } }
+    /* News card */
+    .news-lead { margin: 0 0 10px; }
+    .news-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    @media (max-width: 400px) {
+      .news-actions { grid-template-columns: 1fr; }
+    }
+    .news-action { display: flex; flex-direction: column; gap: 4px; }
+    .news-action button.btn-sm {
+      width: 100%;
+      margin-top: 0;
+    }
+    .news-action-hint {
+      font-size: 0.74rem;
+      color: var(--muted);
+      line-height: 1.25;
+      padding: 0 2px;
+    }
+    .news-status {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+      margin-top: 10px;
+      min-height: 1.4rem;
+    }
+    .news-status .chip {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 0.74rem;
+      font-weight: 600;
+      line-height: 1.2;
+      border: 1px solid var(--border);
+      background: #fff;
+      color: var(--text);
+    }
+    .news-status .chip-fresh {
+      background: #e6f4ea;
+      border-color: #c6e7d0;
+      color: #137333;
+    }
+    .news-status .chip-stale {
+      background: #fef7e0;
+      border-color: #f9e6a8;
+      color: #b06000;
+    }
+    .news-status .chip-muted {
+      background: #f1f3f4;
+      border-color: #e0e3e7;
+      color: var(--muted);
+      font-weight: 500;
+    }
+    .news-status .chip-error {
+      background: #fce8e6;
+      border-color: #f5c6c2;
+      color: #c5221f;
+    }
+    .news-status .chip-busy {
+      background: #e8f0fe;
+      border-color: #c6dafc;
+      color: #1967d2;
+    }
+    /* Run Titan card */
+    .run-titan-lead { margin: 0 0 10px; }
+    .run-titan-panel { margin-top: 4px; }
+    .run-titan-panel + .run-titan-panel { margin-top: 10px; }
+    .field-hint {
+      display: block;
+      margin-top: 4px;
+      font-size: 0.74rem;
+      color: var(--muted);
+      line-height: 1.25;
+    }
+    .run-titan-panel label {
+      margin-top: 0;
+    }
+    .run-titan-panel label + select,
+    .run-titan-panel label + input,
+    .run-titan-panel label + textarea {
+      margin-top: 4px;
+    }
+    .run-titan-dispatch {
+      margin-top: 14px;
+    }
+    .run-titan-dispatch button {
+      margin-top: 0;
+    }
+    /* Run Reconcile card */
+    .reconcile-lead { margin: 0 0 10px; }
+    .reconcile-panel { margin-top: 10px; }
+    .reconcile-panel label {
+      margin-top: 0;
+    }
+    .reconcile-panel label + select,
+    .reconcile-panel label + input {
+      margin-top: 4px;
+    }
+    .reconcile-advanced {
+      margin-top: 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      background: #f8f9fa;
+    }
+    .reconcile-advanced summary {
+      cursor: pointer;
+      font-size: 0.82rem;
+      color: var(--muted);
+      font-weight: 600;
+      list-style: none;
+    }
+    .reconcile-advanced summary::-webkit-details-marker { display: none; }
+    .reconcile-advanced[open] summary { margin-bottom: 8px; }
+    .reconcile-advanced .row.two { margin-top: 4px; }
+    .reconcile-dispatch {
+      margin-top: 14px;
+    }
+    .reconcile-dispatch button {
+      margin-top: 0;
+    }
+    /* Portfolio quick scan card */
+    .portfolio-lead { margin: 0 0 10px; }
+    .portfolio-paths {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      margin-top: 4px;
+    }
+    .portfolio-path {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px;
+      background: #f8f9fa;
+    }
+    .portfolio-path label {
+      margin-top: 0;
+      font-weight: 600;
+      font-size: 0.88rem;
+    }
+    .portfolio-path label + input,
+    .portfolio-path label + textarea,
+    .portfolio-path .portfolio-file-wrap {
+      margin-top: 6px;
+    }
+    .portfolio-or {
+      align-self: center;
+      margin: 6px 0;
+      font-size: 0.74rem;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .portfolio-file-wrap input[type="file"] {
+      margin-top: 0;
+      padding: 8px 10px;
+      font-size: 0.88rem;
+      background: #fff;
+      cursor: pointer;
+    }
+    .portfolio-file-wrap input[type="file"]::file-selector-button {
+      margin-right: 10px;
+      padding: 8px 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: #fff;
+      color: var(--text);
+      font-size: 0.82rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .portfolio-file-name {
+      display: block;
+      margin-top: 6px;
+      font-size: 0.78rem;
+      color: var(--muted);
+      word-break: break-all;
+    }
+    .portfolio-file-name:empty { display: none; }
+    .portfolio-format-help {
+      margin-top: 10px;
+    }
+    .portfolio-format-help summary {
+      cursor: pointer;
+      user-select: none;
+      color: var(--muted);
+    }
+    .portfolio-format-help[open] summary {
+      margin-bottom: 6px;
+    }
+    .portfolio-format-help ul {
+      margin: 0;
+      padding-left: 1.1rem;
+      font-size: 0.78rem;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+    .portfolio-format-help li + li { margin-top: 4px; }
+    .portfolio-format-help code {
+      font-size: 0.76rem;
+    }
+    .portfolio-dispatch {
+      margin-top: 14px;
+    }
+    .portfolio-dispatch button {
+      margin-top: 0;
+    }
   </style>
 </head>
 <body data-page="control">
@@ -152,88 +364,123 @@
       <p class="proxy-line">Proxy: <code id="proxyBase">loading…</code></p>
     </div>
 
-    <div class="card">
-      <h3>Run Titan Now</h3>
-      <p class="small">Global news snapshot is TTL-based (fresh for 2h). Refresh it before dispatch when needed. Per-symbol news uses a separate workflow.</p>
-      <div class="btn-toolbar">
-        <button type="button" class="secondary btn-sm" id="refreshGlobalNewsBtn">Refresh Global News</button>
-        <button type="button" class="secondary btn-sm" id="fetchSymbolNewsBtn">Fetch symbol news</button>
-      </div>
-      <div class="small" id="globalNewsFreshness">Global news snapshot: checking...</div>
-      <div class="row two">
-        <div>
-          <label>Mode</label>
-          <select id="runMode">
-            <option value="sector" selected>sector</option>
-            <option value="all_sectors">all_sectors</option>
-            <option value="custom">custom</option>
-          </select>
+    <div class="card" aria-labelledby="newsCardTitle">
+      <h3 id="newsCardTitle">News</h3>
+      <p class="small news-lead">Global news updates the macro snapshot on the proxy (~5s, no GitHub Actions). Symbol news dispatches <code>news_fetch.yml</code>.</p>
+      <div class="news-actions" role="group" aria-label="News actions">
+        <div class="news-action">
+          <button
+            type="button"
+            class="secondary btn-sm"
+            id="refreshGlobalNewsBtn"
+            aria-label="Refresh global news snapshot"
+            title="Updates macro snapshot via proxy (~5s). Does not start GitHub Actions."
+          >Global news</button>
+          <span class="news-action-hint">Updates macro snapshot (~5s) · not a workflow</span>
         </div>
-        <div>
-          <label>Sector ID</label>
-          <select id="sectorId">
-            <option value="">Loading sectors…</option>
-          </select>
-          <p class="small" id="sectorHint">Used only when mode=sector.</p>
-        </div>
-      </div>
-      <div class="row">
-        <div>
-          <label>Titan scope</label>
-          <select id="titanScope">
-            <option value="priority" selected>priority (weekend refresh list, top 10)</option>
-            <option value="full">full sector universe</option>
-          </select>
-          <p class="small" id="titanScopeHint">Ranked list in Supabase; refresh Saturdays.</p>
+        <div class="news-action">
+          <button
+            type="button"
+            class="secondary btn-sm"
+            id="fetchSymbolNewsBtn"
+            aria-label="Fetch symbol news for all sectors"
+            title="All sectors batch → news_feed"
+          >Symbol news</button>
+          <span class="news-action-hint">Dispatches news_fetch.yml → news_feed</span>
         </div>
       </div>
-      <div class="row">
-        <div>
-          <label>Custom Symbols (comma, space, or newline separated)</label>
-          <textarea
-            id="customSymbols"
-            rows="4"
-            placeholder="RELIANCE, TCS, INFY"
-          ></textarea>
-          <p class="small" id="customSymbolsHint">Used only when mode=custom (NSE).</p>
-        </div>
+      <div class="news-status" id="globalNewsFreshness" role="status" aria-live="polite">
+        <span class="chip chip-muted">Checking…</span>
       </div>
-      <button type="button" id="runTitanBtn">Dispatch Run Titan Now</button>
     </div>
 
-    <div class="card">
-      <h3>Run Reconcile Now</h3>
-      <p class="small">Manual post-market reconcile via GitHub Actions. Run after daily Titan analysis has populated Supabase for several sessions (typically ~1 week). Sends one report-only email.</p>
-      <div class="row two">
-        <div>
-          <label>Reconcile scope</label>
-          <select id="reconcileScope">
-            <option value="sector" selected>single sector (recommended)</option>
-            <option value="all-stocks">all-stocks</option>
-          </select>
-        </div>
-        <div>
-          <label>Reconcile sector (if scope=sector)</label>
-          <select id="reconcileSectorId">
-            <option value="">Loading sectors…</option>
-          </select>
-          <p class="small" id="reconcileSectorHint">Used only when scope=sector.</p>
-        </div>
+    <div class="card" aria-labelledby="runTitanCardTitle">
+      <h3 id="runTitanCardTitle">Run Titan Now</h3>
+      <p class="small run-titan-lead">Dispatch sector analysis, all sectors, or a custom symbol list via GitHub Actions.</p>
+      <label for="runMode">Mode</label>
+      <select id="runMode" aria-describedby="runModeHint">
+        <option value="sector" selected>Single sector</option>
+        <option value="all_sectors">All sectors</option>
+        <option value="custom">Custom symbols</option>
+      </select>
+      <span class="field-hint" id="runModeHint">Sector run analyzes one sector; all sectors runs the full batch.</span>
+
+      <div id="runTitanSectorGroup" class="run-titan-panel">
+        <label for="sectorId">Sector</label>
+        <select id="sectorId" title="Supabase sector key (e.g. defence, it)">
+          <option value="">Loading sectors…</option>
+        </select>
       </div>
-      <details>
-        <summary class="small">Advanced options</summary>
+
+      <div id="runTitanScopeGroup" class="run-titan-panel">
+        <label for="titanScope" title="Priority uses weekend sector_priority_rankings (top 10). Full runs the entire sector universe.">Scope</label>
+        <select id="titanScope">
+          <option value="priority" selected>Priority · top 10</option>
+          <option value="full">Full universe</option>
+        </select>
+        <span class="field-hint" id="titanScopeHint">Weekend rankings · refresh Saturdays</span>
+      </div>
+
+      <p id="runTitanAllSectorsNote" class="field-hint hidden" role="note">Runs every active sector in sequence. Load per-sector digests from Past runs after completion.</p>
+
+      <div id="runTitanCustomGroup" class="run-titan-panel hidden">
+        <label for="customSymbols" title="Comma, space, or newline separated NSE/BSE symbols">Symbols</label>
+        <textarea
+          id="customSymbols"
+          rows="3"
+          placeholder="RELIANCE, TCS, INFY"
+          autocomplete="off"
+        ></textarea>
+        <label for="customExchange">Exchange</label>
+        <select id="customExchange">
+          <option value="NSE" selected>NSE</option>
+          <option value="BSE">BSE</option>
+        </select>
+        <span class="field-hint" id="customSymbolsHint">Custom mode only · up to 120 symbols</span>
+      </div>
+
+      <p id="runTitanCustomDisabledNote" class="field-hint">Custom symbols — switch mode to Custom symbols.</p>
+
+      <div class="run-titan-dispatch">
+        <button type="button" id="runTitanBtn">Run sector digest</button>
+      </div>
+    </div>
+
+    <div class="card" aria-labelledby="reconcileCardTitle">
+      <h3 id="reconcileCardTitle">Run Reconcile Now</h3>
+      <p class="small reconcile-lead">Post-market Supabase reconcile and report-only email. Run after several Titan sessions have populated data.</p>
+      <label for="reconcileScope">Scope</label>
+      <select id="reconcileScope" aria-describedby="reconcileScopeHint">
+        <option value="sector" selected>Single sector</option>
+        <option value="all-stocks">All stocks</option>
+      </select>
+      <span class="field-hint" id="reconcileScopeHint">Sector scope analyzes one Supabase sector; all stocks runs the full universe.</span>
+
+      <div id="reconcileSectorGroup" class="reconcile-panel">
+        <label for="reconcileSectorId">Sector</label>
+        <select id="reconcileSectorId" title="Supabase sector key (e.g. defence, it)">
+          <option value="">Loading sectors…</option>
+        </select>
+      </div>
+
+      <details class="reconcile-advanced">
+        <summary>Advanced</summary>
         <div class="row two">
           <div>
-            <label>Workers (optional)</label>
-            <input id="reconcileWorkers" type="number" min="1" max="32" placeholder="4" />
+            <label for="reconcileWorkers">Workers</label>
+            <input id="reconcileWorkers" type="number" min="1" max="32" placeholder="4 (default)" />
+            <span class="field-hint">Ignored in Supabase-only mode</span>
           </div>
           <div>
-            <label>Backfill days (optional)</label>
+            <label for="reconcileBackfillDays">Backfill days</label>
             <input id="reconcileBackfillDays" type="number" min="0" max="120" placeholder="0" />
           </div>
         </div>
       </details>
-      <button type="button" class="secondary" id="runReconcileBtn">Run Reconcile Now</button>
+
+      <div class="reconcile-dispatch">
+        <button type="button" id="runReconcileBtn">Run sector reconcile</button>
+      </div>
     </div>
 
     <div class="card">
@@ -241,21 +488,49 @@
       <button type="button" class="secondary" id="openInsightsByRunBtn">Open insights (pick a recent run)</button>
     </div>
 
-    <div class="card">
-      <h3>Portfolio PDF Quick Scan</h3>
-      <p class="small">
-        Upload a portfolio PDF (or paste holdings text). Parsed on-device as <code>symbol, quantity, avg buy price</code>.
-        Default <strong>NSE</strong>; use a <code>BSE:</code> prefix per line if needed. Up to <strong>75</strong> holdings per run.
-      </p>
-      <label>Upload portfolio PDF (optional)</label>
-      <input id="portfolioPdfFile" type="file" accept=".pdf,application/pdf" />
-      <label>Fallback holdings text (optional)</label>
-      <textarea
-        id="portfolioHoldingsText"
-        rows="5"
-        placeholder="NSE:RELIANCE, 10, 2380.5&#10;INFY 5 1452&#10;ASTMIC31501,3,710"
-      ></textarea>
-      <button type="button" class="secondary" id="portfolioScanBtn">Dispatch Portfolio Quick Scan</button>
+    <div class="card" aria-labelledby="portfolioCardTitle">
+      <h3 id="portfolioCardTitle">Portfolio PDF Quick Scan</h3>
+      <p class="small portfolio-lead">Parse holdings on-device, then dispatch position analysis. Provide a PDF or paste text — either path works.</p>
+
+      <div class="portfolio-paths" role="group" aria-label="Portfolio input options">
+        <div class="portfolio-path">
+          <label for="portfolioPdfFile">PDF upload</label>
+          <div class="portfolio-file-wrap">
+            <input
+              id="portfolioPdfFile"
+              type="file"
+              accept=".pdf,application/pdf"
+              aria-describedby="portfolioPdfFileName"
+            />
+            <span id="portfolioPdfFileName" class="portfolio-file-name" role="status" aria-live="polite"></span>
+          </div>
+        </div>
+        <div class="portfolio-or" aria-hidden="true">or</div>
+        <div class="portfolio-path">
+          <label for="portfolioHoldingsText">Paste holdings</label>
+          <textarea
+            id="portfolioHoldingsText"
+            rows="4"
+            placeholder="RELIANCE, 10, 2380.5&#10;INFY 5 1452"
+            autocomplete="off"
+            spellcheck="false"
+          ></textarea>
+        </div>
+      </div>
+
+      <details class="portfolio-format-help">
+        <summary class="small">Format help</summary>
+        <ul>
+          <li>Each line: <code>SYMBOL qty avg_buy_price</code> (comma or space separated)</li>
+          <li>Default exchange <strong>NSE</strong>; prefix BSE lines with <code>BSE:SYMBOL</code></li>
+          <li>Example: <code>NSE:RELIANCE, 10, 2380.5</code> or <code>INFY 5 1452</code></li>
+          <li>Up to <strong>75</strong> holdings per run</li>
+        </ul>
+      </details>
+
+      <div class="portfolio-dispatch">
+        <button type="button" id="portfolioScanBtn">Run portfolio scan</button>
+      </div>
     </div>
 
     <div class="card">
@@ -267,6 +542,6 @@
     </div>
   </div>
 
-  <script defer src="./app.js?v=20260530-1"></script>
+  <script defer src="./app.js?v=20260531-3"></script>
 </body>
 </html>
