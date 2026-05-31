@@ -106,6 +106,10 @@ jobs:
 
         env:
 
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+
           TITAN_NEWS_MAX_AGE_HOURS: "36"
 
           TITAN_NEWS_FETCH_LIMIT: "40"
@@ -115,6 +119,12 @@ jobs:
 
 
       - name: Cleanup old news (>72h)
+
+        env:
+
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
 
         run: python scripts/cleanup_news.py --older-than-hours 72
 
