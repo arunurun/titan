@@ -80,6 +80,69 @@ DEFAULT_TRANSITION_TRAILING_WINDOW_DAYS = 30
 ONE_WEEK_TRADING_DAYS = 5
 ONE_MONTH_TRADING_DAYS = 20
 
+# Optional DB columns; omitted on upsert when PostgREST reports they are missing.
+_SYMBOL_FEATURE_OPTIONAL_COLUMNS = frozenset(
+    {
+        "volume_participation_ratio",
+        "next_day_score",
+        "next_week_score",
+        "news_correlation",
+        "news_sentiment_aggregate",
+        "news_sentiment_score",
+        "news_sentiment_trend",
+        "news_count",
+    }
+)
+_SECTOR_ROLLUP_OPTIONAL_COLUMNS = frozenset({"pct_volume_participation_gt_1"})
+_TAPE_EXTRAS_SCORE_KEYS = (
+    "next_day_score",
+    "next_week_score",
+    "return_5d_pct",
+    "return_10d_pct",
+    "return_20d_pct",
+    "sell_signal",
+    "news_correlation",
+)
+
+
+def _is_missing_column_api_error(message: str) -> bool:
+    msg = str(message or "").lower()
+    return "column" in msg and (
+        "does not exist" in msg
+        or "could not find" in msg
+        or "schema cache" in msg
+    )
+
+
+def _prune_row_columns(row: dict[str, Any], *, drop: frozenset[str]) -> dict[str, Any]:
+    return {k: v for k, v in row.items() if k not in drop}
+
+
+def _upsert_rows_with_optional_columns(
+    client: Any,
+    table: str,
+    rows: Sequence[dict[str, Any]],
+    *,
+    on_conflict: str,
+    optional_columns: frozenset[str],
+) -> None:
+    payload = list(rows)
+    try:
+        client.table(table).upsert(payload, on_conflict=on_conflict).execute()
+        return
+    except APIError as e:
+        payload_msg = e.args[0] if e.args else {}
+        msg = payload_msg.get("message", str(e)) if isinstance(payload_msg, dict) else str(e)
+        if not _is_missing_column_api_error(msg):
+            raise
+        logger.warning(
+            "Upsert to %s failed due to missing optional columns; retrying slim payload. Details: %s",
+            table,
+            msg,
+        )
+    slim = [_prune_row_columns(row, drop=optional_columns) for row in payload]
+    client.table(table).upsert(slim, on_conflict=on_conflict).execute()
+
 
 def _normalize_action_signal(raw_signal: Any) -> str:
     text_signal = str(raw_signal or "").strip().lower()
@@ -465,6 +528,10 @@ def build_symbol_daily_feature(
         "news_correlation": audit.get("news_correlation"),
     }
 
+    vpr = audit.get("volume_participation_ratio", audit.get("absorption_ratio"))
+    next_day_score = audit.get("next_day_score")
+    next_week_score = audit.get("next_week_score")
+
     return sanitize_for_json(
         {
             "trade_date": trade_date,
@@ -479,8 +546,10 @@ def build_symbol_daily_feature(
                 audit.get("action_signal", audit.get("sell_signal"))
             ),
             "z_score": audit.get("z_score"),
-            "volume_participation_ratio": audit.get("volume_participation_ratio", audit.get("absorption_ratio")),
-            "absorption_ratio": audit.get("absorption_ratio"),
+            "volume_participation_ratio": vpr,
+            "absorption_ratio": audit.get("absorption_ratio", vpr),
+            "next_day_score": next_day_score,
+            "next_week_score": next_week_score,
             "return_1d_pct": audit.get("return_1d_pct"),
             "ema_200_distance_pct": audit.get("ema_200_distance_pct"),
             "atr_14_pct": audit.get("atr_14_pct"),
@@ -598,10 +667,13 @@ def persist_sector_run_analytics(
         client.table("symbol_daily_features").delete().eq("trade_date", trade_date).eq(
             "sector", sector
         ).execute()
-        client.table("symbol_daily_features").upsert(
+        _upsert_rows_with_optional_columns(
+            client,
+            "symbol_daily_features",
             features,
             on_conflict="trade_date,sector,symbol,exchange",
-        ).execute()
+            optional_columns=_SYMBOL_FEATURE_OPTIONAL_COLUMNS,
+        )
         transition_persist_meta = persist_stock_signal_transition_analytics(
             cfg,
             client=client,
@@ -619,10 +691,13 @@ def persist_sector_run_analytics(
             run_id=run_id,
             run_ts_iso=run_ts_iso,
         )
-        client.table("sector_daily_rollup").upsert(
-            rollup,
+        _upsert_rows_with_optional_columns(
+            client,
+            "sector_daily_rollup",
+            [rollup],
             on_conflict="trade_date,sector",
-        ).execute()
+            optional_columns=_SECTOR_ROLLUP_OPTIONAL_COLUMNS,
+        )
         return {
             "enabled": True,
             "persisted": True,
@@ -945,7 +1020,28 @@ def _news_summary_from_audit(audit: dict[str, Any]) -> str:
 
 def _safe_tape_extras(row: dict[str, Any]) -> dict[str, Any]:
     x = row.get("tape_extras")
-    return x if isinstance(x, dict) else {}
+    out = dict(x) if isinstance(x, dict) else {}
+    for key in _TAPE_EXTRAS_SCORE_KEYS:
+        if key not in out and row.get(key) is not None:
+            out[key] = row.get(key)
+    return out
+
+
+def _reconcile_data_sparse_reason(
+    *,
+    symbol_count: int,
+    coverage_next_day: int,
+    coverage_next_week: int,
+    features_row_count: int,
+    symbols_with_prior_prediction: int,
+) -> str | None:
+    if symbol_count <= 0 and features_row_count <= 0:
+        return "no_symbol_daily_features_in_lookback"
+    if coverage_next_day <= 0 and coverage_next_week <= 0:
+        if symbols_with_prior_prediction <= 0:
+            return "need_at_least_two_trading_days_with_predictions"
+        return "predictions_not_matured_against_realized_returns"
+    return None
 
 
 def _safe_json_list(value: Any) -> list[Any]:
@@ -1210,6 +1306,7 @@ def build_stock_reconcile_snapshot(
         whipsaw_total = 0
         whipsaw_symbols = 0
         stability_scores: list[float] = []
+        symbols_with_prior_prediction = 0
         shortlist_total = 0
         shortlist_1d_hit = 0
         shortlist_5d_hit = 0
@@ -1243,6 +1340,8 @@ def build_stock_reconcile_snapshot(
                 or "hold"
             )
             pred_1d = _score_direction(previous_tape.get("next_day_score"))
+            if pred_1d != "unknown":
+                symbols_with_prior_prediction += 1
             realized_1d = _return_direction(current.get("return_1d_pct"))
             hit_1d = _direction_hit(pred_1d, realized_1d)
 
@@ -1364,6 +1463,13 @@ def build_stock_reconcile_snapshot(
 
         coverage_1d = sum(v["next_day"]["total"] for v in accuracy.values())
         coverage_1w = sum(v["next_week"]["total"] for v in accuracy.values())
+        data_sparse_reason = _reconcile_data_sparse_reason(
+            symbol_count=len(per_symbol),
+            coverage_next_day=coverage_1d,
+            coverage_next_week=coverage_1w,
+            features_row_count=len(features_all),
+            symbols_with_prior_prediction=symbols_with_prior_prediction,
+        )
         whipsaw_rate = (100.0 * whipsaw_symbols / len(per_symbol)) if per_symbol else None
         avg_stability = round(sum(stability_scores) / len(stability_scores), 2) if stability_scores else None
         shortlist_1d_rate = (100.0 * shortlist_1d_hit / shortlist_total) if shortlist_total else None
@@ -1384,6 +1490,8 @@ def build_stock_reconcile_snapshot(
                 "scope": str(table_inputs.get("scope") or "sector"),
                 "coverage_next_day": coverage_1d,
                 "coverage_next_week": coverage_1w,
+                "data_sparse_reason": data_sparse_reason,
+                "symbols_with_prior_prediction": symbols_with_prior_prediction,
                 "success_count": len(success_symbols),
                 "failure_count": len(failure_symbols),
                 "success_symbols": success_symbols[:30],
@@ -1433,6 +1541,7 @@ def build_stock_reconcile_snapshot(
     transition_counts: dict[str, int] = defaultdict(int)
     per_symbol: dict[str, dict[str, Any]] = {}
     news_rows: list[dict[str, Any]] = []
+    symbols_with_prior_prediction = 0
 
     for audit in audits:
         symbol = str(audit.get("symbol") or "").strip().upper()
@@ -1442,6 +1551,8 @@ def build_stock_reconcile_snapshot(
         hist = historical_rows_by_symbol.get(symbol, [])
         prev = hist[0] if hist else {}
         prev_tape = _safe_tape_extras(prev) if isinstance(prev, dict) else {}
+        if _score_direction(prev_tape.get("next_day_score")) != "unknown":
+            symbols_with_prior_prediction += 1
         week_ref = hist[4] if len(hist) >= 5 else {}
         week_tape = _safe_tape_extras(week_ref) if isinstance(week_ref, dict) else {}
 
@@ -1542,6 +1653,14 @@ def build_stock_reconcile_snapshot(
             "scope": "sector",
             "coverage_next_day": coverage_1d,
             "coverage_next_week": coverage_1w,
+            "data_sparse_reason": _reconcile_data_sparse_reason(
+                symbol_count=len(per_symbol),
+                coverage_next_day=coverage_1d,
+                coverage_next_week=coverage_1w,
+                features_row_count=sum(len(v) for v in historical_rows_by_symbol.values()),
+                symbols_with_prior_prediction=symbols_with_prior_prediction,
+            ),
+            "symbols_with_prior_prediction": symbols_with_prior_prediction,
             "success_count": len(success_symbols),
             "failure_count": len(failure_symbols),
             "success_symbols": success_symbols[:30],
@@ -1625,6 +1744,18 @@ def build_reconcile_digest_lines(summary: dict[str, Any]) -> list[str]:
     confidence_txt = "n/a" if confidence is None else f"{confidence}%"
     cov_1d_txt = str(coverage_next_day) if coverage_next_day > 0 else "insufficient matured data"
     cov_1w_txt = str(coverage_next_week) if coverage_next_week > 0 else "insufficient matured data"
+    sparse_reason = str(summary.get("data_sparse_reason") or "").strip()
+    sparse_hints = {
+        "no_symbol_daily_features_in_lookback": (
+            "No symbol_daily_features rows in lookback; run Titan with TITAN_ENABLE_ANALYSIS_STORE=1."
+        ),
+        "need_at_least_two_trading_days_with_predictions": (
+            "Need at least two trading days with next_day_score in tape_extras (or top-level columns) per symbol."
+        ),
+        "predictions_not_matured_against_realized_returns": (
+            "Prior-day predictions exist but realized returns are missing for the as-of date."
+        ),
+    }
     lines.extend(
         [
             "",
@@ -1633,6 +1764,8 @@ def build_reconcile_digest_lines(summary: dict[str, Any]) -> list[str]:
             f"Evaluated: next-day {cov_1d_txt} | next-week {cov_1w_txt} | news-correlation confidence: {confidence_txt}",
         ]
     )
+    if no_matured_coverage and sparse_reason in sparse_hints:
+        lines.append(f"Data note: {sparse_hints[sparse_reason]}")
 
     per_symbol = summary.get("per_symbol")
     per_symbol = per_symbol if isinstance(per_symbol, dict) else {}
