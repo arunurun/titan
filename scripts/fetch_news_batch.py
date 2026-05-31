@@ -35,20 +35,33 @@ def fetch_and_store_for_symbol(
     *,
     refresh_snapshots: bool,
 ) -> dict:
+    sym = str(symbol or "").strip().upper()
+    ex = str(exchange or "NSE").strip().upper()
+    logger.info("[news] %s (%s) — fetch start", sym, ex)
     try:
         items = fetch_all_news_for_symbol(symbol, exchange, cfg=cfg)
         store_result = store_news_items(cfg, items)
         inserted = int(store_result.get("inserted") or 0)
+        duplicates = int(store_result.get("duplicates_skipped") or 0)
         if refresh_snapshots and inserted > 0:
             get_symbol_news_snapshot(cfg, symbol, force_refresh=True, exchange=exchange)
+        logger.info(
+            "[news] %s (%s) — stored %s items (fetched=%s, duplicates=%s)",
+            sym,
+            ex,
+            inserted,
+            len(items),
+            duplicates,
+        )
         return {
             "symbol": symbol,
             "fetched": len(items),
             "stored": inserted,
-            "duplicates": int(store_result.get("duplicates_skipped") or 0),
+            "duplicates": duplicates,
             "error": None,
         }
     except Exception as exc:
+        logger.info("[news] %s (%s) — failed: %s", sym, ex, exc)
         return {
             "symbol": symbol,
             "fetched": 0,

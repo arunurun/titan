@@ -554,14 +554,22 @@ def fetch_all_news_for_symbol(
                 logger.warning("News fetch future failed for %s (%s): %s", sym, label, exc)
                 source_notes[label] = "error"
 
+    def _source_status(label: str) -> str:
+        note = source_notes.get(label, "")
+        count = source_counts.get(label, 0)
+        if note == "skipped":
+            return "skipped"
+        if note == "error":
+            return "failed"
+        return str(count)
+
     logger.info(
-        "News sources for %s: newsapi=%s finnhub=%s rss=%s (counts=%s notes=%s)",
+        "[news] %s (%s) — sources: rss=%s newsapi=%s finnhub=%s",
         sym,
-        source_counts.get("newsapi", 0),
-        source_counts.get("finnhub", 0),
-        source_counts.get("rss", 0),
-        source_counts,
-        source_notes,
+        ex,
+        _source_status("rss"),
+        _source_status("newsapi"),
+        _source_status("finnhub"),
     )
 
     fresh: list[dict[str, Any]] = []

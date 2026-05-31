@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime, timezone
 import pytest
@@ -111,6 +112,35 @@ def test_fetch_all_news_for_symbol_fail_open_rss_only(monkeypatch):
     items = fetch_all_news_for_symbol("HAL", "NSE")
     assert items
     assert str(items[0].get("title") or "").startswith("HAL")
+    reset_paid_api_circuit()
+    monkeypatch.delenv("TITAN_NEWS_SKIP_PAID_APIS", raising=False)
+
+
+def test_fetch_all_news_for_symbol_logs_source_summary(caplog, monkeypatch):
+    reset_paid_api_circuit()
+    monkeypatch.setenv("TITAN_NEWS_SKIP_PAID_APIS", "1")
+    monkeypatch.setattr(
+        "news_client.fetch_news_from_rss_feeds",
+        lambda **kwargs: [
+            {
+                "symbol": "HAL",
+                "exchange": "NSE",
+                "title": "HAL wins major order",
+                "url": "https://example.com/hal-order",
+                "source": "rss:moneycontrol",
+                "published_at": "2026-05-31T10:00:00+00:00",
+                "summary": "HAL contract update",
+                "relevance_score": 0.9,
+            }
+        ],
+    )
+    with caplog.at_level(logging.INFO, logger="news_client"):
+        fetch_all_news_for_symbol("HAL", "NSE")
+    messages = [rec.getMessage() for rec in caplog.records if rec.name == "news_client"]
+    assert any(
+        "[news] HAL (NSE) — sources: rss=1 newsapi=skipped finnhub=skipped" in msg
+        for msg in messages
+    )
     reset_paid_api_circuit()
     monkeypatch.delenv("TITAN_NEWS_SKIP_PAID_APIS", raising=False)
 

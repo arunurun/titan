@@ -199,6 +199,8 @@ def store_news_items(
     """Insert news into news_feed with URL deduplication."""
     if not items:
         return {"inserted": 0, "duplicates_skipped": 0, "updated": 0, "errors": 0}
+    sym = str(items[0].get("symbol") or "").strip().upper()
+    ex = str(items[0].get("exchange") or "NSE").strip().upper()
     client = create_client(cfg.supabase_url, cfg.supabase_key)
     inserted = 0
     duplicates_skipped = 0
@@ -251,6 +253,7 @@ def store_news_items(
         except Exception as exc:
             logger.warning("news_feed upsert failed url=%s: %s", row.get("url"), exc)
             errors += 1
+    logger.info("[news] %s (%s) — stored %s items in news_feed", sym, ex, inserted)
     return {
         "inserted": inserted,
         "duplicates_skipped": duplicates_skipped,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 from pathlib import Path
 
 from config_loader import TitanConfig
@@ -70,3 +71,27 @@ def test_collect_symbol_pairs_priority_only_uses_priority_list(monkeypatch):
     assert len(pairs) == 2
     symbols = {p[0] for p in pairs}
     assert symbols == {"HAL", "BEL"}
+
+
+def test_fetch_and_store_for_symbol_logs_start_and_result(caplog, monkeypatch):
+    mod = _load_fetch_module()
+    cfg = make_cfg()
+
+    monkeypatch.setattr(
+        mod,
+        "fetch_all_news_for_symbol",
+        lambda _sym, _ex, cfg=None: [{"symbol": "HAL", "exchange": "NSE", "title": "t", "url": "u"}],
+    )
+    monkeypatch.setattr(
+        mod,
+        "store_news_items",
+        lambda _cfg, _items: {"inserted": 1, "duplicates_skipped": 0},
+    )
+
+    with caplog.at_level(logging.INFO, logger=mod.logger.name):
+        result = mod.fetch_and_store_for_symbol(cfg, "HAL", "NSE", refresh_snapshots=False)
+
+    assert result["error"] is None
+    messages = [rec.getMessage() for rec in caplog.records if rec.name == mod.logger.name]
+    assert any("[news] HAL (NSE) — fetch start" in msg for msg in messages)
+    assert any("[news] HAL (NSE) — stored 1 items" in msg for msg in messages)
