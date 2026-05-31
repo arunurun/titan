@@ -130,21 +130,7 @@
     .row { display: grid; grid-template-columns: 1fr; gap: 8px; }
     .hidden { display: none; }
     @media (min-width: 760px) { .row.two { grid-template-columns: 1fr 1fr; } }
-    /* News subsection (Run Titan card) */
-    .news-subsection {
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      background: #f8f9fa;
-      padding: 10px;
-      margin-bottom: 12px;
-    }
-    .subsection-title {
-      margin: 0 0 4px;
-      font-size: 0.88rem;
-      font-weight: 700;
-      color: var(--text);
-      letter-spacing: 0.01em;
-    }
+    /* News card */
     .news-lead { margin: 0 0 10px; }
     .news-actions {
       display: grid;
@@ -206,11 +192,6 @@
       border-color: #f5c6c2;
       color: #c5221f;
     }
-    .card-divider {
-      border: none;
-      border-top: 1px solid var(--border);
-      margin: 0 0 12px;
-    }
   </style>
 </head>
 <body data-page="control">
@@ -233,38 +214,38 @@
       <p class="proxy-line">Proxy: <code id="proxyBase">loading…</code></p>
     </div>
 
+    <div class="card" aria-labelledby="newsCardTitle">
+      <h3 id="newsCardTitle">News</h3>
+      <p class="small news-lead">Refresh macro headlines before dispatch if stale. Symbol news runs on its own workflow.</p>
+      <div class="news-actions" role="group" aria-label="News actions">
+        <div class="news-action">
+          <button
+            type="button"
+            class="secondary btn-sm"
+            id="refreshGlobalNewsBtn"
+            aria-label="Refresh global news snapshot"
+            title="Macro RSS snapshot · ~2h TTL"
+          >Global news</button>
+          <span class="news-action-hint">Macro RSS snapshot · ~2h TTL</span>
+        </div>
+        <div class="news-action">
+          <button
+            type="button"
+            class="secondary btn-sm"
+            id="fetchSymbolNewsBtn"
+            aria-label="Fetch symbol news for all sectors"
+            title="All sectors batch → news_feed"
+          >Symbol news</button>
+          <span class="news-action-hint">All sectors batch → news_feed</span>
+        </div>
+      </div>
+      <div class="news-status" id="globalNewsFreshness" role="status" aria-live="polite">
+        <span class="chip chip-muted">Checking…</span>
+      </div>
+    </div>
+
     <div class="card">
       <h3>Run Titan Now</h3>
-      <section class="news-subsection" aria-labelledby="newsSubsectionTitle">
-        <h4 class="subsection-title" id="newsSubsectionTitle">News</h4>
-        <p class="small news-lead">Refresh macro headlines before dispatch if stale. Symbol news runs on its own workflow.</p>
-        <div class="news-actions" role="group" aria-label="News actions">
-          <div class="news-action">
-            <button
-              type="button"
-              class="secondary btn-sm"
-              id="refreshGlobalNewsBtn"
-              aria-label="Refresh global news snapshot"
-              title="Macro RSS snapshot · ~2h TTL"
-            >Global news</button>
-            <span class="news-action-hint">Macro RSS snapshot · ~2h TTL</span>
-          </div>
-          <div class="news-action">
-            <button
-              type="button"
-              class="secondary btn-sm"
-              id="fetchSymbolNewsBtn"
-              aria-label="Fetch symbol news for all sectors"
-              title="All sectors batch → news_feed"
-            >Symbol news</button>
-            <span class="news-action-hint">All sectors batch → news_feed</span>
-          </div>
-        </div>
-        <div class="news-status" id="globalNewsFreshness" role="status" aria-live="polite">
-          <span class="chip chip-muted">Checking…</span>
-        </div>
-      </section>
-      <hr class="card-divider" aria-hidden="true" />
       <div class="row two">
         <div>
           <label>Mode</label>
