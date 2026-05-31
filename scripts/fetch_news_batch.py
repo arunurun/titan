@@ -17,6 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
+from news_client import fetch_all_news_for_symbol
 from news_config import prepare_news_script_config
 from news_store import get_symbol_news_snapshot, store_news_items
 from sector_registry import list_active_sector_ids, load_sector_instruments
