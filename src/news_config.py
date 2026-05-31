@@ -146,6 +146,8 @@ def prepare_news_script_config(
     """Load TitanConfig for news scripts after applying titan_secrets runtime keys."""
     from config_loader import TitanConfig, load_config
 
+    apply_news_runtime_to_environ()
+
     url = _env_value(SUPABASE_URL_KEY_NAME)
     key = _env_value(SUPABASE_KEY_KEY_NAME)
     if url and key:
@@ -158,6 +160,12 @@ def prepare_news_script_config(
             supabase_key=key,
         )
         apply_news_runtime_to_environ(load_news_runtime_config(bootstrap))
+
+    if not _env_value(SUPABASE_URL_KEY_NAME) or not _env_value(SUPABASE_KEY_KEY_NAME):
+        raise ValueError(
+            "Missing SUPABASE_URL or SUPABASE_KEY. In CI, run load_ci_config_from_supabase.py "
+            "first (bootstrap secrets) or set both in the environment."
+        )
     return load_config(env_path, require_breeze=False, require_gemini=False)
 
 

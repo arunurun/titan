@@ -151,6 +151,17 @@ def main() -> int:
         if os.environ.get(name, "").strip() and name not in CI_PASSTHROUGH_ENV_KEYS:
             continue
         _append_github_env_kv(name, value, gh_env)
+        os.environ[name] = value
+        written.append(name)
+
+    for name in CI_PASSTHROUGH_ENV_KEYS:
+        if name in written:
+            continue
+        value = os.environ.get(name, "").strip()
+        if not value:
+            continue
+        _append_github_env_kv(name, value, gh_env)
+        os.environ[name] = value
         written.append(name)
 
     print(

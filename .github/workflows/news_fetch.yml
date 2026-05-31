@@ -1,143 +1,83 @@
 # Fetch news and refresh symbol snapshots (VADER-only; no torch/transformers).
-
 #
-
 # Config: stored in Supabase public.titan_secrets (see sql/create_titan_secrets.sql).
-
-# Local dev: .env overrides. CI: one bootstrap secret loads the rest into GITHUB_ENV.
-
+# Local dev: .env overrides. CI: bootstrap secrets load the rest into GITHUB_ENV.
 #
-
-# Bootstrap (pick one repository secret):
-
+# Bootstrap (pick one repository secret on the Load config step):
 #   SUPABASE_ACCESS_TOKEN — Supabase Management API (recommended; single secret)
-
 #   SUPABASE_KEY — service_role JWT (with SUPABASE_URL; PostgREST read of titan_secrets)
-
-# SUPABASE_URL: repository variable or secret (project URL is not highly sensitive)
-
+# SUPABASE_URL: repository secret (required for bootstrap)
 #
-
-# Optional workflow env (not secrets): TITAN_NEWS_MAX_AGE_HOURS, TITAN_NEWS_FETCH_LIMIT
-
-
+# Fetch/Cleanup steps inherit SUPABASE_* from GITHUB_ENV (Load step). Do not re-declare
+# empty secrets.SUPABASE_* on those steps — that would override GITHUB_ENV values.
 
 name: Fetch News and Update Cache
 
-
-
 on:
-
   workflow_dispatch:
-
   schedule:
-
     # Every 2h Mon–Fri during Indian market hours (09:00–17:00 IST = 03:30–11:30 UTC).
-
     - cron: "30 3,5,7,9,11 * * 1-5"
 
-
-
 permissions:
-
   contents: read
 
-
-
 jobs:
-
   fetch-news:
-
     runs-on: ubuntu-latest
-
     timeout-minutes: 30
-
     defaults:
-
       run:
-
         working-directory: .
 
-
-
     steps:
-
       - name: Checkout
-
         uses: actions/checkout@v4
 
-
-
       - name: Set up Python
-
         uses: actions/setup-python@v4
-
         with:
-
           python-version: "3.10"
 
-
-
       - name: Install dependencies (VADER-only)
-
         run: |
-
           pip install -r requirements.txt
-
           pip install newsapi-python finnhub-python feedparser nltk
 
-
-
       - name: Load news/CI config from Supabase
-
         env:
-
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-
         run: python scripts/load_ci_config_from_supabase.py
 
-
-
       - name: Fetch and cache news
-
         env:
-
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-
           TITAN_NEWS_MAX_AGE_HOURS: "36"
-
           TITAN_NEWS_FETCH_LIMIT: "40"
-
-        run: python scripts/fetch_news_batch.py --sectors all --refresh-snapshots --workers 4
-
-
+        run: |
+          if [ -z "${SUPABASE_URL:-}" ] && [ -n "${{ secrets.SUPABASE_URL }}" ]; then
+            echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" >> "$GITHUB_ENV"
+            export SUPABASE_URL="${{ secrets.SUPABASE_URL }}"
+          fi
+          if [ -z "${SUPABASE_KEY:-}" ] && [ -n "${{ secrets.SUPABASE_KEY }}" ]; then
+            echo "SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}" >> "$GITHUB_ENV"
+            export SUPABASE_KEY="${{ secrets.SUPABASE_KEY }}"
+          fi
+          python scripts/fetch_news_batch.py --sectors all --refresh-snapshots --workers 4
 
       - name: Cleanup old news (>72h)
-
-        env:
-
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-
-        run: python scripts/cleanup_news.py --older-than-hours 72
-
-
+        run: |
+          if [ -z "${SUPABASE_URL:-}" ] && [ -n "${{ secrets.SUPABASE_URL }}" ]; then
+            export SUPABASE_URL="${{ secrets.SUPABASE_URL }}"
+          fi
+          if [ -z "${SUPABASE_KEY:-}" ] && [ -n "${{ secrets.SUPABASE_KEY }}" ]; then
+            export SUPABASE_KEY="${{ secrets.SUPABASE_KEY }}"
+          fi
+          python scripts/cleanup_news.py --older-than-hours 72
 
       - name: Report status
-
         if: always()
-
         run: |
-
           echo "News fetch workflow finished."
-
           echo "Verify news_feed and symbol_news_snapshots in Supabase; macro global_news_snapshots is separate."
-
-
