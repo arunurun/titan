@@ -118,38 +118,71 @@ function cfg() {
   return { proxyBase };
 }
 
+const RUN_TITAN_DISPATCH_LABELS = {
+  sector: "Run sector digest",
+  all_sectors: "Run all sectors",
+  custom: "Run custom symbols",
+};
+
+function setPanelVisible(panelEl, visible) {
+  if (!panelEl) return;
+  panelEl.classList.toggle("hidden", !visible);
+}
+
 function setSectorModeUi(mode) {
   const sectorEl = el("sectorId");
-  const hintEl = el("sectorHint");
+  const sectorGroup = el("runTitanSectorGroup");
+  const scopeGroup = el("runTitanScopeGroup");
+  const customGroup = el("runTitanCustomGroup");
+  const allSectorsNote = el("runTitanAllSectorsNote");
+  const customDisabledNote = el("runTitanCustomDisabledNote");
   const customSymbolsEl = el("customSymbols");
-  const customSymbolsHintEl = el("customSymbolsHint");
-  if (!sectorEl) return;
+  const customExchangeEl = el("customExchange");
+  const runModeHint = el("runModeHint");
+  const titanScopeEl = el("titanScope");
+  const titanScopeHintEl = el("titanScopeHint");
+  const runTitanBtn = el("runTitanBtn");
+
   const isSectorMode = mode === "sector";
+  const isAllSectorsMode = mode === "all_sectors";
   const isCustomMode = mode === "custom";
-  sectorEl.disabled = !isSectorMode;
+  const isSectorOrAll = isSectorMode || isAllSectorsMode;
+
+  if (sectorEl) {
+    sectorEl.disabled = !isSectorMode;
+  }
+  setPanelVisible(sectorGroup, isSectorMode);
+  setPanelVisible(scopeGroup, isSectorOrAll);
+  setPanelVisible(allSectorsNote, isAllSectorsMode);
+  setPanelVisible(customGroup, isCustomMode);
+  setPanelVisible(customDisabledNote, !isCustomMode);
+
   if (customSymbolsEl) {
     customSymbolsEl.disabled = !isCustomMode;
   }
-  if (hintEl) {
-    hintEl.textContent = isSectorMode
-      ? "Used only when mode=sector."
-      : "Ignored for selected mode.";
+  if (customExchangeEl) {
+    customExchangeEl.disabled = !isCustomMode;
   }
-  if (customSymbolsHintEl) {
-    customSymbolsHintEl.textContent = isCustomMode
-      ? "Used only when mode=custom (NSE)."
-      : "Ignored for selected mode.";
-  }
-  const titanScopeEl = el("titanScope");
-  const titanScopeHintEl = el("titanScopeHint");
-  const isSectorOrAll = mode === "sector" || mode === "all_sectors";
   if (titanScopeEl) {
     titanScopeEl.disabled = !isSectorOrAll;
   }
   if (titanScopeHintEl) {
     titanScopeHintEl.textContent = isSectorOrAll
-      ? "Uses sector_priority_rankings; weekly refresh on Saturdays. Priority mode uses top 10."
-      : "Not used for this mode.";
+      ? "Weekend rankings · refresh Saturdays"
+      : "";
+    titanScopeHintEl.classList.toggle("hidden", !isSectorOrAll);
+  }
+  if (runModeHint) {
+    runModeHint.textContent = isSectorMode
+      ? "Pick a sector and scope, then dispatch."
+      : isAllSectorsMode
+        ? "Batch run across active sectors; pick scope below."
+        : "Enter symbols and exchange for a one-off run.";
+  }
+  if (runTitanBtn) {
+    const label = RUN_TITAN_DISPATCH_LABELS[mode] || "Run Titan Now";
+    runTitanBtn.textContent = label;
+    runTitanBtn.setAttribute("aria-label", label);
   }
 }
 
@@ -711,9 +744,15 @@ function buildRunTitanInputs() {
   if (mode === "custom") {
     const parsed = parseCustomSymbols(el("customSymbols")?.value || "");
     const customSectorId = sectorId || "custom_ui";
+    const exchange = String(el("customExchange")?.value || "NSE")
+      .trim()
+      .toUpperCase();
+    if (!EXCHANGE_OPTIONS.has(exchange)) {
+      throw new Error("Exchange must be NSE or BSE.");
+    }
     inputs.sector_id = customSectorId;
     inputs.custom_symbols = parsed.join(",");
-    inputs.custom_exchange = "NSE";
+    inputs.custom_exchange = exchange;
   }
 
   return inputs;
@@ -1302,6 +1341,15 @@ function wireEvents() {
   if (openInsightsByRunBtn) {
     openInsightsByRunBtn.addEventListener("click", () => {
       window.open("./insights.html", "_blank", "noopener,noreferrer");
+    });
+  }
+
+  const portfolioPdfFile = el("portfolioPdfFile");
+  const portfolioPdfFileName = el("portfolioPdfFileName");
+  if (portfolioPdfFile && portfolioPdfFileName) {
+    portfolioPdfFile.addEventListener("change", () => {
+      const file = portfolioPdfFile.files?.[0] || null;
+      portfolioPdfFileName.textContent = file ? file.name : "";
     });
   }
 
