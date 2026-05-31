@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from analysis_store import (
     _evaluate_transition_horizon_outcome,
+    _safe_tape_extras,
     build_reconcile_digest_lines,
     build_comparison_payload,
     build_sector_daily_rollup,
@@ -85,6 +86,70 @@ def test_build_symbol_daily_feature_includes_news_columns():
     assert row["news_sentiment_trend"] == "strengthening"
     assert row["news_count"] == 4
     assert row["tape_extras"]["news_correlation"]["direction"] == "tailwind"
+
+
+def test_build_symbol_daily_feature_denormalizes_prediction_scores():
+    audit = {
+        "symbol": "HAL",
+        "exchange": "NSE",
+        "intent_score": 61.2,
+        "absorption_ratio": 1.4,
+        "volume_participation_ratio": 1.304,
+        "next_day_score": 49.77,
+        "next_week_score": 52.0,
+        "rows": 38,
+    }
+    row = build_symbol_daily_feature(
+        audit,
+        trade_date="2026-04-12",
+        sector="defence",
+        run_id="defence-20260412-100000",
+        run_ts_iso="2026-04-12T10:00:00+05:30",
+    )
+    assert row["volume_participation_ratio"] == 1.304
+    assert row["next_day_score"] == 49.77
+    assert row["next_week_score"] == 52.0
+    assert row["tape_extras"]["next_day_score"] == 49.77
+
+
+def test_safe_tape_extras_merges_top_level_scores():
+    merged = _safe_tape_extras(
+        {"tape_extras": {"sell_signal": "hold"}, "next_day_score": 61.0, "next_week_score": 58.0}
+    )
+    assert merged["next_day_score"] == 61.0
+    assert merged["next_week_score"] == 58.0
+    assert merged["sell_signal"] == "hold"
+
+
+def test_build_stock_reconcile_snapshot_uses_top_level_prediction_columns():
+    table_inputs = {
+        "sector": "defence",
+        "as_of_trade_date": "2026-04-12",
+        "symbol_daily_features": [
+            {
+                "trade_date": "2026-04-12",
+                "symbol": "HAL",
+                "exchange": "NSE",
+                "action_signal": "buy",
+                "return_1d_pct": 1.4,
+            },
+            {
+                "trade_date": "2026-04-11",
+                "symbol": "HAL",
+                "exchange": "NSE",
+                "action_signal": "hold",
+                "next_day_score": 60.0,
+            },
+        ],
+        "stock_signal_transition_analytics": [],
+        "sector_daily_winners": [],
+        "sector_daily_rollup": [],
+        "global_news_snapshots": [],
+        "llm_digest_memory": [],
+    }
+    snap = build_stock_reconcile_snapshot([], table_inputs=table_inputs, as_of_trade_date="2026-04-12")
+    assert snap["coverage_next_day"] == 1
+    assert snap["per_symbol"]["HAL"]["hit_next_day"] is True
 
 
 def test_build_stock_signal_transition_analytics_row_computes_transition_and_ratios():
@@ -568,8 +633,10 @@ def test_build_reconcile_digest_lines_handles_insufficient_matured_data():
             },
         },
     }
+    summary["data_sparse_reason"] = "need_at_least_two_trading_days_with_predictions"
     text = "\n".join(build_reconcile_digest_lines(summary))
     assert "Evaluated: next-day insufficient matured data | next-week insufficient matured data" in text
+    assert "Need at least two trading days with next_day_score" in text
     assert "Count: 1 (insufficient matured data)" in text
     assert "Top symbols: none (0 evaluable symbols out of 3)" in text
     assert "HOLD->BUY: insufficient matured data | not-evaluable 1" in text
