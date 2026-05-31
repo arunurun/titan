@@ -124,6 +124,11 @@ const RUN_TITAN_DISPATCH_LABELS = {
   custom: "Run custom symbols",
 };
 
+const RECONCILE_DISPATCH_LABELS = {
+  sector: "Run sector reconcile",
+  "all-stocks": "Run all-stocks reconcile",
+};
+
 function setPanelVisible(panelEl, visible) {
   if (!panelEl) return;
   panelEl.classList.toggle("hidden", !visible);
@@ -183,6 +188,30 @@ function setSectorModeUi(mode) {
     const label = RUN_TITAN_DISPATCH_LABELS[mode] || "Run Titan Now";
     runTitanBtn.textContent = label;
     runTitanBtn.setAttribute("aria-label", label);
+  }
+}
+
+function setReconcileScopeUi(scope) {
+  const normalized = String(scope || "sector").trim().toLowerCase();
+  const isSectorScope = normalized === "sector";
+  const sectorGroup = el("reconcileSectorGroup");
+  const sectorEl = el("reconcileSectorId");
+  const scopeHint = el("reconcileScopeHint");
+  const runBtn = el("runReconcileBtn");
+
+  setPanelVisible(sectorGroup, isSectorScope);
+  if (sectorEl) {
+    sectorEl.disabled = !isSectorScope;
+  }
+  if (scopeHint) {
+    scopeHint.textContent = isSectorScope
+      ? "Pick a sector, then dispatch reconcile on main."
+      : "Runs reconcile across all stocks in Supabase.";
+  }
+  if (runBtn) {
+    const label = RECONCILE_DISPATCH_LABELS[normalized] || "Run reconcile";
+    runBtn.textContent = label;
+    runBtn.setAttribute("aria-label", label);
   }
 }
 
@@ -1233,13 +1262,7 @@ function wireEvents() {
   const reconcileScopeEl = el("reconcileScope");
   if (reconcileScopeEl) {
     reconcileScopeEl.addEventListener("change", () => {
-      const hint = el("reconcileSectorHint");
-      if (hint) {
-        hint.textContent =
-          reconcileScopeEl.value === "sector"
-            ? "Used only when scope=sector."
-            : "Ignored for all-stocks scope.";
-      }
+      setReconcileScopeUi(reconcileScopeEl.value);
     });
   }
 
@@ -1249,12 +1272,17 @@ function wireEvents() {
       try {
         setWorking("Validate reconcile inputs");
         const inputs = buildReconcileInputs();
-        setWorking("Dispatch EOD reconcile");
+        const scope = String(inputs.scope || "sector");
+        setWorking(`Dispatch reconcile (${scope})`);
         await checkConnection();
+        const scopeNote =
+          scope === "sector"
+            ? `Sector: ${inputs.sector_id || "?"}`
+            : "Scope: all-stocks";
         await dispatchWorkflow(
           WORKFLOWS.runReconcile,
           inputs,
-          "Reconcile workflow dispatched on main. Report-only email when data is matured; expect insufficient-data messaging until Titan runs populate Supabase.",
+          `Dispatched on main branch.\n${scopeNote}\nReport-only email when data is ready; early runs may show insufficient-data until Titan populates Supabase.`,
           "main",
         );
       } catch (e) {
@@ -1391,6 +1419,10 @@ async function initStorage() {
   const runModeEl = el("runMode");
   if (runModeEl) {
     setSectorModeUi(runModeEl.value);
+  }
+  const reconcileScopeEl = el("reconcileScope");
+  if (reconcileScopeEl) {
+    setReconcileScopeUi(reconcileScopeEl.value);
   }
   fetchGlobalNewsStatus().catch((e) => {
     const host = el("globalNewsFreshness");

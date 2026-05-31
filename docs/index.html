@@ -217,6 +217,39 @@
     .run-titan-dispatch button {
       margin-top: 0;
     }
+    /* Run Reconcile card */
+    .reconcile-lead { margin: 0 0 10px; }
+    .reconcile-panel { margin-top: 10px; }
+    .reconcile-panel label {
+      margin-top: 0;
+    }
+    .reconcile-panel label + select,
+    .reconcile-panel label + input {
+      margin-top: 4px;
+    }
+    .reconcile-advanced {
+      margin-top: 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      background: #f8f9fa;
+    }
+    .reconcile-advanced summary {
+      cursor: pointer;
+      font-size: 0.82rem;
+      color: var(--muted);
+      font-weight: 600;
+      list-style: none;
+    }
+    .reconcile-advanced summary::-webkit-details-marker { display: none; }
+    .reconcile-advanced[open] summary { margin-bottom: 8px; }
+    .reconcile-advanced .row.two { margin-top: 4px; }
+    .reconcile-dispatch {
+      margin-top: 14px;
+    }
+    .reconcile-dispatch button {
+      margin-top: 0;
+    }
     /* Portfolio quick scan card */
     .portfolio-lead { margin: 0 0 10px; }
     .portfolio-paths {
@@ -408,39 +441,41 @@
       </div>
     </div>
 
-    <div class="card">
-      <h3>Run Reconcile Now</h3>
-      <p class="small">Manual post-market reconcile via GitHub Actions. Run after daily Titan analysis has populated Supabase for several sessions (typically ~1 week). Sends one report-only email.</p>
-      <div class="row two">
-        <div>
-          <label>Reconcile scope</label>
-          <select id="reconcileScope">
-            <option value="sector" selected>single sector (recommended)</option>
-            <option value="all-stocks">all-stocks</option>
-          </select>
-        </div>
-        <div>
-          <label>Reconcile sector (if scope=sector)</label>
-          <select id="reconcileSectorId">
-            <option value="">Loading sectors…</option>
-          </select>
-          <p class="small" id="reconcileSectorHint">Used only when scope=sector.</p>
-        </div>
+    <div class="card" aria-labelledby="reconcileCardTitle">
+      <h3 id="reconcileCardTitle">Run Reconcile Now</h3>
+      <p class="small reconcile-lead">Post-market Supabase reconcile and report-only email. Run after several Titan sessions have populated data.</p>
+      <label for="reconcileScope">Scope</label>
+      <select id="reconcileScope" aria-describedby="reconcileScopeHint">
+        <option value="sector" selected>Single sector</option>
+        <option value="all-stocks">All stocks</option>
+      </select>
+      <span class="field-hint" id="reconcileScopeHint">Sector scope analyzes one Supabase sector; all stocks runs the full universe.</span>
+
+      <div id="reconcileSectorGroup" class="reconcile-panel">
+        <label for="reconcileSectorId">Sector</label>
+        <select id="reconcileSectorId" title="Supabase sector key (e.g. defence, it)">
+          <option value="">Loading sectors…</option>
+        </select>
       </div>
-      <details>
-        <summary class="small">Advanced options</summary>
+
+      <details class="reconcile-advanced">
+        <summary>Advanced</summary>
         <div class="row two">
           <div>
-            <label>Workers (optional)</label>
-            <input id="reconcileWorkers" type="number" min="1" max="32" placeholder="4" />
+            <label for="reconcileWorkers">Workers</label>
+            <input id="reconcileWorkers" type="number" min="1" max="32" placeholder="4 (default)" />
+            <span class="field-hint">Ignored in Supabase-only mode</span>
           </div>
           <div>
-            <label>Backfill days (optional)</label>
+            <label for="reconcileBackfillDays">Backfill days</label>
             <input id="reconcileBackfillDays" type="number" min="0" max="120" placeholder="0" />
           </div>
         </div>
       </details>
-      <button type="button" class="secondary" id="runReconcileBtn">Run Reconcile Now</button>
+
+      <div class="reconcile-dispatch">
+        <button type="button" id="runReconcileBtn">Run sector reconcile</button>
+      </div>
     </div>
 
     <div class="card">
