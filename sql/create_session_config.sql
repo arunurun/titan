@@ -12,7 +12,8 @@ insert into public.session_config (id, breeze_session_token)
 values (1, '')
 on conflict (id) do update set updated_at = now();
 
-comment on table public.session_config is 'Manual Breeze session token for GitHub Actions; update breeze_session_token daily.';
+comment on table public.session_config is
+  'TITAN Breeze session token for CI (id=1 row). News/CI secrets live in public.titan_secrets.';
 
 -- Service role (used in Actions) bypasses RLS; anon should not read this table.
 alter table public.session_config enable row level security;

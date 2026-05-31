@@ -132,6 +132,8 @@ Persistence and retrieval glue:
 - [`src/tape_metrics.py`](https://github.com/arunurun/titan/blob/main/src/tape_metrics.py): return/notional/percentile helpers.
 - [`src/sector_priority.py`](https://github.com/arunurun/titan/blob/main/src/sector_priority.py): ranking + winners persistence.
 - [`src/portfolio_analysis.py`](https://github.com/arunurun/titan/blob/main/src/portfolio_analysis.py): holdings parsing and per-position analysis.
+
+**V12 news pipeline (per-symbol):** `news_client` fetches from NewsAPI, Finnhub, and RSS; `news_sentiment` scores headlines (VADER by default); `news_store` persists to `news_feed` / `symbol_news_snapshots` in Supabase; `news_audit` correlates sentiment with price moves. `sector_audit._enrich_audit_with_symbol_news` attaches `recent_news` and sentiment fields to each equity audit without blocking the run on fetch failures (`news_error` is recorded instead). Macro sector news for digest lines remains in `sector_priority` via `global_news_snapshots`. Scheduled batch fetch: `scripts/fetch_news_batch.py` and `.github/workflows/news_fetch.yml`.
 - [`src/custom_equity_resolution.py`](https://github.com/arunurun/titan/blob/main/src/custom_equity_resolution.py): free-form hint to canonical symbol resolution.
 - [`src/market_calendar.py`](https://github.com/arunurun/titan/blob/main/src/market_calendar.py): holiday/weekend gating.
 - [`src/json_util.py`](https://github.com/arunurun/titan/blob/main/src/json_util.py): sanitize JSON-unfriendly floats.

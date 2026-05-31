@@ -1437,6 +1437,55 @@ def _refresh_symbol_scoring_outputs(audit: dict[str, Any]) -> None:
     audit["sell_signal_reasons"] = sell_reasons
 
 
+def _enrich_audit_with_symbol_news(
+    cfg: TitanConfig,
+    inst: SectorInstrument,
+    audit: dict[str, Any],
+) -> None:
+    """Non-blocking per-symbol news enrichment; failures set audit['news_error']."""
+    try:
+        from news_audit import compute_news_sentiment_trend, correlate_news_with_price_move
+        from news_sentiment import aggregate_sentiment
+        from news_store import get_recent_news_for_symbol
+    except ImportError as exc:
+        logger.warning("News modules unavailable for %s: %s", inst.symbol, exc)
+        audit["news_error"] = f"news_modules_unavailable:{exc}"
+        return
+
+    try:
+        lookback_hours = int(os.environ.get("TITAN_NEWS_MAX_AGE_HOURS", 36))
+        driver_limit = int(os.environ.get("TITAN_NEWS_DRIVER_LIMIT", 3))
+        recent_news = get_recent_news_for_symbol(
+            cfg,
+            inst.symbol,
+            inst.exchange,
+            lookback_hours=lookback_hours,
+            limit=driver_limit * 2,
+        )
+        if recent_news:
+            audit["recent_news"] = recent_news[:driver_limit]
+            sentiment_agg = aggregate_sentiment(recent_news)
+            audit["news_sentiment_aggregate"] = sentiment_agg["aggregate_sentiment"]
+            audit["news_sentiment_score"] = sentiment_agg["aggregate_score"]
+            audit["news_count"] = len(recent_news)
+            trend = compute_news_sentiment_trend(cfg, inst.symbol)
+            audit["news_sentiment_trend"] = trend["trend"]
+            audit["news_sentiment_trend_score"] = trend["trend_score"]
+            corr = correlate_news_with_price_move(cfg, inst.symbol, audit)
+            audit["news_price_alignment"] = corr["aligned"]
+            if not corr["aligned"]:
+                audit["news_price_contradiction"] = corr["contradiction_strength"]
+                audit["news_price_contradiction_reason"] = corr["possible_reason"]
+        else:
+            audit["recent_news"] = []
+            audit["news_count"] = 0
+            audit["news_sentiment_aggregate"] = "neutral"
+            audit["news_sentiment_score"] = 0.0
+    except Exception as exc:
+        logger.warning("News enrichment failed for %s: %s", inst.symbol, exc)
+        audit["news_error"] = str(exc)
+
+
 def _first_float_field(row: dict[str, Any], keys: tuple[str, ...]) -> float:
     for k in keys:
         if k in row:
@@ -2282,6 +2331,7 @@ def build_equity_live_audit(
     audit["fundamental_score"] = fundamental.get("score")
     audit["fundamental_reasons"] = fundamental.get("reasons", [])
     _refresh_symbol_scoring_outputs(audit)
+    _enrich_audit_with_symbol_news(cfg, inst, audit)
     if not with_narrative:
         return audit, ""
     from brain import generate_titan_narrative
@@ -2605,6 +2655,11 @@ def run_sector_live(
         _apply_sector_cross_section(ok_results, score_percentiles=False)
         for r in ok_results:
             _refresh_symbol_scoring_outputs(r["audit"])
+            inst = SectorInstrument(
+                symbol=str(r.get("symbol") or ""),
+                exchange=str(r.get("exchange") or "NSE"),
+            )
+            _enrich_audit_with_symbol_news(cfg, inst, r["audit"])
         _apply_sector_cross_section(ok_results, score_percentiles=True)
         news_corr_meta = _apply_global_news_correlation(cfg, sector_id=sector_id, ok_results=ok_results)
         quality_gate = _prediction_quality_gate(ok_results, total_count=len(results))

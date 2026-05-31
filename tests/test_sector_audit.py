@@ -1442,3 +1442,48 @@ def test_classify_error_code_timeout_variants():
         _classify_error_code("[Sector] no-progress watchdog timeout after 45.0s")
         == "sector_no_progress_watchdog"
     )
+
+
+def test_enrich_audit_with_symbol_news_sets_fields(monkeypatch):
+    from sector_audit import _enrich_audit_with_symbol_news
+
+    cfg = make_cfg()
+    inst = SectorInstrument("HAL", "NSE")
+    audit = {"symbol": "HAL", "return_1d_pct": 0.5}
+    recent = [
+        {
+            "title": "HAL order book expands",
+            "sentiment_score": 0.4,
+            "relevance_score": 0.7,
+            "published_at": "2026-05-30T10:00:00+00:00",
+        }
+    ]
+    monkeypatch.setattr("news_store.get_recent_news_for_symbol", lambda *a, **k: recent)
+    monkeypatch.setattr(
+        "news_audit.compute_news_sentiment_trend",
+        lambda *a, **k: {"trend": "flat", "trend_score": 0.0, "item_count": 1},
+    )
+    monkeypatch.setattr(
+        "news_audit.correlate_news_with_price_move",
+        lambda *a, **k: {"aligned": True, "contradiction_strength": 0.0, "possible_reason": ""},
+    )
+    _enrich_audit_with_symbol_news(cfg, inst, audit)
+    assert audit.get("news_count") == 1
+    assert audit.get("news_sentiment_score") is not None
+    assert "news_error" not in audit
+
+
+def test_enrich_audit_with_symbol_news_sets_news_error_without_raising(monkeypatch):
+    from sector_audit import _enrich_audit_with_symbol_news
+
+    cfg = make_cfg()
+    inst = SectorInstrument("HAL", "NSE")
+    audit = {"symbol": "HAL"}
+
+    def _fail(*_a, **_k):
+        raise ConnectionError("news_feed unavailable")
+
+    monkeypatch.setattr("news_store.get_recent_news_for_symbol", _fail)
+    _enrich_audit_with_symbol_news(cfg, inst, audit)
+    assert "news_error" in audit
+    assert "news_feed unavailable" in str(audit["news_error"])
