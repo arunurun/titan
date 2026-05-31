@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -9,10 +10,27 @@ import urllib.error
 from pathlib import Path
 
 import requests
-from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "src"))
+
+from config_loader import load_config  # noqa: E402
+
 MIGRATION = ROOT / "sql" / "alter_symbol_daily_features_reconcile_persist.sql"
+
+VERIFY_COLUMNS_SQL = """
+select table_name, column_name, data_type, is_nullable
+from information_schema.columns
+where table_schema = 'public'
+  and table_name in ('symbol_daily_features', 'sector_daily_rollup')
+  and column_name in (
+    'tape_extras','action_signal','volume_participation_ratio',
+    'next_day_score','next_week_score','news_correlation',
+    'news_sentiment_aggregate','news_sentiment_score',
+    'news_sentiment_trend','news_count','pct_volume_participation_gt_1'
+  )
+order by table_name, column_name;
+"""
 
 
 def _run_management_query(project_ref: str, access_token: str, query: str) -> list | dict:
@@ -42,16 +60,18 @@ def _run_management_query(project_ref: str, access_token: str, query: str) -> li
 
 
 def main() -> int:
-    load_dotenv(ROOT / ".env", override=False)
-    load_dotenv(ROOT / "config" / ".env", override=False)
-
-    access_token = os.environ.get("SUPABASE_ACCESS_TOKEN", "").strip()
-    supabase_url = os.environ.get("SUPABASE_URL", "").strip()
-    if not access_token or not supabase_url:
-        print("Missing SUPABASE_ACCESS_TOKEN or SUPABASE_URL", file=sys.stderr)
+    try:
+        cfg = load_config(require_breeze=False, require_gemini=False)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
         return 1
 
-    match = re.search(r"https://([^.]+)\.supabase\.co", supabase_url)
+    access_token = os.environ.get("SUPABASE_ACCESS_TOKEN", "").strip()
+    if not access_token:
+        print("Missing SUPABASE_ACCESS_TOKEN", file=sys.stderr)
+        return 1
+
+    match = re.search(r"https://([^.]+)\.supabase\.co", cfg.supabase_url)
     if not match:
         print("Could not parse project ref from SUPABASE_URL", file=sys.stderr)
         return 1
@@ -68,6 +88,17 @@ def main() -> int:
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")
         print(f"Migration failed: HTTP {exc.code} {detail}", file=sys.stderr)
+        return 1
+
+    verify = _run_management_query(project_ref, access_token, VERIFY_COLUMNS_SQL)
+    rows = verify if isinstance(verify, list) else []
+    print(f"Verified {len(rows)} reconcile column(s)")
+    print(json.dumps(rows, default=str))
+    if len(rows) < 11:
+        print(
+            f"Expected 11 reconcile columns; got {len(rows)}. Re-run migration or check schema.",
+            file=sys.stderr,
+        )
         return 1
     return 0
 
