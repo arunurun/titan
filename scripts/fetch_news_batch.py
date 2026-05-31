@@ -82,11 +82,12 @@ def _collect_symbol_pairs(
                 top_n=priority_top_n,
             )
             if not instruments:
-                logger.warning(
-                    "No priority list for sector=%s; falling back to full sector universe.",
+                logger.error(
+                    "No priority rankings for sector=%s (today or latest as_of_date); "
+                    "skipping sector (--priority-only, no full-universe fallback).",
                     sector_id,
                 )
-                instruments = load_sector_instruments(sector_id)
+                continue
         else:
             instruments = load_sector_instruments(sector_id)
         for inst in instruments:

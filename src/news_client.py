@@ -20,6 +20,9 @@ from news_config import get_news_api_keys, get_titan_news_feeds
 
 logger = logging.getLogger(__name__)
 
+_newsapi_rate_limited = False
+_finnhub_forbidden = False
+
 _NEWS_FETCH_LIMIT_DEFAULT = 40
 _NEWS_MAX_AGE_HOURS_DEFAULT = 36.0
 _DEFAULT_RSS_FEEDS: tuple[str, ...] = (
@@ -43,6 +46,55 @@ def _news_fetch_limit() -> int:
         return max(5, int(raw))
     except ValueError:
         return _NEWS_FETCH_LIMIT_DEFAULT
+
+
+def reset_paid_api_circuit() -> None:
+    """Reset batch-level paid-API circuit breakers (for tests)."""
+    global _newsapi_rate_limited, _finnhub_forbidden
+    _newsapi_rate_limited = False
+    _finnhub_forbidden = False
+
+
+def _skip_paid_apis_env() -> bool:
+    return str(os.environ.get("TITAN_NEWS_SKIP_PAID_APIS", "")).strip() == "1"
+
+
+def _should_skip_newsapi() -> bool:
+    return _skip_paid_apis_env() or _newsapi_rate_limited
+
+
+def _should_skip_finnhub() -> bool:
+    return _skip_paid_apis_env() or _finnhub_forbidden
+
+
+def _mark_newsapi_rate_limited(exc: Exception | str | None = None) -> None:
+    global _newsapi_rate_limited
+    _newsapi_rate_limited = True
+    detail = str(exc or "").strip()
+    if detail:
+        logger.warning("NewsAPI rate-limited for remainder of batch: %s", detail)
+    else:
+        logger.warning("NewsAPI rate-limited for remainder of batch")
+
+
+def _mark_finnhub_forbidden(exc: Exception | str | None = None) -> None:
+    global _finnhub_forbidden
+    _finnhub_forbidden = True
+    detail = str(exc or "").strip()
+    if detail:
+        logger.warning("Finnhub access denied for remainder of batch: %s", detail)
+    else:
+        logger.warning("Finnhub access denied for remainder of batch")
+
+
+def _is_newsapi_rate_limited_error(exc: Exception | str) -> bool:
+    err = str(exc).lower()
+    return "ratelimited" in err or "rate limit" in err or "rate_limit" in err or "429" in err
+
+
+def _is_finnhub_forbidden_error(exc: Exception | str) -> bool:
+    err = str(exc).lower()
+    return "403" in err or "forbidden" in err or "don't have access" in err or "do not have access" in err
 
 
 def _news_max_age_hours() -> float:
@@ -223,6 +275,9 @@ def fetch_news_from_newsapi(
     cfg: TitanConfig | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch from NewsAPI (free tier: up to 100 articles/day)."""
+    if _should_skip_newsapi():
+        logger.info("NewsAPI skipped for %s: paid API disabled or rate-limited", symbol)
+        return []
     key = (api_key or get_news_api_keys(cfg).newsapi_api_key or "").strip()
     if not key:
         logger.info("NewsAPI skipped for %s: missing NEWSAPI_API_KEY", symbol)
@@ -246,7 +301,17 @@ def fetch_news_from_newsapi(
             page_size=min(100, _news_fetch_limit()),
         )
     except Exception as exc:
-        logger.warning("NewsAPI fetch failed for %s: %s", sym, exc)
+        if _is_newsapi_rate_limited_error(exc):
+            _mark_newsapi_rate_limited(exc)
+        else:
+            logger.warning("NewsAPI fetch failed for %s: %s", sym, exc)
+        return []
+    if isinstance(payload, dict) and str(payload.get("status") or "").lower() == "error":
+        code = str(payload.get("code") or payload.get("message") or "")
+        if _is_newsapi_rate_limited_error(code):
+            _mark_newsapi_rate_limited(code)
+            return []
+        logger.warning("NewsAPI error for %s: %s", sym, code or payload)
         return []
     articles = payload.get("articles") if isinstance(payload, dict) else []
     if not isinstance(articles, list):
@@ -273,6 +338,9 @@ def fetch_news_from_finnhub(
     cfg: TitanConfig | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch from Finnhub (Indian market coverage, real-time)."""
+    if _should_skip_finnhub():
+        logger.info("Finnhub skipped for %s: paid API disabled or access denied", symbol)
+        return []
     key = (api_key or get_news_api_keys(cfg).finnhub_api_key or "").strip()
     if not key:
         logger.info("Finnhub skipped for %s: missing FINNHUB_API_KEY", symbol)
@@ -297,6 +365,9 @@ def fetch_news_from_finnhub(
             break
         except Exception as exc:
             err = str(exc).lower()
+            if _is_finnhub_forbidden_error(exc):
+                _mark_finnhub_forbidden(exc)
+                return []
             if "429" in err or "rate" in err:
                 delay = 2 ** attempt
                 logger.info("Finnhub rate limit for %s; backoff %ss", sym, delay)
@@ -416,6 +487,8 @@ def fetch_all_news_for_symbol(
     max_items = _news_fetch_limit()
     stale_cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback)
     combined: list[dict[str, Any]] = []
+    source_counts: dict[str, int] = {"newsapi": 0, "finnhub": 0, "rss": 0}
+    source_notes: dict[str, str] = {}
 
     def _collect(source_fn: Any, label: str) -> list[dict[str, Any]]:
         try:
@@ -428,6 +501,9 @@ def fetch_all_news_for_symbol(
                     cfg=titan_cfg,
                 )
             if label == "finnhub":
+                if _should_skip_finnhub():
+                    source_notes[label] = "skipped"
+                    return []
                 return source_fn(
                     sym,
                     lookback_hours=lookback,
@@ -436,6 +512,9 @@ def fetch_all_news_for_symbol(
                     cfg=titan_cfg,
                 )
             if label == "newsapi":
+                if _should_skip_newsapi():
+                    source_notes[label] = "skipped"
+                    return []
                 return source_fn(
                     sym,
                     exchange=ex,
@@ -446,19 +525,44 @@ def fetch_all_news_for_symbol(
             return source_fn(sym, exchange=ex, lookback_hours=lookback)
         except Exception as exc:
             logger.warning("News source %s failed for %s: %s", label, sym, exc)
+            source_notes[label] = "error"
             return []
 
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = {
-            pool.submit(_collect, fetch_news_from_newsapi, "newsapi"): "newsapi",
-            pool.submit(_collect, fetch_news_from_finnhub, "finnhub"): "finnhub",
-            pool.submit(_collect, fetch_news_from_rss_feeds, "rss"): "rss",
-        }
+    tasks: list[tuple[str, Any]] = [("rss", fetch_news_from_rss_feeds)]
+    if not _should_skip_newsapi():
+        tasks.append(("newsapi", fetch_news_from_newsapi))
+    else:
+        source_notes["newsapi"] = "skipped"
+    if not _should_skip_finnhub():
+        tasks.append(("finnhub", fetch_news_from_finnhub))
+    else:
+        source_notes["finnhub"] = "skipped"
+
+    with ThreadPoolExecutor(max_workers=max(1, len(tasks))) as pool:
+        futures = {pool.submit(_collect, fn, label): label for label, fn in tasks}
         for future in as_completed(futures):
+            label = futures[future]
             try:
-                combined.extend(future.result())
+                items = future.result()
+                source_counts[label] = len(items)
+                if items:
+                    source_notes[label] = "ok"
+                elif label not in source_notes:
+                    source_notes[label] = "empty"
+                combined.extend(items)
             except Exception as exc:
-                logger.warning("News fetch future failed for %s: %s", sym, exc)
+                logger.warning("News fetch future failed for %s (%s): %s", sym, label, exc)
+                source_notes[label] = "error"
+
+    logger.info(
+        "News sources for %s: newsapi=%s finnhub=%s rss=%s (counts=%s notes=%s)",
+        sym,
+        source_counts.get("newsapi", 0),
+        source_counts.get("finnhub", 0),
+        source_counts.get("rss", 0),
+        source_counts,
+        source_notes,
+    )
 
     fresh: list[dict[str, Any]] = []
     for item in combined:

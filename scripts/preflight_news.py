@@ -137,8 +137,6 @@ def _resolve_sector_symbols(
     instruments = []
     if priority_only:
         instruments = load_priority_instruments(cfg, sector_key=sector_key, top_n=priority_top_n)
-        if not instruments:
-            instruments = load_sector_instruments(sector_key)
     else:
         instruments = load_sector_instruments(sector_key)
     pairs: list[tuple[str, str]] = []

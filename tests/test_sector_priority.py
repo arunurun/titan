@@ -129,6 +129,70 @@ def test_load_priority_instruments(monkeypatch):
     from sector_priority import load_priority_instruments
 
     class _FakeQuery:
+        def __init__(self, client: "_FakeClient"):
+            self.client = client
+            self.filters: dict[str, str] = {}
+            self._limit: int | None = None
+            self._order_field: str | None = None
+            self._order_desc = False
+
+        def select(self, _fields):
+            return self
+
+        def eq(self, key, value):
+            self.filters[str(key)] = str(value)
+            return self
+
+        def order(self, field, desc=False):
+            self._order_field = str(field)
+            self._order_desc = bool(desc)
+            return self
+
+        def limit(self, n):
+            self._limit = int(n)
+            return self
+
+        def execute(self):
+            return SimpleNamespace(data=self.client._execute(self))
+
+    class _FakeClient:
+        def __init__(self, *, today_rows: list, latest_date: str, latest_rows: list):
+            self.today_rows = today_rows
+            self.latest_date = latest_date
+            self.latest_rows = latest_rows
+
+        def table(self, _name):
+            return _FakeQuery(self)
+
+        def _execute(self, query: _FakeQuery) -> list[dict]:
+            if query._order_field == "as_of_date" and query._order_desc:
+                if query.filters.get("is_priority") == "True":
+                    return [{"as_of_date": self.latest_date}]
+                return []
+            as_of = query.filters.get("as_of_date", "")
+            if as_of == self.latest_date:
+                return list(self.latest_rows)
+            return list(self.today_rows)
+
+    monkeypatch.setattr(
+        "sector_priority.create_client",
+        lambda _u, _k: _FakeClient(
+            today_rows=[],
+            latest_date="2026-05-24",
+            latest_rows=[
+                {"symbol": "A", "exchange": "NSE", "rank_in_sector": 1},
+                {"symbol": "B", "exchange": "BSE", "rank_in_sector": 2},
+            ],
+        ),
+    )
+    out = load_priority_instruments(make_cfg(), sector_key="ai", top_n=2)
+    assert [f"{x.symbol}:{x.exchange}" for x in out] == ["A:NSE", "B:BSE"]
+
+
+def test_load_priority_instruments_uses_today_when_present(monkeypatch):
+    from sector_priority import load_priority_instruments
+
+    class _FakeQuery:
         def __init__(self, payload):
             self.payload = payload
 
@@ -138,7 +202,7 @@ def test_load_priority_instruments(monkeypatch):
         def eq(self, _k, _v):
             return self
 
-        def order(self, _k):
+        def order(self, _k, desc=False):
             return self
 
         def limit(self, _n):
@@ -158,13 +222,12 @@ def test_load_priority_instruments(monkeypatch):
         "sector_priority.create_client",
         lambda _u, _k: _FakeClient(
             [
-                {"symbol": "A", "exchange": "NSE", "rank_in_sector": 1},
-                {"symbol": "B", "exchange": "BSE", "rank_in_sector": 2},
+                {"symbol": "HAL", "exchange": "NSE", "rank_in_sector": 1},
             ]
         ),
     )
-    out = load_priority_instruments(make_cfg(), sector_key="ai", top_n=2)
-    assert [f"{x.symbol}:{x.exchange}" for x in out] == ["A:NSE", "B:BSE"]
+    out = load_priority_instruments(make_cfg(), sector_key="defence", top_n=1)
+    assert [f"{x.symbol}:{x.exchange}" for x in out] == ["HAL:NSE"]
 
 
 def test_persist_daily_winners_builds_rows(monkeypatch):

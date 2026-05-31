@@ -96,6 +96,25 @@ def test_check_sector_symbol_news_counts_missing(monkeypatch):
     assert status["symbols_stale_or_missing"] == 2
 
 
+def test_resolve_sector_symbols_priority_only_no_full_fallback(monkeypatch):
+    mod = _load_preflight_module()
+    from sector_registry import SectorInstrument
+
+    monkeypatch.setattr(mod, "load_priority_instruments", lambda *a, **k: [])
+    monkeypatch.setattr(
+        mod,
+        "load_sector_instruments",
+        lambda _sector: [SectorInstrument("ZZZ", "NSE")],
+    )
+    pairs = mod._resolve_sector_symbols(
+        make_cfg(),
+        "defence",
+        priority_only=True,
+        priority_top_n=10,
+    )
+    assert pairs == []
+
+
 def test_check_sector_symbol_news_all_present(monkeypatch):
     mod = _load_preflight_module()
     now = datetime(2026, 5, 31, 12, 0, tzinfo=timezone.utc)
