@@ -15,8 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from config_loader import load_config
-from news_config import apply_news_runtime_to_environ, load_news_runtime_config
+from news_config import prepare_news_script_config
 from news_store import cleanup_old_news
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -33,8 +32,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    cfg = load_config(require_breeze=False, require_gemini=False)
-    apply_news_runtime_to_environ(load_news_runtime_config(cfg))
+    cfg = prepare_news_script_config()
     result = cleanup_old_news(cfg, older_than_hours=max(1, int(args.older_than_hours)))
     deleted = int(result.get("deleted") or 0)
     logger.info("Deleted %s news_feed row(s) older than %s hours", deleted, args.older_than_hours)

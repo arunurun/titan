@@ -19,7 +19,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from news_config import NEWS_RUNTIME_KEY_NAMES, TITAN_SECRETS_TABLE
+from news_config import (
+    NEWS_RUNTIME_KEY_NAMES,
+    SUPABASE_KEY_KEY_NAME,
+    SUPABASE_URL_KEY_NAME,
+    TITAN_SECRETS_TABLE,
+)
+
+# Bootstrap vars are set on this step from GitHub secrets but must still reach later steps.
+CI_PASSTHROUGH_ENV_KEYS: frozenset[str] = frozenset(
+    {SUPABASE_URL_KEY_NAME, SUPABASE_KEY_KEY_NAME}
+)
 
 try:
     import requests
@@ -133,10 +143,12 @@ def main() -> int:
 
     written: list[str] = []
     for name in NEWS_RUNTIME_KEY_NAMES:
-        if os.environ.get(name, "").strip():
-            continue
         value = (loaded.get(name) or "").strip()
+        if not value and name in CI_PASSTHROUGH_ENV_KEYS:
+            value = os.environ.get(name, "").strip()
         if not value:
+            continue
+        if os.environ.get(name, "").strip() and name not in CI_PASSTHROUGH_ENV_KEYS:
             continue
         _append_github_env_kv(name, value, gh_env)
         written.append(name)

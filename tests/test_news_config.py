@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-
+import os
 
 from unittest.mock import MagicMock, patch
 
@@ -35,6 +35,8 @@ from news_config import (
     get_news_api_keys,
 
     load_news_runtime_config,
+
+    prepare_news_script_config,
 
 )
 
@@ -192,5 +194,35 @@ def test_apply_news_runtime_to_environ_respects_existing_env(monkeypatch, cfg: T
     assert applied[FINNHUB_KEY_NAME] == "finn-from-db"
 
     assert __import__("os").environ["NEWSAPI_API_KEY"] == "keep-me"
+
+
+def test_prepare_news_script_config_applies_runtime_before_load_config(monkeypatch, tmp_path):
+    clear_news_runtime_cache()
+    env_file = tmp_path / ".env"
+    env_file.write_text("", encoding="utf-8")
+
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_KEY", "service-role-key")
+    monkeypatch.delenv("NEWSAPI_API_KEY", raising=False)
+    monkeypatch.delenv("FINNHUB_API_KEY", raising=False)
+    monkeypatch.delenv("BREEZE_API_KEY", raising=False)
+
+    mock_client = MagicMock()
+    mock_table = MagicMock()
+    mock_client.table.return_value = mock_table
+    mock_table.select.return_value.in_.return_value.execute.return_value = MagicMock(
+        data=[
+            {"key_name": NEWSAPI_KEY_NAME, "value": "sb-news"},
+            {"key_name": FINNHUB_KEY_NAME, "value": "sb-finn"},
+        ]
+    )
+
+    with patch("supabase.create_client", return_value=mock_client):
+        cfg = prepare_news_script_config(env_file)
+
+    assert cfg.supabase_url == "https://example.supabase.co"
+    assert cfg.supabase_key == "service-role-key"
+    assert os.environ["NEWSAPI_API_KEY"] == "sb-news"
+    assert os.environ["FINNHUB_API_KEY"] == "sb-finn"
 
 

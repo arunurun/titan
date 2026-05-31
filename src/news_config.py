@@ -6,6 +6,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -137,6 +138,27 @@ def apply_news_runtime_to_environ(
             os.environ[name] = value
             applied[name] = value
     return applied
+
+
+def prepare_news_script_config(
+    env_path: str | Path | None = None,
+):
+    """Load TitanConfig for news scripts after applying titan_secrets runtime keys."""
+    from config_loader import TitanConfig, load_config
+
+    url = _env_value(SUPABASE_URL_KEY_NAME)
+    key = _env_value(SUPABASE_KEY_KEY_NAME)
+    if url and key:
+        bootstrap = TitanConfig(
+            breeze_api_key="",
+            breeze_secret="",
+            breeze_session_token="",
+            gemini_api_keys=(),
+            supabase_url=url,
+            supabase_key=key,
+        )
+        apply_news_runtime_to_environ(load_news_runtime_config(bootstrap))
+    return load_config(env_path, require_breeze=False, require_gemini=False)
 
 
 def get_news_api_keys(cfg: TitanConfig | None = None) -> NewsApiKeys:

@@ -17,9 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from config_loader import load_config
-from news_client import fetch_all_news_for_symbol
-from news_config import apply_news_runtime_to_environ, load_news_runtime_config
+from news_config import prepare_news_script_config
 from news_store import get_symbol_news_snapshot, store_news_items
 from sector_registry import list_active_sector_ids, load_sector_instruments
 
@@ -75,8 +73,7 @@ def main() -> int:
     parser.add_argument("--workers", type=int, default=4, help="Parallel worker count (default 4).")
     args = parser.parse_args()
 
-    cfg = load_config(require_breeze=False, require_gemini=False)
-    apply_news_runtime_to_environ(load_news_runtime_config(cfg))
+    cfg = prepare_news_script_config()
     sector_ids = _resolve_sector_ids(args.sectors)
     if not sector_ids:
         logger.error("No sectors resolved from --sectors=%r", args.sectors)
