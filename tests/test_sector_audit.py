@@ -21,6 +21,26 @@ def make_cfg() -> TitanConfig:
     )
 
 
+@pytest.fixture(autouse=True)
+def _default_empty_news_feed_cache(monkeypatch, request):
+    """Correlation tests default to empty news_feed unless a test opts into cache."""
+    if request.node.get_closest_marker("uses_news_cache"):
+        return
+    monkeypatch.setattr("news_store.get_recent_news_for_symbol", lambda *a, **k: [])
+    monkeypatch.setattr(
+        "sector_priority.fetch_stock_news_for_symbol",
+        lambda _cfg, symbol, exchange, timeout_seconds=10.0, now_utc=None: {
+            "symbol": symbol,
+            "exchange": exchange,
+            "items": [],
+            "query_used": symbol,
+            "alias_used": "",
+            "fallback_used": False,
+            "error": "empty_feed",
+        },
+    )
+
+
 def test_symbol_digest_default_is_short_block(monkeypatch):
     monkeypatch.delenv("TITAN_DIGEST_VERBOSE_SYMBOLS", raising=False)
     from sector_audit import _format_symbol_metrics_line
@@ -777,6 +797,95 @@ def test_apply_global_news_correlation_missing_helpers_shows_reason_in_evidence(
     assert "stock=none (fetch_error=helper_unavailable)" in evidence_line
 
 
+@pytest.mark.uses_news_cache
+def test_apply_global_news_correlation_uses_cache_before_live_fetch(monkeypatch):
+    from sector_audit import _apply_global_news_correlation, _news_correlation_line
+
+    snapshot = {
+        "source": "cached",
+        "fresh": True,
+        "sector_scores": {
+            "defence": {
+                "score": 0.08,
+                "confidence": 0.7,
+                "drivers_top": [],
+            }
+        },
+    }
+    monkeypatch.setattr("sector_priority.resolve_global_news_snapshot", lambda _cfg: snapshot)
+    live_called: list[str] = []
+
+    def _live_fetch(_cfg, symbol, exchange, timeout_seconds=10.0, now_utc=None):
+        live_called.append(symbol)
+        raise AssertionError("live fetch should not run when cache has items")
+
+    monkeypatch.setattr("sector_priority.fetch_stock_news_for_symbol", _live_fetch)
+    monkeypatch.setattr(
+        "news_store.get_recent_news_for_symbol",
+        lambda _cfg, symbol, exchange, lookback_hours=None, limit=20: [
+            {
+                "title": f"{symbol} cached headline",
+                "summary": "from news_feed",
+                "source": "Moneycontrol",
+                "url": f"https://x/{symbol.lower()}",
+                "published_at": "2026-05-30T10:00:00+00:00",
+            }
+        ],
+    )
+    ok_results = [
+        {
+            "symbol": "HAL",
+            "exchange": "NSE",
+            "audit": {"symbol": "HAL", "exchange": "NSE", "prediction_breakdown": {"week": {"ema_term": 1.2}}},
+        }
+    ]
+    meta = _apply_global_news_correlation(make_cfg(), sector_id="defence", ok_results=ok_results)
+    assert meta["applied"] is True
+    assert live_called == []
+    corr = ok_results[0]["audit"]["news_correlation"]
+    assert corr["stock_news_coverage"] == "cached"
+    assert corr["driver_source"] == "stock"
+    line = _news_correlation_line(ok_results[0]["audit"])
+    assert "HAL cached headline" in line
+
+
+@pytest.mark.uses_news_cache
+def test_apply_global_news_correlation_skips_live_fetch_beyond_top_n(monkeypatch):
+    from sector_audit import _apply_global_news_correlation
+
+    snapshot = {
+        "source": "cached",
+        "sector_scores": {
+            "defence": {"score": 0.05, "confidence": 0.6, "drivers_top": []},
+        },
+    }
+    monkeypatch.setenv("TITAN_STOCK_NEWS_COVERAGE_TOP_N", "1")
+    monkeypatch.setattr("sector_priority.resolve_global_news_snapshot", lambda _cfg: snapshot)
+    monkeypatch.setattr("news_store.get_recent_news_for_symbol", lambda *a, **k: [])
+    live_calls: list[str] = []
+
+    def _live_fetch(_cfg, symbol, exchange, timeout_seconds=10.0, now_utc=None):
+        live_calls.append(symbol)
+        return {
+            "symbol": symbol,
+            "exchange": exchange,
+            "items": [],
+            "query_used": symbol,
+            "alias_used": "",
+            "fallback_used": False,
+            "error": "empty_feed",
+        }
+
+    monkeypatch.setattr("sector_priority.fetch_stock_news_for_symbol", _live_fetch)
+    ok_results = [
+        {"symbol": "BEL", "exchange": "NSE", "audit": {"symbol": "BEL", "exchange": "NSE"}},
+        {"symbol": "HAL", "exchange": "NSE", "audit": {"symbol": "HAL", "exchange": "NSE"}},
+    ]
+    _apply_global_news_correlation(make_cfg(), sector_id="defence", ok_results=ok_results)
+    assert live_calls == ["BEL"]
+    assert ok_results[1]["audit"]["news_correlation"]["stock_news_coverage"] == "empty:cache_miss_live_skipped"
+
+
 def test_build_equity_live_audit_records_exchange_fallback_metadata(monkeypatch):
     from sector_audit import build_equity_live_audit
 
@@ -1044,9 +1153,14 @@ def test_symbol_digest_explicit_news_unavailable_message(monkeypatch):
 @patch("email_notify.send_success_post_email")
 @patch("sector_audit._process_one_metrics")
 @patch("sector_audit.load_sector_instruments")
-def test_run_sector_live_macro_guardrail_applied(mock_load, mock_metrics, mock_email):
+def test_run_sector_live_macro_guardrail_applied(mock_load, mock_metrics, mock_email, monkeypatch):
     from sector_audit import run_sector_live
 
+    monkeypatch.setenv("TITAN_DIGEST_VERBOSE_SECTIONS", "1")
+    monkeypatch.setattr(
+        "sector_priority.resolve_global_news_snapshot",
+        lambda _cfg: {"source": "unavailable", "sector_scores": {}},
+    )
     mock_load.return_value = [
         SectorInstrument("A", "NSE"),
         SectorInstrument("B", "NSE"),
