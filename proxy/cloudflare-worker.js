@@ -14,6 +14,7 @@
 
 const ALLOWED_WORKFLOWS = new Set([
   "run_titan_now.yml",
+  "news_fetch.yml",
   "daily_post_market_reconcile.yml",
   "validate_breeze_token_manual.yml",
   "persist_breeze_token_manual.yml",

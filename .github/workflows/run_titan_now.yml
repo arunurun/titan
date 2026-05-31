@@ -58,11 +58,6 @@ on:
         description: "Top N symbols when titan_scope=priority (empty = 10 for sector, 5 for all_sectors)"
         required: false
         default: ""
-      news_refresh:
-        description: "Prefetch V12 news before sector run"
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -131,9 +126,6 @@ jobs:
             if [ -n "${{ inputs.workers }}" ]; then
               ARGS="$ARGS --sector-workers ${{ inputs.workers }}"
             fi
-            if [ "${{ inputs.news_refresh }}" = "true" ]; then
-              ARGS="$ARGS --news-refresh"
-            fi
             python main.py $ARGS --custom-symbols "${{ inputs.custom_symbols }}"
           elif [ "${{ inputs.mode }}" = "all_sectors" ]; then
             ARGS="--all-sectors --exclude-sectors unknown,non_equity"
@@ -151,9 +143,6 @@ jobs:
             if [ -n "${{ inputs.all_sector_workers }}" ]; then
               ARGS="$ARGS --all-sector-workers ${{ inputs.all_sector_workers }}"
             fi
-            if [ "${{ inputs.news_refresh }}" = "true" ]; then
-              ARGS="$ARGS --news-refresh"
-            fi
             python main.py $ARGS
           else
             if [ "$SCOPE" = "priority" ]; then
@@ -168,9 +157,6 @@ jobs:
             fi
             if [ -n "${{ inputs.workers }}" ]; then
               ARGS="$ARGS --sector-workers ${{ inputs.workers }}"
-            fi
-            if [ "${{ inputs.news_refresh }}" = "true" ]; then
-              ARGS="$ARGS --news-refresh"
             fi
             python main.py $ARGS
           fi

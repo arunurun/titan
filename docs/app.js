@@ -1,5 +1,6 @@
 const WORKFLOWS = {
   runTitan: "run_titan_now.yml",
+  fetchSymbolNews: "news_fetch.yml",
   runReconcile: "daily_post_market_reconcile.yml",
   validate: "validate_breeze_token_manual.yml",
   persist: "persist_breeze_token_manual.yml",
@@ -1207,6 +1208,24 @@ function wireEvents() {
         );
       } catch (e) {
         setStatus(`Global news refresh failed:\n${e.message}`);
+      }
+    });
+  }
+
+  const fetchSymbolNewsBtn = el("fetchSymbolNewsBtn");
+  if (fetchSymbolNewsBtn) {
+    fetchSymbolNewsBtn.addEventListener("click", async () => {
+      try {
+        setWorking("Dispatch symbol news fetch");
+        await checkConnection();
+        await dispatchWorkflow(
+          WORKFLOWS.fetchSymbolNews,
+          {},
+          "Runs scripts/fetch_news_batch.py (all sectors). Titan runs only read news_feed / symbol_news_snapshots.",
+          "news",
+        );
+      } catch (e) {
+        setStatus(`Symbol news fetch dispatch failed:\n${e.message}`);
       }
     });
   }

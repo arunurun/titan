@@ -37,7 +37,7 @@
   - [x] `requirements-news.txt` or `[finbert]` optional extras for heavy deps
 
 - [ ] **Confirmation point 3 — Integration scope**
-  - [x] **In scope:** `news_client`, `news_sentiment`, `news_store`, `news_audit`, `sector_audit` enrichment, `brain.py` prompt, `main.py --news-refresh`, `analysis_store` fields, SQL migrations, scripts, CI workflow, tests
+  - [x] **In scope:** `news_client`, `news_sentiment`, `news_store`, `news_audit`, `sector_audit` enrichment, `brain.py` prompt, `analysis_store` fields, SQL migrations, scripts, CI workflow, tests
   - [ ] **Deferred (3.6 / 3.7):** `sector_priority.py` news blending refactor
     - [ ] Do not implement `TITAN_NEWS_BLEND_WEIGHT` / `TITAN_NEWS_BLEND_CAP` composite scoring changes yet
     - [ ] Do not add `intent_score_news_blended` to audit yet
@@ -402,19 +402,12 @@
   - [x] Ensure reconcile fetch includes new columns where applicable
   - [x] `_parse_news_direction` / `_news_summary_from_audit` compatible with enriched payloads
 
-### 3.4 `main.py` — CLI Flag
+### 3.4 `main.py` — symbol news fetch (decoupled from Titan run)
 
-- [x] **Add `--news-refresh` argument**
-  - [x] `action="store_true"` (or optional value if spec extended)
-  - [x] Wire into sector run path (`run_sector_live` invocation)
-  - [x] Behavior: force refresh news snapshots / pre-fetch before sector analysis when flag set
-  - [x] Backward-compatible: default off
-
-- [x] **Pass flag through to sector audit**
-  - [x] e.g. `run_sector_live(..., news_refresh=args.news_refresh)` (exact kwarg name to match implementation)
-
-- [x] **Update `tests/test_main_cli.py`**
-  - [x] Test `--news-refresh` invokes `run_sector_live` with expected kwargs
+- [x] **Removed `--news-refresh`** — symbol fetch is only via `scripts/fetch_news_batch.py` / `news_fetch.yml` (UI button or schedule)
+- [x] **Titan run** reads `news_feed` / `symbol_news_snapshots` via `_enrich_audit_with_symbol_news` only
+- [x] **UI:** `docs/index.html` **Fetch symbol news** → `news_fetch.yml`; macro **Refresh Global News** unchanged
+- [x] **Proxy:** `news_fetch.yml` in `ALLOWED_WORKFLOWS`
 
 ### 3.5 **DEFERRED — `src/sector_priority.py` (Integration 3.6 / 3.7)**
 

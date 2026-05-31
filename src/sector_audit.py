@@ -1486,77 +1486,6 @@ def _enrich_audit_with_symbol_news(
         audit["news_error"] = str(exc)
 
 
-def _prefetch_sector_news(
-    cfg: TitanConfig,
-    instruments: list[SectorInstrument],
-    *,
-    max_workers: int = 4,
-) -> dict[str, Any]:
-    """Fetch, store, and refresh symbol news snapshots before sector analysis."""
-    try:
-        from news_client import fetch_all_news_for_symbol
-        from news_store import get_symbol_news_snapshot, store_news_items
-    except ImportError as exc:
-        logger.warning("News prefetch skipped (modules unavailable): %s", exc)
-        return {"skipped": True, "reason": str(exc)}
-
-    totals: dict[str, Any] = {
-        "fetched": 0,
-        "stored": 0,
-        "duplicates": 0,
-        "errors": 0,
-        "symbols": 0,
-        "failed": [],
-    }
-    workers = max(1, min(int(max_workers), 8))
-
-    def _one(inst: SectorInstrument) -> dict[str, Any]:
-        items = fetch_all_news_for_symbol(inst.symbol, inst.exchange, cfg=cfg)
-        store_result = store_news_items(cfg, items)
-        inserted = int(store_result.get("inserted") or 0)
-        if inserted > 0:
-            get_symbol_news_snapshot(cfg, inst.symbol, force_refresh=True, exchange=inst.exchange)
-        return {
-            "symbol": inst.symbol,
-            "fetched": len(items),
-            "stored": inserted,
-            "duplicates": int(store_result.get("duplicates_skipped") or 0),
-        }
-
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        future_map = {pool.submit(_one, inst): inst for inst in instruments}
-        for fut in as_completed(future_map):
-            inst = future_map[fut]
-            try:
-                result = fut.result(timeout=30)
-                totals["symbols"] += 1
-                totals["fetched"] += int(result.get("fetched") or 0)
-                totals["stored"] += int(result.get("stored") or 0)
-                totals["duplicates"] += int(result.get("duplicates") or 0)
-            except Exception as exc:
-                totals["symbols"] += 1
-                totals["errors"] += 1
-                totals["failed"].append(inst.symbol)
-                logger.warning("News prefetch failed for %s: %s", inst.symbol, exc)
-
-    failed = list(totals["failed"])
-    if failed:
-        logger.warning(
-            "News prefetch failures (%d): %s",
-            len(failed),
-            ", ".join(failed[:10]),
-        )
-    logger.info(
-        "News prefetch complete symbols=%s fetched=%s stored=%s duplicates=%s errors=%s",
-        totals["symbols"],
-        totals["fetched"],
-        totals["stored"],
-        totals["duplicates"],
-        totals["errors"],
-    )
-    return totals
-
-
 def _first_float_field(row: dict[str, Any], keys: tuple[str, ...]) -> float:
     for k in keys:
         if k in row:
@@ -2543,7 +2472,6 @@ def run_sector_live(
     instruments_override: list[SectorInstrument] | None = None,
     priority_only: bool = False,
     priority_top_n: int | None = None,
-    news_refresh: bool = False,
 ) -> str:
     from email_notify import send_success_post_email
     from breeze_client import create_breeze_session
@@ -2590,9 +2518,6 @@ def run_sector_live(
 
     workers = max_workers if max_workers is not None else MAX_WORKERS
     workers = max(1, min(int(workers), 16))
-
-    if news_refresh:
-        _prefetch_sector_news(cfg, instruments, max_workers=workers)
 
     results: list[dict[str, Any]] = []
     worker = _process_one_metrics if digest else _process_one

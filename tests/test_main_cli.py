@@ -148,25 +148,6 @@ def test_sector_failure_calls_send_failure_email(monkeypatch):
     assert "[Sector]" in mock_fail.call_args[0][0]
 
 
-def test_sector_passes_news_refresh(monkeypatch):
-    import main as main_mod
-    import sector_audit
-
-    monkeypatch.setattr(sys, "argv", ["prog", "--sector", "defence", "--news-refresh"])
-    mock_run = MagicMock()
-    monkeypatch.setattr(sector_audit, "run_sector_live", mock_run)
-
-    main_mod.main()
-
-    mock_run.assert_called_once_with(
-        "defence",
-        max_workers=None,
-        max_symbols=None,
-        digest=True,
-        news_refresh=True,
-    )
-
-
 def test_sector_passes_macro_snapshot(monkeypatch, tmp_path):
     import main as main_mod
     import sector_audit
@@ -271,7 +252,6 @@ def test_all_sectors_priority_invokes_runner(monkeypatch):
         event_snapshot=None,
         priority_only=True,
         priority_top_n=5,
-        news_refresh=False,
     )
 
 
@@ -307,7 +287,6 @@ def test_all_sectors_invokes_parallel_runner(monkeypatch):
         event_snapshot=None,
         priority_only=False,
         priority_top_n=None,
-        news_refresh=False,
     )
 
 
