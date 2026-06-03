@@ -27,7 +27,7 @@ def _html_action_colored_cell(cell: str) -> str:
     from action_signals import action_signal_from_digest_headline, action_style
 
     sig = action_signal_from_digest_headline(cell)
-    if not sig and cell.strip().upper() in ("BUY", "HOLD", "TRIM"):
+    if not sig and cell.strip().upper() in ("BUY", "ACCUMULATE", "HOLD", "TRIM"):
         sig = cell.strip().lower()
     base = "padding:8px;border-bottom:1px solid #eee;font-size:12px;vertical-align:top;"
     if not sig:

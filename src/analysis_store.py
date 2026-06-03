@@ -76,6 +76,21 @@ def analysis_store_enabled() -> bool:
 
 
 VALID_ACTION_SIGNALS: tuple[str, ...] = ("buy", "hold", "trim", "exit-risk")
+# Optional 5th label (constructive-but-don't-chase). Gated default-off; when the flag
+# is off the vocabulary stays the legacy 4 labels and any "accumulate" input falls back
+# to "hold", so behavior is byte-identical to today.
+_ACCUMULATE_SIGNAL = "accumulate"
+
+
+def _accumulate_label_enabled() -> bool:
+    return _env_truthy("TITAN_SIGV2_ENABLE_ACCUMULATE", default=False)
+
+
+def valid_action_signals() -> tuple[str, ...]:
+    """Active action-signal vocabulary, including ``accumulate`` only when flag-enabled."""
+    if _accumulate_label_enabled():
+        return VALID_ACTION_SIGNALS + (_ACCUMULATE_SIGNAL,)
+    return VALID_ACTION_SIGNALS
 DEFAULT_TRANSITION_TRAILING_WINDOW_DAYS = 30
 ONE_WEEK_TRADING_DAYS = 5
 ONE_MONTH_TRADING_DAYS = 20
@@ -91,6 +106,11 @@ _SYMBOL_FEATURE_OPTIONAL_COLUMNS = frozenset(
         "news_sentiment_score",
         "news_sentiment_trend",
         "news_count",
+        # Future signal-engine v2 outputs (no writer yet); optional so upserts degrade
+        # gracefully when these columns are absent from the DB schema.
+        "signal_confidence",
+        "signal_reason_trace",
+        "signal_engine_version",
     }
 )
 _SECTOR_ROLLUP_OPTIONAL_COLUMNS = frozenset({"pct_volume_participation_gt_1"})
@@ -148,7 +168,7 @@ def _normalize_action_signal(raw_signal: Any) -> str:
     text_signal = str(raw_signal or "").strip().lower()
     if text_signal in ("exit", "exit_risk", "exitrisk", "exit-risk"):
         return "exit-risk"
-    if text_signal in VALID_ACTION_SIGNALS:
+    if text_signal in valid_action_signals():
         return text_signal
     return "hold"
 
@@ -156,18 +176,28 @@ def _normalize_action_signal(raw_signal: Any) -> str:
 def _signal_consistency_ratios_from_sequence(signal_sequence: Sequence[str]) -> dict[str, float]:
     total_points = len(signal_sequence)
     if total_points <= 0:
-        return {
+        empty = {
             "buy_signal_consistency_ratio": 0.0,
             "hold_signal_consistency_ratio": 0.0,
             "trim_signal_consistency_ratio": 0.0,
             "exit_risk_signal_consistency_ratio": 0.0,
         }
-    return {
+        if _accumulate_label_enabled():
+            empty["accumulate_signal_consistency_ratio"] = 0.0
+        return empty
+    ratios = {
         "buy_signal_consistency_ratio": round(signal_sequence.count("buy") / total_points, 4),
         "hold_signal_consistency_ratio": round(signal_sequence.count("hold") / total_points, 4),
         "trim_signal_consistency_ratio": round(signal_sequence.count("trim") / total_points, 4),
         "exit_risk_signal_consistency_ratio": round(signal_sequence.count("exit-risk") / total_points, 4),
     }
+    # Gated default-off: omit the new key entirely when accumulate is disabled so the
+    # returned shape stays byte-identical to today.
+    if _accumulate_label_enabled():
+        ratios["accumulate_signal_consistency_ratio"] = round(
+            signal_sequence.count(_ACCUMULATE_SIGNAL) / total_points, 4
+        )
+    return ratios
 
 
 def _evaluate_transition_horizon_outcome(
@@ -177,7 +207,8 @@ def _evaluate_transition_horizon_outcome(
     if realized_return_pct is None or math.isnan(realized_return_pct):
         return None
     outcome_threshold_pct = 0.25
-    is_bullish_signal = target_signal in ("buy", "hold")
+    # ``accumulate`` is a constructive (bullish-leaning) label, grouped with buy/hold.
+    is_bullish_signal = target_signal in ("buy", "accumulate", "hold")
     if is_bullish_signal:
         if realized_return_pct >= outcome_threshold_pct:
             return "favorable"

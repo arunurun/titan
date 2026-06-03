@@ -2094,6 +2094,8 @@ def _apply_sector_cross_section(
         assign_percentile("return_1d_pct", "sector_pctile_return_1d_pct")
         assign_percentile("return_5d_pct", "sector_pctile_return_5d_pct")
         assign_percentile("median_notional_inr_20d", "sector_pctile_median_notional_20d")
+        # Corroborating-only sector percentile of ATR-normalized EMA200 stretch.
+        assign_percentile("ema200_stretch_atr", "sector_pctile_ema200_stretch")
 
         atrs = [v for v in series("atr_14_pct") if not math.isnan(v)]
         med_atr = float(median(atrs)) if atrs else float("nan")
@@ -2278,6 +2280,8 @@ def build_equity_live_audit(
             "rel_return_10d_vs_nifty_pct": float("nan"),
             "rel_return_20d_vs_nifty_pct": float("nan"),
             "extreme_price_move_proxy": False,
+            "ema200_stretch_atr": float("nan"),
+            "gap_down_proxy": False,
             "adx_14": float("nan"),
             "breakout_20d_distance_pct_to_high": float("nan"),
             "breakout_20d_distance_pct_above_low": float("nan"),
@@ -2361,6 +2365,27 @@ def build_equity_live_audit(
     trap_exit_proxy = (
         not math.isnan(ret1d) and ret1d > 0.0 and not math.isnan(vpr_raw) and vpr_raw <= 0.5
     )
+    # Signed, volatility-relative distance from EMA200 (positive = extended above).
+    # = ema_200_distance_pct / atr_14_pct; NaN-safe (guards zero/NaN ATR). Trailing
+    # inputs only (no lookahead). Future over-extension input; unused by scoring today.
+    ema200_stretch_atr = (
+        ema_distance_pct / atr_14_pct
+        if (
+            not math.isnan(ema_distance_pct)
+            and not math.isnan(atr_14_pct)
+            and atr_14_pct != 0.0
+        )
+        else float("nan")
+    )
+    # Gap-down proxy: latest session opens materially below the prior close.
+    # Threshold is a tunable default (open <= -1.5% vs prior close). Requires a usable
+    # 'open' column; otherwise stays False (no fabricated data). Trailing data only.
+    gap_down_proxy = False
+    if "open" in df.columns and not math.isnan(close_prev) and close_prev != 0.0:
+        open_vals = pd.to_numeric(df["open"], errors="coerce")
+        open_last = float(open_vals.iloc[-1]) if len(open_vals) else float("nan")
+        if not math.isnan(open_last):
+            gap_down_proxy = bool(((open_last / close_prev) - 1.0) * 100.0 <= -1.5)
     event_info = _event_flags_for_symbol(inst.symbol, event_snapshot)
     audit: dict[str, Any] = {
         "benchmark": "equity",
@@ -2394,6 +2419,7 @@ def build_equity_live_audit(
         "rel_return_20d_vs_nifty_pct": rel_map.get("rel_return_20d_vs_nifty_pct", float("nan")),
         "ema_200": ema_200,
         "ema_200_distance_pct": ema_distance_pct,
+        "ema200_stretch_atr": ema200_stretch_atr,
         "atr_14": atr_14,
         "atr_14_pct": atr_14_pct,
         "adx_14": adx_14,
@@ -2412,6 +2438,7 @@ def build_equity_live_audit(
         "high_volume_down_day_proxy": high_volume_down_day_proxy,
         "panic_absorption_proxy": high_volume_down_day_proxy,
         "trap_exit_proxy": trap_exit_proxy,
+        "gap_down_proxy": gap_down_proxy,
         **event_info,
         "history_lt_200_sessions": len(series_non_na) < 200,
         "pcr": pcr,

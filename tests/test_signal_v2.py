@@ -1,0 +1,296 @@
+"""Unit tests for the flag-gated v2 signal engine (signal_v2.py) and its dispatch.
+
+Covers: golden flags-off equality with the legacy path, plus per-layer behavior
+(A data-quality, C ramps + money-flow + over-extension, D modifiers, B two-tier,
+E mapping + buy-gate + accumulate gating + hysteresis).
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from action_signals import _derive_action_signal_legacy, derive_action_signal
+import signal_v2 as v2
+
+
+# --------------------------------------------------------------------------- #
+# representative audits
+# --------------------------------------------------------------------------- #
+
+
+def _clean_buy_audit() -> dict:
+    return {
+        "next_week_score": 80.0,
+        "effective_intent_score": 70.0,
+        "z_score": 1.5,
+        "return_1d_pct": 2.0,
+        "return_5d_pct": 2.0,
+        "return_10d_pct": 3.0,
+        "rel_return_5d_vs_nifty_pct": 1.0,
+        "cmf_20": 0.10,
+        "obv_slope_20": 10.0,
+        "ema_200_distance_pct": 3.0,
+        "ema200_stretch_atr": 1.5,
+        "atr_14_pct": 2.0,
+        "adx_14": 30.0,
+        "fundamental_status": "strong",
+    }
+
+
+def _representative_audits() -> list[dict]:
+    return [
+        _clean_buy_audit(),
+        {  # weak tape -> high risk
+            "next_week_score": 40.0, "effective_intent_score": 42.0, "z_score": -2.5,
+            "return_1d_pct": -3.0, "return_5d_pct": -7.0, "return_10d_pct": -11.0,
+            "ema_200_distance_pct": -8.0, "atr_14_pct": 7.0, "cmf_20": -0.3,
+            "fundamental_status": "weak",
+        },
+        {  # middling -> hold/trim region
+            "next_week_score": 58.0, "effective_intent_score": 53.0, "z_score": -0.5,
+            "return_1d_pct": -0.5, "return_5d_pct": -2.5, "ema_200_distance_pct": -1.0,
+            "atr_14_pct": 3.0, "cmf_20": 0.0,
+        },
+        {},  # empty / all-NaN
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# GOLDEN: flags-off output is byte-identical to legacy
+# --------------------------------------------------------------------------- #
+
+
+def test_golden_flags_off_matches_legacy(monkeypatch):
+    monkeypatch.delenv("TITAN_SIGNAL_V2", raising=False)
+    for audit in _representative_audits():
+        got = derive_action_signal(dict(audit))
+        expected = _derive_action_signal_legacy(dict(audit))
+        assert got == expected, f"v2-off output diverged for {audit}"
+
+
+def test_master_flag_routes_to_v2(monkeypatch):
+    monkeypatch.setenv("TITAN_SIGNAL_V2", "1")
+    audit = _clean_buy_audit()
+    label, risk, _ = derive_action_signal(audit)
+    assert audit.get("signal_engine_version") == "v2"
+    assert "signal_confidence" in audit
+    assert label == "buy"
+    assert 0.0 <= risk <= 10.0
+
+
+# --------------------------------------------------------------------------- #
+# Layer A — data-quality / sanity
+# --------------------------------------------------------------------------- #
+
+
+def test_layer_a_short_history_caps_at_hold(monkeypatch):
+    monkeypatch.delenv("TITAN_SIGNAL_V2_LAYER_A", raising=False)
+    a = v2.layer_a({"history_lt_200_sessions": True, "z_score": 1.0, "cmf_20": 0.1})
+    assert a["buy_allowed"] is False
+    assert a["label_ceiling"] == "hold"
+    assert a["confidence_seed"] < 1.0
+
+
+def test_layer_a_nan_census_withholds_buy(monkeypatch):
+    monkeypatch.delenv("TITAN_SIGNAL_V2_LAYER_A", raising=False)
+    a = v2.layer_a({})  # all core metrics NaN
+    assert a["buy_allowed"] is False
+    assert a["confidence_seed"] < 1.0
+
+
+def test_layer_a_thin_liquidity_forbids_buy():
+    a = v2.layer_a({"liquidity_thin_proxy": True, "z_score": 1.0})
+    assert a["buy_allowed"] is False
+
+
+def test_layer_a_disabled_is_passthrough(monkeypatch):
+    monkeypatch.setenv("TITAN_SIGNAL_V2_LAYER_A", "0")
+    a = v2.layer_a({"history_lt_200_sessions": True})
+    assert a["buy_allowed"] is True
+    assert a["label_ceiling"] is None
+    assert a["confidence_seed"] == 1.0
+
+
+# --------------------------------------------------------------------------- #
+# Layer C — graded evidence
+# --------------------------------------------------------------------------- #
+
+
+def test_ramp_is_monotonic_and_clamped():
+    assert v2._ramp(60.0, 55.0, 45.0, 3.0) == 0.0  # above zero edge
+    assert v2._ramp(50.0, 55.0, 45.0, 3.0) == pytest.approx(1.5)
+    assert v2._ramp(40.0, 55.0, 45.0, 3.0) == 3.0  # past full edge -> clamped
+
+
+def test_money_flow_deadband_and_scaling():
+    # neutral CMF -> no term
+    c = v2.layer_c({"cmf_20": 0.0})
+    assert c["money_flow_bear"] == 0.0 and c["money_flow_bull"] == 0.0
+    # distribution -> bear scaled by magnitude
+    c = v2.layer_c({"cmf_20": -0.113})
+    assert c["money_flow_bear"] == pytest.approx((0.063) * 10.0, abs=1e-6)
+    # accumulation -> bull
+    c = v2.layer_c({"cmf_20": 0.192})
+    assert c["money_flow_bull"] == pytest.approx((0.142) * 10.0, abs=1e-6)
+
+
+def test_obv_only_amplifies_existing_cmf_term():
+    base = v2.layer_c({"cmf_20": -0.113})["money_flow_bear"]
+    amp = v2.layer_c({"cmf_20": -0.113, "obv_slope_20": -5.0})["money_flow_bear"]
+    assert amp == pytest.approx(base * 1.25, abs=1e-6)
+    # OBV alone (neutral CMF) creates nothing
+    none = v2.layer_c({"cmf_20": 0.0, "obv_slope_20": -50.0})
+    assert none["money_flow_bear"] == 0.0
+
+
+def test_over_extension_is_atr_normalized_not_flat_pct():
+    # +20% above EMA200 but only ~2 ATRs of stretch -> NOT hot
+    calm = v2.layer_c({"ema_200_distance_pct": 20.0, "ema200_stretch_atr": 2.0})
+    assert calm["over_extension"] == 0.0 and calm["over_extension_hot"] is False
+    # same distance but 8 ATRs -> fully hot at cap
+    wild = v2.layer_c({"ema_200_distance_pct": 20.0, "ema200_stretch_atr": 8.0})
+    assert wild["over_extension"] == pytest.approx(2.0)
+    assert wild["over_extension_hot"] is True
+
+
+# --------------------------------------------------------------------------- #
+# Layer D — context modifiers
+# --------------------------------------------------------------------------- #
+
+
+def test_adx_regime_multipliers():
+    weak = v2.layer_d({"adx_14": 15.0}, {})
+    assert weak["mult_money_flow"] == 1.3 and weak["mult_momentum"] == 0.7
+    strong = v2.layer_d({"adx_14": 30.0}, {})
+    assert strong["mult_money_flow"] == 0.7 and strong["mult_momentum"] == 1.3
+
+
+def test_divergence_caps_buy_confidence():
+    d = v2.layer_d({"return_1d_pct": 5.0, "cmf_20": -0.1, "adx_14": 22.0}, {})
+    assert d["divergence_bump"] == 1.0
+    assert d["buy_confidence_cap"] == 0.5
+
+
+def test_healthy_pullback_rescue():
+    d = v2.layer_d(
+        {
+            "return_1d_pct": -1.64, "volume_participation_ratio": 0.8, "cmf_20": 0.192,
+            "return_5d_pct": 2.0, "ema_200_distance_pct": 5.0, "adx_14": 22.0,
+        },
+        {},
+    )
+    assert d["mult_momentum"] == 0.5
+    assert d["pullback_bull_bump"] > 0.0
+
+
+def test_staleflow_obv_tiebreaker():
+    d = v2.layer_d(
+        {"cmf_20": 0.015, "adx_14": 19.88, "obv_slope_20": -2.0},
+        {"over_extension_hot": True},
+    )
+    assert d["staleflow_downgrade"] is True
+
+
+# --------------------------------------------------------------------------- #
+# Layer B — two-tier hard disqualifiers
+# --------------------------------------------------------------------------- #
+
+
+def test_layer_b_tier1_instant_exit_bypasses_hysteresis():
+    b = v2.layer_b(
+        {"structural_break_proxy": True, "return_1d_pct": -9.0}, {}, {}
+    )
+    assert b["forced_label"] == "exit-risk"
+    assert b["bypass_hysteresis"] is True
+
+
+def test_layer_b_vpr_proxies_count_as_one():
+    # both VPR-derived proxies + cmf distribution => 2 distinct corroborators -> trim
+    b = v2.layer_b(
+        {
+            "trap_exit_proxy": True, "high_volume_down_day_proxy": True,
+            "cmf_20": -0.1,
+        },
+        {"over_extension_hot": False},
+        {},
+    )
+    assert b["corroborators"] == 2
+    assert b["forced_label"] == "trim"
+
+
+def test_layer_b_three_corroborators_exit():
+    b = v2.layer_b(
+        {
+            "trap_exit_proxy": True, "cmf_20": -0.1, "event_risk_soon": True,
+        },
+        {"over_extension_hot": True},
+        {},
+    )
+    assert b["corroborators"] >= 3
+    assert b["forced_label"] == "exit-risk"
+
+
+# --------------------------------------------------------------------------- #
+# Layer E — mapping, buy gate, accumulate gating, hysteresis
+# --------------------------------------------------------------------------- #
+
+
+def test_hollow_breakout_demotes_buy_to_accumulate(monkeypatch):
+    monkeypatch.setenv("TITAN_SIGV2_ENABLE_ACCUMULATE", "1")
+    audit = {
+        "next_week_score": 72.0, "effective_intent_score": 66.0, "z_score": 2.4,
+        "return_1d_pct": 5.37, "return_5d_pct": 3.0, "rel_return_5d_vs_nifty_pct": 2.0,
+        "cmf_20": -0.113, "obv_slope_20": -5.0, "ema_200_distance_pct": 8.0,
+        "ema200_stretch_atr": 2.67, "atr_14_pct": 3.0, "adx_14": 22.0,
+    }
+    label, _risk, _ = v2.evaluate_signal_v2(audit)
+    assert label == "accumulate"
+
+
+def test_accumulate_collapses_to_hold_when_flag_off(monkeypatch):
+    monkeypatch.delenv("TITAN_SIGV2_ENABLE_ACCUMULATE", raising=False)
+    audit = {
+        "next_week_score": 72.0, "effective_intent_score": 66.0, "z_score": 2.4,
+        "return_1d_pct": 5.37, "return_5d_pct": 3.0, "rel_return_5d_vs_nifty_pct": 2.0,
+        "cmf_20": -0.113, "obv_slope_20": -5.0, "ema_200_distance_pct": 8.0,
+        "ema200_stretch_atr": 2.67, "atr_14_pct": 3.0, "adx_14": 22.0,
+    }
+    label, _risk, _ = v2.evaluate_signal_v2(audit)
+    assert label == "hold"
+
+
+def test_greavescot_staleflow_downgrades_hold_to_trim():
+    audit = {
+        "next_week_score": 60.0, "effective_intent_score": 60.0, "z_score": 0.2,
+        "return_1d_pct": 0.1, "return_5d_pct": 1.0, "cmf_20": 0.015,
+        "ema_200_distance_pct": 24.54, "ema200_stretch_atr": 8.17, "atr_14_pct": 3.0,
+        "adx_14": 19.88, "obv_slope_20": -2.0,
+    }
+    label, _risk, _ = v2.evaluate_signal_v2(audit)
+    assert label == "trim"
+
+
+def test_endurance_healthy_pullback_not_trimmed():
+    audit = {
+        "next_week_score": 58.0, "effective_intent_score": 55.0, "z_score": 0.7,
+        "return_1d_pct": -1.64, "return_5d_pct": 2.0, "volume_participation_ratio": 0.8,
+        "cmf_20": 0.192, "ema_200_distance_pct": 5.0, "ema200_stretch_atr": 1.6,
+        "atr_14_pct": 3.0, "adx_14": 22.0,
+    }
+    label, _risk, _ = v2.evaluate_signal_v2(audit)
+    assert label in ("hold", "accumulate", "buy")  # rescued, not a trim/exit
+
+
+def test_hysteresis_buffer_holds_trim_label():
+    # risk_net just under the 4.0 edge; prior=trim => stickiness keeps trim
+    label, applied = v2._apply_hysteresis(
+        "hold", 3.7, prior_label="trim", bypass=False, buffer=0.5
+    )
+    assert label == "trim" and applied is True
+
+
+def test_hysteresis_danger_is_fast():
+    label, applied = v2._apply_hysteresis(
+        "exit-risk", 8.0, prior_label="hold", bypass=True, buffer=0.5
+    )
+    assert label == "exit-risk" and applied is False

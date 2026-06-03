@@ -14,6 +14,12 @@ ACTION_STYLES: dict[str, dict[str, str]] = {
         "border": "#34a853",
         "badge": "#34a853",
     },
+    "accumulate": {
+        "fg": "#0b6b5e",
+        "bg": "#e0f7f3",
+        "border": "#12a594",
+        "badge": "#12a594",
+    },
     "hold": {
         "fg": "#b06000",
         "bg": "#fef7e0",
@@ -41,6 +47,8 @@ def normalize_action_signal(signal: str | None) -> str:
         return "exit-risk"
     if s in ("buy", "add", "buy-more", "buymore"):
         return "buy"
+    if s in ("accumulate", "acc", "accumulate-dip"):
+        return "accumulate"
     if s == "trim":
         return "trim"
     return "hold"
@@ -53,6 +61,9 @@ def action_signal_plain_english(signal: str) -> str:
         "buy": (
             "BUY — constructive setup (next-week & intent supportive; "
             "add exposure per your mandate)"
+        ),
+        "accumulate": (
+            "ACCUMULATE — constructive but extended; add on pullbacks rather than chase"
         ),
         "hold": "HOLD — risk score <4: no strong defensive trigger",
         "trim": "TRIM — risk score 4–6: lighten / take profits (below hard-exit bar)",
@@ -74,6 +85,8 @@ def action_signal_from_digest_headline(line: str) -> str | None:
     # Order matters: EXIT before TRIM substring checks.
     if re.search(r"\bBUY\b", upper):
         return "buy"
+    if re.search(r"\bACCUMULATE\b", upper):
+        return "accumulate"
     if re.search(r"\bTRIM\b", upper):
         return "trim"
     if re.search(r"\bHOLD\b", upper):
@@ -114,6 +127,18 @@ def _append_capped(
 
 
 def derive_action_signal(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
+    """Dispatch to the v2 layered engine when ``TITAN_SIGNAL_V2`` is set, else legacy.
+
+    With the master flag off this is byte-identical to the legacy path below.
+    """
+    from signal_v2 import evaluate_signal_v2, v2_enabled
+
+    if v2_enabled():
+        return evaluate_signal_v2(audit)
+    return _derive_action_signal_legacy(audit)
+
+
+def _derive_action_signal_legacy(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
     """
     Defensive risk score (capped per family to limit double-counting) plus BUY when
     tape supports adding exposure.
