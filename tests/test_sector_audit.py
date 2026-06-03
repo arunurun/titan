@@ -113,6 +113,11 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
     assert "bands: leader >=67, average 34-66, laggard <=33" in text
     assert "very short horizon (1d outlook):" in text.lower()
     assert "distance above long-term trend (ema200)" in text.lower()
+    assert (
+        "bands: <=+5 healthy, +5 to +15 extended, +15 to +25 stretched, >+25 extreme; "
+        "-5 to 0 near trend, <-5 below trend"
+    ) in text
+    assert "🔴⬇ Distance above long-term trend (EMA200): 47.29%" in text
     assert "typical daily swing (atr14)" in text.lower()
     assert "bands: <2.0 calm, 2.0-4.0 moderate, >4.0 elevated" in text
     assert "bands: >=+1 strong up, -1 to +1 muted, <=-1 weak" in text
@@ -134,6 +139,27 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
     assert model_idx > headline_end
     assert text.lower().index("1w outlook:") > model_idx
     assert text.lower().index("technical intent:") > model_idx
+
+
+@pytest.mark.parametrize(
+    "ema_dist,expected_icon",
+    [
+        (3.0, "🟢⬆"),
+        (5.0, "🟢⬆"),
+        (10.0, "🟢⬆"),
+        (15.0, "🟢⬆"),
+        (18.0, "🟡➡"),
+        (25.0, "🟡➡"),
+        (30.0, "🔴⬇"),
+        (-3.0, "🟡➡"),
+        (-7.0, "🔴⬇"),
+        (float("nan"), "🟡➡"),
+    ],
+)
+def test_ema200_distance_icon_thresholds(ema_dist, expected_icon):
+    from sector_audit import _ema200_distance_icon
+
+    assert _ema200_distance_icon(ema_dist) == expected_icon
 
 
 def test_symbol_digest_default_shows_neutral_na_for_missing_new_metrics(monkeypatch):

@@ -159,6 +159,40 @@ def _metric_icon(v: Any, *, bullish_above: float, bearish_below: float) -> str:
     return "🟡➡"
 
 
+def _ema200_distance_bands_text() -> str:
+    return (
+        "bands: <=+5 healthy, +5 to +15 extended, +15 to +25 stretched, >+25 extreme; "
+        "-5 to 0 near trend, <-5 below trend"
+    )
+
+
+def _ema200_distance_icon(v: Any) -> str:
+    """Digest icon for % distance vs EMA200 (positive = above long-term trend)."""
+    f = _safe_float(v)
+    if math.isnan(f):
+        return "🟡➡"
+    if f <= -5.0:
+        return "🔴⬇"
+    if f < 0.0:
+        return "🟡➡"
+    if f > 25.0:
+        return "🔴⬇"
+    if f > 15.0:
+        return "🟡➡"
+    return "🟢⬆"
+
+
+def _state_for_ema200_distance(v: Any) -> int:
+    f = _safe_float(v)
+    if math.isnan(f):
+        return 0
+    if f <= -5.0 or f > 25.0:
+        return -1
+    if f < 0.0 or f > 15.0:
+        return 0
+    return 1
+
+
 def _breakout_state_icon(
     pct_to_high: Any,
     pct_above_low: Any,
@@ -202,9 +236,7 @@ def _tape_snapshot_icon(audit: dict[str, Any]) -> str:
     states: list[int] = []
     states.append(_state_for_metric(audit.get("return_1d_pct"), bullish_above=1.0, bearish_below=-1.0))
     states.append(_state_for_metric(audit.get("z_score"), bullish_above=1.0, bearish_below=-1.0))
-    states.append(
-        _state_for_metric(audit.get("ema_200_distance_pct"), bullish_above=5.0, bearish_below=-5.0)
-    )
+    states.append(_state_for_ema200_distance(audit.get("ema_200_distance_pct")))
     states.append(
         _state_for_metric(
             _volume_participation_for_digest_label(audit),
@@ -809,9 +841,9 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
         "(near-high (within ~1% of 20D high); thresholds: near-high >=-1%, near-low <=1%)"
     )
     lines_out.append(
-        f"{_metric_icon(ema_dist, bullish_above=5.0, bearish_below=-5.0)} "
+        f"{_ema200_distance_icon(ema_dist)} "
         f"Distance above long-term trend (EMA200): {_fmt_metric(ema_dist)}% "
-        f"(bands: >+5 stretched above trend, -5 to +5 near trend, <-5 below trend)"
+        f"({_ema200_distance_bands_text()})"
     )
 
     lines_out.append("▸ 20D Money Flow")
