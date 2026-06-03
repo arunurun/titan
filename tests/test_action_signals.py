@@ -14,18 +14,25 @@ from action_signals import (
 def test_derive_buy_when_constructive_and_low_risk():
     sig, risk, reasons = derive_action_signal(
         {
-            "next_week_score": 72.0,
-            "effective_intent_score": 68.0,
-            "z_score": 1.8,
-            "return_1d_pct": 2.5,
-            "ema_200_distance_pct": 4.0,
-            "atr_14_pct": 2.5,
+            "next_week_score": 80.0,
+            "effective_intent_score": 70.0,
+            "z_score": 1.5,
+            "return_1d_pct": 2.0,
+            "return_5d_pct": 2.0,
+            "return_10d_pct": 3.0,
+            "rel_return_5d_vs_nifty_pct": 1.0,
+            "cmf_20": 0.10,
+            "obv_slope_20": 10.0,
+            "ema_200_distance_pct": 3.0,
+            "ema200_stretch_atr": 1.5,
+            "atr_14_pct": 2.0,
+            "adx_14": 30.0,
             "fundamental_status": "strong",
         }
     )
     assert sig == "buy"
     assert risk < 4.0
-    assert any("nextWeek" in r for r in reasons)
+    assert reasons
 
 
 def test_derive_hold_not_buy_when_trap_flag():

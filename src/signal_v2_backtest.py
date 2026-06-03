@@ -15,7 +15,12 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Iterator, Sequence
 
-from action_signals import derive_action_signal, normalize_action_signal
+from action_signals import (
+    _derive_action_signal_legacy,
+    derive_action_signal,
+    normalize_action_signal,
+)
+from signal_v2 import evaluate_signal_v2
 
 # Severity ordering (aligned with signal_v2._SEVERITY).
 _LABEL_SEVERITY: dict[str, int] = {
@@ -29,8 +34,7 @@ _LABEL_SEVERITY: dict[str, int] = {
 _BULLISH = frozenset({"buy", "accumulate", "hold"})
 _DEFENSIVE = frozenset({"trim", "exit-risk"})
 
-# Master + per-layer ablation flags (defaults documented in CLI --help).
-MASTER_FLAG = "TITAN_SIGNAL_V2"
+# Per-layer ablation keys (legacy env names; layers are always on in production).
 LAYER_FLAGS: tuple[tuple[str, str], ...] = (
     ("layer_a", "TITAN_SIGNAL_V2_LAYER_A"),
     ("layer_b", "TITAN_SIGNAL_V2_LAYER_B"),
@@ -38,7 +42,6 @@ LAYER_FLAGS: tuple[tuple[str, str], ...] = (
     ("layer_d", "TITAN_SIGNAL_V2_LAYER_D"),
     ("layer_e", "TITAN_SIGNAL_V2_LAYER_E"),
 )
-ACCUMULATE_FLAG = "TITAN_SIGV2_ENABLE_ACCUMULATE"
 
 _TAPE_AUDIT_KEYS = (
     "return_5d_pct",
@@ -215,42 +218,9 @@ def signal_env(
     layer_overrides: dict[str, str] | None = None,
     accumulate: bool = False,
 ) -> Iterator[None]:
-    """Temporarily set TITAN_SIGNAL_* env for one recompute."""
-    saved: dict[str, str | None] = {}
-    keys = [MASTER_FLAG, ACCUMULATE_FLAG, *[f for _, f in LAYER_FLAGS]]
-    for key in keys:
-        saved[key] = os.environ.get(key)
-
-    if use_v2:
-        os.environ[MASTER_FLAG] = "1"
-    else:
-        os.environ.pop(MASTER_FLAG, None)
-
-    if accumulate:
-        os.environ[ACCUMULATE_FLAG] = "1"
-    else:
-        os.environ.pop(ACCUMULATE_FLAG, None)
-
-    for _, flag in LAYER_FLAGS:
-        if layer_overrides and flag in layer_overrides:
-            os.environ[flag] = layer_overrides[flag]
-        elif use_v2:
-            os.environ.setdefault(flag, "1")
-        else:
-            os.environ.pop(flag, None)
-
-    if layer_overrides:
-        for flag, val in layer_overrides.items():
-            os.environ[flag] = val
-
-    try:
-        yield
-    finally:
-        for key, val in saved.items():
-            if val is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = val
+    """No-op context: v2 and accumulate are always on in production."""
+    del use_v2, layer_overrides, accumulate
+    yield
 
 
 def recompute_label(
@@ -261,13 +231,16 @@ def recompute_label(
     layer_overrides: dict[str, str] | None = None,
     accumulate: bool = False,
 ) -> str:
+    del layer_overrides, accumulate
     payload = dict(audit)
     for k in ("signal_engine_version", "signal_confidence", "signal_reason_trace", "action_signal", "sell_signal"):
         payload.pop(k, None)
     if prior_label:
         payload["prev_action_signal"] = prior_label
-    with signal_env(use_v2=use_v2, layer_overrides=layer_overrides, accumulate=accumulate):
-        label, _risk, _reasons = derive_action_signal(payload)
+    if use_v2:
+        label, _risk, _reasons = evaluate_signal_v2(payload)
+    else:
+        label, _risk, _reasons = _derive_action_signal_legacy(payload)
     return normalize_action_signal(label)
 
 

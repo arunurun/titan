@@ -1,8 +1,7 @@
-"""Unit tests for the flag-gated v2 signal engine (signal_v2.py) and its dispatch.
+"""Unit tests for the v2 signal engine (signal_v2.py) and its dispatch.
 
-Covers: golden flags-off equality with the legacy path, plus per-layer behavior
-(A data-quality, C ramps + money-flow + over-extension, D modifiers, B two-tier,
-E mapping + buy-gate + accumulate gating + hysteresis).
+Covers: v2-as-default smoke, per-layer behavior (A data-quality, C ramps + money-flow
++ over-extension, D modifiers, B two-tier, E mapping + buy-gate + accumulate + hysteresis).
 """
 
 from __future__ import annotations
@@ -56,26 +55,28 @@ def _representative_audits() -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
-# GOLDEN: flags-off output is byte-identical to legacy
+# Default path always runs v2
 # --------------------------------------------------------------------------- #
 
 
-def test_golden_flags_off_matches_legacy(monkeypatch):
-    monkeypatch.delenv("TITAN_SIGNAL_V2", raising=False)
-    for audit in _representative_audits():
-        got = derive_action_signal(dict(audit))
-        expected = _derive_action_signal_legacy(dict(audit))
-        assert got == expected, f"v2-off output diverged for {audit}"
-
-
-def test_master_flag_routes_to_v2(monkeypatch):
-    monkeypatch.setenv("TITAN_SIGNAL_V2", "1")
+def test_derive_action_signal_always_runs_v2():
     audit = _clean_buy_audit()
     label, risk, _ = derive_action_signal(audit)
     assert audit.get("signal_engine_version") == "v2"
     assert "signal_confidence" in audit
     assert label == "buy"
     assert 0.0 <= risk <= 10.0
+
+
+def test_v2_default_differs_from_legacy_on_representative_audits():
+    """Smoke: production path is v2, not byte-identical to legacy."""
+    diverged = 0
+    for audit in _representative_audits():
+        v2_out = derive_action_signal(dict(audit))
+        leg_out = _derive_action_signal_legacy(dict(audit))
+        if v2_out != leg_out:
+            diverged += 1
+    assert diverged >= 1
 
 
 # --------------------------------------------------------------------------- #
@@ -103,12 +104,10 @@ def test_layer_a_thin_liquidity_forbids_buy():
     assert a["buy_allowed"] is False
 
 
-def test_layer_a_disabled_is_passthrough(monkeypatch):
-    monkeypatch.setenv("TITAN_SIGNAL_V2_LAYER_A", "0")
+def test_layer_a_short_history_always_applies():
     a = v2.layer_a({"history_lt_200_sessions": True})
-    assert a["buy_allowed"] is True
-    assert a["label_ceiling"] is None
-    assert a["confidence_seed"] == 1.0
+    assert a["buy_allowed"] is False
+    assert a["label_ceiling"] == "hold"
 
 
 # --------------------------------------------------------------------------- #
@@ -235,8 +234,7 @@ def test_layer_b_three_corroborators_exit():
 # --------------------------------------------------------------------------- #
 
 
-def test_hollow_breakout_demotes_buy_to_accumulate(monkeypatch):
-    monkeypatch.setenv("TITAN_SIGV2_ENABLE_ACCUMULATE", "1")
+def test_hollow_breakout_demotes_buy_to_accumulate():
     audit = {
         "next_week_score": 72.0, "effective_intent_score": 66.0, "z_score": 2.4,
         "return_1d_pct": 5.37, "return_5d_pct": 3.0, "rel_return_5d_vs_nifty_pct": 2.0,
@@ -245,18 +243,6 @@ def test_hollow_breakout_demotes_buy_to_accumulate(monkeypatch):
     }
     label, _risk, _ = v2.evaluate_signal_v2(audit)
     assert label == "accumulate"
-
-
-def test_accumulate_collapses_to_hold_when_flag_off(monkeypatch):
-    monkeypatch.delenv("TITAN_SIGV2_ENABLE_ACCUMULATE", raising=False)
-    audit = {
-        "next_week_score": 72.0, "effective_intent_score": 66.0, "z_score": 2.4,
-        "return_1d_pct": 5.37, "return_5d_pct": 3.0, "rel_return_5d_vs_nifty_pct": 2.0,
-        "cmf_20": -0.113, "obv_slope_20": -5.0, "ema_200_distance_pct": 8.0,
-        "ema200_stretch_atr": 2.67, "atr_14_pct": 3.0, "adx_14": 22.0,
-    }
-    label, _risk, _ = v2.evaluate_signal_v2(audit)
-    assert label == "hold"
 
 
 def test_greavescot_staleflow_downgrades_hold_to_trim():

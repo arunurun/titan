@@ -29,15 +29,9 @@ from signal_v2_backtest import (  # noqa: E402
 )
 
 FLAG_HELP = """
-Environment flags (all default OFF unless noted):
-  TITAN_SIGNAL_V2=1           Master switch — engage v2 engine (required for v2 path).
-  TITAN_SIGNAL_V2_LAYER_A=1   Layer A data-quality (default ON when master is on).
-  TITAN_SIGNAL_V2_LAYER_B=1   Layer B hard disqualifiers (default ON when master is on).
-  TITAN_SIGNAL_V2_LAYER_C=1   Layer C graded evidence (default ON when master is on).
-  TITAN_SIGNAL_V2_LAYER_D=1   Layer D context modifiers (default ON when master is on).
-  TITAN_SIGNAL_V2_LAYER_E=1   Layer E mapping + hysteresis (default ON when master is on).
-  TITAN_SIGV2_ENABLE_ACCUMULATE=1  Emit accumulate label (default OFF).
-Per-layer ablation in the report toggles one layer flag off vs on while master stays on.
+Production uses v2 always (layers A–E on; accumulate enabled). Optional tunables:
+  TITAN_SIGV2_* threshold env vars (see docs/signal_v2_metrics_and_waterfall.md).
+Legacy-vs-v2 A/B compares recompute_label(use_v2=False) against the default v2 path.
 """.strip()
 
 

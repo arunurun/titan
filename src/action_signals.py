@@ -127,15 +127,10 @@ def _append_capped(
 
 
 def derive_action_signal(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
-    """Dispatch to the v2 layered engine when ``TITAN_SIGNAL_V2`` is set, else legacy.
+    """Run the v2 layered signal engine (A–E waterfall)."""
+    from signal_v2 import evaluate_signal_v2
 
-    With the master flag off this is byte-identical to the legacy path below.
-    """
-    from signal_v2 import evaluate_signal_v2, v2_enabled
-
-    if v2_enabled():
-        return evaluate_signal_v2(audit)
-    return _derive_action_signal_legacy(audit)
+    return evaluate_signal_v2(audit)
 
 
 def _derive_action_signal_legacy(audit: dict[str, Any]) -> tuple[str, float, list[str]]:

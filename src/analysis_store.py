@@ -76,21 +76,12 @@ def analysis_store_enabled() -> bool:
 
 
 VALID_ACTION_SIGNALS: tuple[str, ...] = ("buy", "hold", "trim", "exit-risk")
-# Optional 5th label (constructive-but-don't-chase). Gated default-off; when the flag
-# is off the vocabulary stays the legacy 4 labels and any "accumulate" input falls back
-# to "hold", so behavior is byte-identical to today.
 _ACCUMULATE_SIGNAL = "accumulate"
 
 
-def _accumulate_label_enabled() -> bool:
-    return _env_truthy("TITAN_SIGV2_ENABLE_ACCUMULATE", default=False)
-
-
 def valid_action_signals() -> tuple[str, ...]:
-    """Active action-signal vocabulary, including ``accumulate`` only when flag-enabled."""
-    if _accumulate_label_enabled():
-        return VALID_ACTION_SIGNALS + (_ACCUMULATE_SIGNAL,)
-    return VALID_ACTION_SIGNALS
+    """Active action-signal vocabulary (includes ``accumulate``)."""
+    return VALID_ACTION_SIGNALS + (_ACCUMULATE_SIGNAL,)
 DEFAULT_TRANSITION_TRAILING_WINDOW_DAYS = 30
 ONE_WEEK_TRADING_DAYS = 5
 ONE_MONTH_TRADING_DAYS = 20
@@ -176,28 +167,22 @@ def _normalize_action_signal(raw_signal: Any) -> str:
 def _signal_consistency_ratios_from_sequence(signal_sequence: Sequence[str]) -> dict[str, float]:
     total_points = len(signal_sequence)
     if total_points <= 0:
-        empty = {
+        return {
             "buy_signal_consistency_ratio": 0.0,
             "hold_signal_consistency_ratio": 0.0,
             "trim_signal_consistency_ratio": 0.0,
             "exit_risk_signal_consistency_ratio": 0.0,
+            "accumulate_signal_consistency_ratio": 0.0,
         }
-        if _accumulate_label_enabled():
-            empty["accumulate_signal_consistency_ratio"] = 0.0
-        return empty
-    ratios = {
+    return {
         "buy_signal_consistency_ratio": round(signal_sequence.count("buy") / total_points, 4),
         "hold_signal_consistency_ratio": round(signal_sequence.count("hold") / total_points, 4),
         "trim_signal_consistency_ratio": round(signal_sequence.count("trim") / total_points, 4),
         "exit_risk_signal_consistency_ratio": round(signal_sequence.count("exit-risk") / total_points, 4),
-    }
-    # Gated default-off: omit the new key entirely when accumulate is disabled so the
-    # returned shape stays byte-identical to today.
-    if _accumulate_label_enabled():
-        ratios["accumulate_signal_consistency_ratio"] = round(
+        "accumulate_signal_consistency_ratio": round(
             signal_sequence.count(_ACCUMULATE_SIGNAL) / total_points, 4
-        )
-    return ratios
+        ),
+    }
 
 
 def _evaluate_transition_horizon_outcome(

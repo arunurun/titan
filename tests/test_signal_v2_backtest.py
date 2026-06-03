@@ -87,8 +87,7 @@ def test_compare_label_streams_aggregates_drawdown_event():
     assert metrics.drawdown_saved_sum == pytest.approx(3.0)
 
 
-def test_recompute_legacy_vs_v2_differ_when_v2_on(monkeypatch):
-    monkeypatch.delenv("TITAN_SIGNAL_V2", raising=False)
+def test_recompute_legacy_vs_v2_differ():
     audit = {
         "next_week_score": 72.0,
         "effective_intent_score": 68.0,
@@ -115,8 +114,9 @@ def test_run_legacy_vs_v2_ab_on_builtin_fixture():
     assert isinstance(report["per_layer_ablation"], list)
 
 
-def test_signal_env_restores_flags(monkeypatch):
-    monkeypatch.setenv("TITAN_SIGNAL_V2", "0")
-    with signal_env(use_v2=True):
-        assert os.environ.get("TITAN_SIGNAL_V2") == "1"
-    assert os.environ.get("TITAN_SIGNAL_V2") == "0"
+def test_signal_env_is_noop_context_manager():
+    before = dict(os.environ)
+    with signal_env(use_v2=True, accumulate=True):
+        during = dict(os.environ)
+    assert during == before
+    assert dict(os.environ) == before

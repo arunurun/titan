@@ -40,8 +40,6 @@ def build_matrix_rows() -> list[dict[str, str]]:
     for case in TICKER_CASES:
         audit = copy.deepcopy(case["audit"])
         legacy_label, _, _ = _derive_action_signal_legacy(copy.deepcopy(case["audit"]))
-        os.environ["TITAN_SIGNAL_V2"] = "1"
-        os.environ["TITAN_SIGV2_ENABLE_ACCUMULATE"] = "1"
         v2_label, _, _ = derive_action_signal(audit)
         conf = audit.get("signal_confidence", "")
         rows.append(

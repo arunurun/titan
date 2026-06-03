@@ -14,18 +14,6 @@ from action_signals import _derive_action_signal_legacy, derive_action_signal
 from signal_v2_ticker_fixtures import TICKER_CASES
 
 
-@pytest.fixture
-def v2_accumulate_on(monkeypatch):
-    monkeypatch.setenv("TITAN_SIGNAL_V2", "1")
-    monkeypatch.setenv("TITAN_SIGV2_ENABLE_ACCUMULATE", "1")
-
-
-@pytest.fixture
-def v2_flags_off(monkeypatch):
-    monkeypatch.delenv("TITAN_SIGNAL_V2", raising=False)
-    monkeypatch.delenv("TITAN_SIGV2_ENABLE_ACCUMULATE", raising=False)
-
-
 @pytest.mark.parametrize(
     "case",
     [pytest.param(c, id=c["ticker"]) for c in TICKER_CASES],
@@ -43,8 +31,8 @@ def test_cited_ticker_legacy_label(case):
     "case",
     [pytest.param(c, id=c["ticker"]) for c in TICKER_CASES],
 )
-def test_cited_ticker_v2_label(case, v2_accumulate_on):
-    """V2 with accumulate enabled; see fixture driving_layer for rule attribution."""
+def test_cited_ticker_v2_label(case):
+    """Default v2 path; see fixture driving_layer for rule attribution."""
     audit = copy.deepcopy(case["audit"])
     label, _risk, _ = derive_action_signal(audit)
     assert audit.get("signal_engine_version") == "v2"
@@ -55,16 +43,7 @@ def test_cited_ticker_v2_label(case, v2_accumulate_on):
     )
 
 
-@pytest.mark.parametrize("case", [pytest.param(c, id=c["ticker"]) for c in TICKER_CASES])
-def test_cited_ticker_flags_off_matches_legacy(case, v2_flags_off):
-    """Golden: v2 master flag off stays byte-identical to legacy for cited audits."""
-    audit = copy.deepcopy(case["audit"])
-    got = derive_action_signal(audit)
-    expected = _derive_action_signal_legacy(copy.deepcopy(case["audit"]))
-    assert got == expected
-
-
-def test_short_history_ceiling_blocks_buy_on_syrma(v2_accumulate_on):
+def test_short_history_ceiling_blocks_buy_on_syrma():
     """Layer A: short history caps constructive labels even on strong composites."""
     from signal_v2_ticker_fixtures import TICKER_CASES
 
@@ -75,7 +54,7 @@ def test_short_history_ceiling_blocks_buy_on_syrma(v2_accumulate_on):
     assert audit.get("signal_confidence", 1.0) < 1.0
 
 
-def test_nan_heavy_withholds_constructive(v2_accumulate_on):
+def test_nan_heavy_withholds_constructive():
     """Layer A: NaN census >= 3 withholds buy/accumulate on otherwise-buy tape."""
     audit = {
         "next_week_score": 80.0,
@@ -87,7 +66,7 @@ def test_nan_heavy_withholds_constructive(v2_accumulate_on):
     assert label not in ("buy", "accumulate")
 
 
-def test_thin_liquidity_forbids_buy_via_derive(v2_accumulate_on):
+def test_thin_liquidity_forbids_buy_via_derive():
     """Layer A: thin liquidity forbids constructive labels."""
     audit = {
         "next_week_score": 80.0,
@@ -107,11 +86,3 @@ def test_thin_liquidity_forbids_buy_via_derive(v2_accumulate_on):
     assert label != "buy"
 
 
-def test_golden_representative_audits_flags_off(v2_flags_off):
-    """Flags-off parity on the generic audits from test_signal_v2 (regression guard)."""
-    from test_signal_v2 import _representative_audits
-
-    for audit in _representative_audits():
-        got = derive_action_signal(dict(audit))
-        expected = _derive_action_signal_legacy(dict(audit))
-        assert got == expected

@@ -1,9 +1,7 @@
-"""Flag-gated v2 signal engine: a layered (A-E) waterfall over the same audit dict.
+"""V2 signal engine: a layered (A-E) waterfall over the same audit dict.
 
-Default-off. The whole engine is engaged only when ``TITAN_SIGNAL_V2`` is truthy;
-when it is off, ``action_signals.derive_action_signal`` runs the legacy code path and
-output is byte-identical to today. Each layer has its own sub-flag (default *on* once
-the master flag is engaged) so layers can be ablated individually for A/B testing.
+``action_signals.derive_action_signal`` always routes here. Layers A–E always run;
+``accumulate`` is a first-class label. Tunable thresholds use ``TITAN_SIGV2_*`` env vars.
 
 Layers:
   A  data-quality / sanity      -> may only withhold buy / downgrade confidence
@@ -57,17 +55,8 @@ def _env_int(name: str, default: int) -> int:
 
 
 def v2_enabled() -> bool:
-    """Master switch for the v2 engine."""
-    return _env_truthy("TITAN_SIGNAL_V2", default=False)
-
-
-def _layer_enabled(flag: str) -> bool:
-    """Per-layer ablation flag; defaults *on* once the master flag is engaged."""
-    return _env_truthy(flag, default=True)
-
-
-def _accumulate_enabled() -> bool:
-    return _env_truthy("TITAN_SIGV2_ENABLE_ACCUMULATE", default=False)
+    """V2 is always the production signal path."""
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -138,8 +127,6 @@ def layer_a(audit: dict[str, Any]) -> dict[str, Any]:
         "confidence_seed": 1.0,
         "reasons": [],
     }
-    if not _layer_enabled("TITAN_SIGNAL_V2_LAYER_A"):
-        return out
 
     nan_max = _env_int("TITAN_SIGV2_A_NAN_MAX", 3)
     short_hist_conf = _env_float("TITAN_SIGV2_A_SHORT_HISTORY_CONF", 0.6)
@@ -255,18 +242,6 @@ def layer_c(audit: dict[str, Any]) -> dict[str, Any]:
     Layer D multipliers are NOT applied here; they are applied at aggregation so the
     raw per-term values stay inspectable in the trace.
     """
-    if not _layer_enabled("TITAN_SIGNAL_V2_LAYER_C"):
-        return {
-            "families": {},
-            "money_flow_bear": 0.0,
-            "money_flow_bull": 0.0,
-            "over_extension": 0.0,
-            "over_extension_hot": False,
-            "fundamental": 0.0,
-            "bull_terms": 0.0,
-            "trace": [],
-        }
-
     fp = _family_points(audit)
     trace: list[dict[str, Any]] = list(fp["trace"])
 
@@ -370,8 +345,6 @@ def layer_d(audit: dict[str, Any], c: dict[str, Any]) -> dict[str, Any]:
         "staleflow_downgrade": False,
         "reasons": [],
     }
-    if not _layer_enabled("TITAN_SIGNAL_V2_LAYER_D"):
-        return out
 
     reasons: list[str] = []
     adx = _sf(audit.get("adx_14"))
@@ -458,8 +431,6 @@ def layer_b(audit: dict[str, Any], c: dict[str, Any], d: dict[str, Any]) -> dict
         "corroborators": 0,
         "reasons": [],
     }
-    if not _layer_enabled("TITAN_SIGNAL_V2_LAYER_B"):
-        return out
 
     reasons: list[str] = []
     tier1_gap_pct = _env_float("TITAN_SIGV2_B_TIER1_GAP_PCT", -8.0)
@@ -701,17 +672,12 @@ def evaluate_signal_v2(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
     label = _apply_ceiling(label, a.get("label_ceiling"))
     label = _escalate(label, b.get("forced_label"))
 
-    # Accumulate emission is gated; when disabled, collapse to its legacy neighbor.
-    if label == "accumulate" and not _accumulate_enabled():
-        label = "hold"
-
     bypass = bool(b.get("bypass_hysteresis"))
     prior_label = audit.get("prev_action_signal")
     prior_label = str(prior_label).strip().lower() if prior_label else None
-    if _layer_enabled("TITAN_SIGNAL_V2_LAYER_E"):
-        label, _hyst = _apply_hysteresis(
-            label, risk_net, prior_label=prior_label, bypass=bypass, buffer=buffer
-        )
+    label, _hyst = _apply_hysteresis(
+        label, risk_net, prior_label=prior_label, bypass=bypass, buffer=buffer
+    )
 
     confidence = _confidence(
         final_label=label,
