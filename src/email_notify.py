@@ -103,10 +103,21 @@ def _html_per_symbol_sector_cards(other_lines: list[str]) -> str:
         body = block[1:]
         inner = f'<div style="{card_style}"><div style="margin:0;">{head}</div>'
         if body:
-            rows = "".join(
-                f'<div style="margin:6px 0 0;font-size:12px;line-height:1.55;color:#3c4043;">{escape(b)}</div>'
-                for b in body
-            )
+            row_parts: list[str] = []
+            for b in body:
+                stripped = b.strip()
+                if stripped.startswith("▸"):
+                    row_parts.append(
+                        '<div style="margin-top:10px;font-weight:700;font-size:11px;color:#5f6368;'
+                        'text-transform:uppercase;letter-spacing:0.02em;line-height:1.4;">'
+                        f"{escape(stripped)}</div>",
+                    )
+                else:
+                    row_parts.append(
+                        f'<div style="margin:6px 0 0;font-size:12px;line-height:1.55;color:#3c4043;">'
+                        f"{escape(stripped)}</div>",
+                    )
+            rows = "".join(row_parts)
             inner += f'<div style="margin-top:4px;">{rows}</div>'
         inner += "</div>"
         parts.append(inner)

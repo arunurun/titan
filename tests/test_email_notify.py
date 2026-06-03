@@ -125,17 +125,17 @@ def test_success_html_sector_per_symbol_metrics_use_cards():
     body = (
         "--- Per-symbol metrics ---\n"
         "MTARTECH (NSE) — EXIT RISK — risk score ≥7: hard exit bar — cut exposure sharply or exit\n"
-        "1W outlook: 54.0 / 100 (neutral band)\n"
-        "Technical intent: 50.0 / 100 (balanced / neutral)\n"
+        "▸ Trend Regime (14D)\n"
         "🟡➡ Trend regime (14D): Sideways (ADX 18.0; strength weak (<20); strength bands: <20 sideways, 20-24 weak trend, >=25 strong trend; direction rule: +DI 17.0 > -DI 16.0 => buy trend)\n"
         "🟡➡ 20D Range Position: -1.2% to 20D high \u00b7 6.5% above 20D low (near-high (within ~1% of 20D high); thresholds: near-high >=-1%, near-low <=1%)\n"
-        "🟡➡ Volatility vs 3M baseline: 1.01x (normal; bands: <0.90 low, 0.90-1.10 normal, >1.10 high)\n"
+        "▸ 1D / Tape\n"
         "Tape snapshot\n"
         "1D move: -1.0% (bands: >=+1 strong up, -1 to +1 muted, <=-1 weak)\n"
-        "1D z-score: 0.0 (near mean; bands: >=+2 / +1 to +2 / -1 to +1 / -2 to -1 / <=-2)\n"
-        "Typical daily swing (ATR14): 2.0% (bands: <2.0 calm, 2.0-4.0 moderate, >4.0 elevated)\n"
-        "🟡➡ Money flow trend (20D): 0.010 (neutral; bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution)\n"
+        "▸ Model outlook\n"
+        "1W outlook: 54.0 / 100 (neutral band)\n"
+        "Technical intent: 50.0 / 100 (balanced / neutral)\n"
         "IDEAFORGE (NSE) — Hold\n"
+        "▸ Model outlook\n"
         "1W outlook: 60.0 / 100 (moderate constructive)\n"
         "Technical intent: 55.0 / 100 (moderate long bias)\n"
     )
@@ -143,6 +143,9 @@ def test_success_html_sector_per_symbol_metrics_use_cards():
     assert html.count("border-radius:10px;padding:12px 14px") == 2
     assert "MTARTECH (NSE)" in html and "IDEAFORGE (NSE)" in html
     assert "Trend regime (14D)" in html
+    assert "text-transform:uppercase" in html
+    assert "▸ Trend Regime (14D)" in html
+    assert "▸ Model outlook" in html
     assert "#ea4335" in html
     assert "#fbbc05" in html or "#fef7e0" in html
 
@@ -151,6 +154,7 @@ def test_success_html_sector_buy_card_is_green():
     body = (
         "--- Per-symbol metrics ---\n"
         "SAKSOFT (NSE) — BUY — constructive setup (next-week & intent supportive; add exposure per your mandate)\n"
+        "▸ Model outlook\n"
         "1W outlook: 72.0 / 100 (strong constructive)\n"
         "Technical intent: 68.0 / 100 (high conviction long bias)\n"
     )

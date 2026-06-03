@@ -106,7 +106,10 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
     assert "volatility vs 3m baseline" in text.lower()
     assert "money flow trend (20d)" in text.lower()
     assert "bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution" in text
-    assert "sector-relative rank" in text.lower()
+    assert "▸ trend regime (14d)" in text.lower()
+    assert "▸ 20d money flow" in text.lower()
+    assert "▸ 1d / tape" in text.lower()
+    assert "▸ model outlook" in text.lower()
     assert "bands: leader >=67, average 34-66, laggard <=33" in text
     assert "very short horizon (1d outlook):" in text.lower()
     assert "distance above long-term trend (ema200)" in text.lower()
@@ -121,15 +124,18 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
     assert "\n" in text
     assert "model read confidence" in text.lower()
     assert "bands: >=70 high, 55-69 medium, <55 low" in text
-    assert "🟡➡ 1W outlook:" in text
-    assert "🟡➡ Technical intent:" in text
     assert "🟢⬆ Trend regime (14D): Buy trend" in text
     assert "🔴⬇ 1D move: -4.28%" in text
     assert any(f"{icon} Tape snapshot" in text for icon in ("🟢⬆", "🟡➡", "🔴⬇"))
-    assert any(f"{icon} Sector-relative rank" in text for icon in ("🟢⬆", "🟡➡", "🔴⬇"))
     assert any(
-        f"{icon} Technical intent percentile: 62.00" in text for icon in ("🟢⬆", "🟡➡", "🔴⬇")
+        f"{icon} Intent score — percentile among sector peers: 62.00" in text
+        for icon in ("🟢⬆", "🟡➡", "🔴⬇")
     )
+    headline_end = text.index("\n")
+    model_idx = text.lower().index("▸ model outlook")
+    assert model_idx > headline_end
+    assert text.lower().index("1w outlook:") > model_idx
+    assert text.lower().index("technical intent:") > model_idx
 
 
 def test_symbol_digest_default_shows_neutral_na_for_missing_new_metrics(monkeypatch):

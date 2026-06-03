@@ -774,17 +774,8 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
 
     lines_out: list[str] = []
     lines_out.append(f"{symbol} ({exchange}) — {_sell_signal_plain_english(str(sell_signal))}")
-    nw_l = _horizon_score_label(next_week)
-    lines_out.append(
-        f"{_metric_icon(next_week, bullish_above=55.0, bearish_below=45.0)} "
-        f"1W outlook: {_fmt_metric(next_week)} / 100 ({nw_l}; {_horizon_score_bands_text()})"
-    )
-    lines_out.append(
-        f"{_metric_icon(intent, bullish_above=55.0, bearish_below=45.0)} "
-        f"Technical intent: {_fmt_metric(intent)} / 100 "
-        f"({_equity_technical_label(intent)}; bands: >=70 high-long, 55-69 moderate-long, 45-54 neutral, 30-44 defensive, <30 high-defensive)"
-    )
-    lines_out.append("")
+
+    lines_out.append("▸ Trend Regime (14D)")
     trend_regime = _trend_regime_label(adx_14, plus_di_14, minus_di_14)
     if not math.isnan(_safe_float(plus_di_14)) and not math.isnan(_safe_float(minus_di_14)):
         if _safe_float(plus_di_14) > _safe_float(minus_di_14):
@@ -811,19 +802,44 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
         f"(ADX {_fmt_metric(adx_14)}; strength {_adx_strength_band(adx_14)}; "
         f"strength bands: <20 sideways, 20-24 weak trend, >=25 strong trend; direction rule: {direction_rule})"
     )
-    lines_out.append("")
     lines_out.append(
         f"{_breakout_state_icon(breakout_to_high, breakout_above_low)} "
         f"20D Range Position: {_fmt_metric(breakout_to_high)}% to 20D high \u00b7 "
         f"{_fmt_metric(breakout_above_low)}% above 20D low "
         "(near-high (within ~1% of 20D high); thresholds: near-high >=-1%, near-low <=1%)"
     )
-    lines_out.append("")
     lines_out.append(
-        f"{_atr_regime_icon(atr_ratio)} Volatility vs 3M baseline: {_fmt_metric(atr_ratio)}x "
-        f"({_atr_ratio_band(atr_ratio)}; bands: <0.90 low, 0.90-1.10 normal, >1.10 high)"
+        f"{_metric_icon(ema_dist, bullish_above=5.0, bearish_below=-5.0)} "
+        f"Distance above long-term trend (EMA200): {_fmt_metric(ema_dist)}% "
+        f"(bands: >+5 stretched above trend, -5 to +5 near trend, <-5 below trend)"
     )
-    lines_out.append("")
+
+    lines_out.append("▸ 20D Money Flow")
+    lines_out.append(
+        f"{_metric_icon(cmf_val, bullish_above=0.05, bearish_below=-0.05)} "
+        f"Money flow trend (20D): {_fmt_metric(cmf_val, 3)} "
+        f"({_cmf_band(cmf_val)}; bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution)"
+        + (f" [{cmf_label} proxy]" if cmf_label != "CMF20" else "")
+    )
+    lines_out.append(
+        f"{_metric_icon(vpr_label_src, bullish_above=1.5, bearish_below=0.7)} "
+        f"Volume participation: {_fmt_metric(vpr_label_src)}x "
+        f"({_volume_participation_label(vpr_label_src)}; bands: >=1.5 high, 1.0-1.49 above-avg, 0.7-0.99 below-avg, <0.7 thin)"
+    )
+    sp_int = audit.get("sector_pctile_effective_intent")
+    lines_out.append(
+        f"{_metric_icon(sp_int, bullish_above=67.0, bearish_below=33.0)} "
+        f"Intent score — percentile among sector peers: {_fmt_metric(sp_int)} "
+        f"({_sector_rank_band(sp_int)}; bands: leader >=67, average 34-66, laggard <=33)"
+    )
+    sp_nw = audit.get("sector_pctile_next_week_score")
+    lines_out.append(
+        f"{_metric_icon(sp_nw, bullish_above=67.0, bearish_below=33.0)} "
+        f"1W outlook — percentile among sector peers: {_fmt_metric(sp_nw)} "
+        f"({_sector_rank_band(sp_nw)}; bands: leader >=67, average 34-66, laggard <=33)"
+    )
+
+    lines_out.append("▸ 1D / Tape")
     lines_out.append(f"{_tape_snapshot_icon(audit)} Tape snapshot")
     lines_out.append(
         f"{_metric_icon(ret1d, bullish_above=1.0, bearish_below=-1.0)} "
@@ -834,16 +850,6 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
         f"{_metric_icon(z, bullish_above=1.0, bearish_below=-1.0)} "
         f"1D z-score: {_fmt_metric(z)} "
         f"({_z_label(z)}; bands: >=+2 / +1 to +2 / -1 to +1 / -2 to -1 / <=-2)"
-    )
-    lines_out.append(
-        f"{_metric_icon(ema_dist, bullish_above=5.0, bearish_below=-5.0)} "
-        f"Distance above long-term trend (EMA200): {_fmt_metric(ema_dist)}% "
-        f"(bands: >+5 stretched above trend, -5 to +5 near trend, <-5 below trend)"
-    )
-    lines_out.append(
-        f"{_metric_icon(vpr_label_src, bullish_above=1.5, bearish_below=0.7)} "
-        f"Volume participation: {_fmt_metric(vpr_label_src)}x "
-        f"({_volume_participation_label(vpr_label_src)}; bands: >=1.5 high, 1.0-1.49 above-avg, 0.7-0.99 below-avg, <0.7 thin)"
     )
     atr_icon = "🟡➡"
     atr_v = _safe_float(atr_pct)
@@ -857,25 +863,20 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
         f"(bands: <2.0 calm, 2.0-4.0 moderate, >4.0 elevated)"
     )
     lines_out.append(
-        f"{_metric_icon(cmf_val, bullish_above=0.05, bearish_below=-0.05)} "
-        f"Money flow trend (20D): {_fmt_metric(cmf_val, 3)} "
-        f"({_cmf_band(cmf_val)}; bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution)"
-        + (f" [{cmf_label} proxy]" if cmf_label != "CMF20" else "")
+        f"{_atr_regime_icon(atr_ratio)} Volatility vs 3M baseline: {_fmt_metric(atr_ratio)}x "
+        f"({_atr_ratio_band(atr_ratio)}; bands: <0.90 low, 0.90-1.10 normal, >1.10 high)"
     )
-    lines_out.append("")
 
-    lines_out.append(f"{_sector_relative_rank_icon(audit)} Sector-relative rank")
-    sp_int = audit.get("sector_pctile_effective_intent")
+    lines_out.append("▸ Model outlook")
     lines_out.append(
-        f"{_metric_icon(sp_int, bullish_above=67.0, bearish_below=33.0)} "
-        f"Technical intent percentile: {_fmt_metric(sp_int)} "
-        f"({_sector_rank_band(sp_int)}; bands: leader >=67, average 34-66, laggard <=33)"
+        f"{_metric_icon(intent, bullish_above=55.0, bearish_below=45.0)} "
+        f"Technical intent: {_fmt_metric(intent)} / 100 "
+        f"({_equity_technical_label(intent)}; bands: >=70 high-long, 55-69 moderate-long, 45-54 neutral, 30-44 defensive, <30 high-defensive)"
     )
-    sp_nw = audit.get("sector_pctile_next_week_score")
+    nw_l = _horizon_score_label(next_week)
     lines_out.append(
-        f"{_metric_icon(sp_nw, bullish_above=67.0, bearish_below=33.0)} "
-        f"Next-week percentile: {_fmt_metric(sp_nw)} "
-        f"({_sector_rank_band(sp_nw)}; bands: leader >=67, average 34-66, laggard <=33)"
+        f"{_metric_icon(next_week, bullish_above=55.0, bearish_below=45.0)} "
+        f"1W outlook: {_fmt_metric(next_week)} / 100 ({nw_l}; {_horizon_score_bands_text()})"
     )
     nd_l = _horizon_score_label(nf)
     lines_out.append(
@@ -892,35 +893,40 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     if pred:
         lines_out.append(pred)
 
+    context_tail: list[str] = []
     cmf_delta = _cmf_delta_line(audit)
     if cmf_delta:
-        lines_out.append(cmf_delta)
+        context_tail.append(cmf_delta)
 
     news_rel = _news_correlation_line(audit)
     if news_rel:
-        lines_out.append(news_rel)
+        context_tail.append(news_rel)
     news_evidence = _news_evidence_line(audit)
     if news_evidence:
-        lines_out.append(news_evidence)
+        context_tail.append(news_evidence)
 
     flag_simple = _digest_flags_simple(audit)
     if flag_simple:
-        lines_out.append("Context: " + "; ".join(flag_simple))
+        context_tail.append("Context: " + "; ".join(flag_simple))
 
     if support_tag != "technical_only":
-        lines_out.append(f"Evidence mix: {support_tag.replace('_', ' ')}")
+        context_tail.append(f"Evidence mix: {support_tag.replace('_', ' ')}")
 
     if fundamental_status.lower() not in ("unavailable", "na", "n/a", "") and not str(fundamental_status).startswith(
         "unavailable",
     ):
         fr = "; ".join(str(x) for x in fundamental_reasons[:2]) if fundamental_reasons else ""
-        lines_out.append(
+        context_tail.append(
             f"Fundamentals: {fundamental_status} ({_fmt_metric(fundamental_score)})"
             + (f" — {fr}" if fr else ""),
         )
 
     if fallback_used and exchange_used.upper() != str(exchange).upper():
-        lines_out.append(f"Price feed: pulled from {exchange_used} (alternate to {exchange}).")
+        context_tail.append(f"Price feed: pulled from {exchange_used} (alternate to {exchange}).")
+
+    if context_tail:
+        lines_out.append("▸ Context")
+        lines_out.extend(context_tail)
 
     head = lines_out[0]
     tail = ["  " + ln for ln in lines_out[1:]]
