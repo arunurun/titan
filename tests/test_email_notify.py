@@ -129,7 +129,6 @@ def test_success_html_sector_per_symbol_metrics_use_cards():
         "🟡➡ Trend regime (14D): Sideways (ADX 18.0; strength weak (<20); strength bands: <20 sideways, 20-24 weak trend, >=25 strong trend; direction rule: +DI 17.0 > -DI 16.0 => buy trend)\n"
         "🟡➡ 20D Range Position: -1.2% to 20D high \u00b7 6.5% above 20D low (near-high (within ~1% of 20D high); thresholds: near-high >=-1%, near-low <=1%)\n"
         "▸ 1D / Tape\n"
-        "Tape snapshot\n"
         "1D move: -1.0% (bands: >=+1 strong up, -1 to +1 muted, <=-1 weak)\n"
         "▸ Model outlook\n"
         "1W outlook: 54.0 / 100 (neutral band)\n"

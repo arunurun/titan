@@ -115,7 +115,6 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
     assert "distance above long-term trend (ema200)" in text.lower()
     assert "typical daily swing (atr14)" in text.lower()
     assert "bands: <2.0 calm, 2.0-4.0 moderate, >4.0 elevated" in text
-    assert "tape snapshot" in text.lower()
     assert "bands: >=+1 strong up, -1 to +1 muted, <=-1 weak" in text
     assert "bands: >=1.5 high, 1.0-1.49 above-avg, 0.7-0.99 below-avg, <0.7 thin" in text
     assert "bands: >=70 strong, 55-69 constructive, 45-54 neutral, 35-44 caution, <35 defensive" in text
@@ -126,7 +125,6 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
     assert "bands: >=70 high, 55-69 medium, <55 low" in text
     assert "🟢⬆ Trend regime (14D): Buy trend" in text
     assert "🔴⬇ 1D move: -4.28%" in text
-    assert any(f"{icon} Tape snapshot" in text for icon in ("🟢⬆", "🟡➡", "🔴⬇"))
     assert any(
         f"{icon} Intent score — percentile among sector peers: 62.00" in text
         for icon in ("🟢⬆", "🟡➡", "🔴⬇")
@@ -1408,10 +1406,10 @@ def test_sell_signal_framework_states():
     )
     trim_signal, trim_risk, _ = _derive_sell_signal(
         {
-            "next_week_score": 53.0,
-            "effective_intent_score": 50.0,
+            "next_week_score": 48.0,
+            "effective_intent_score": 48.0,
             "z_score": -0.7,
-            "return_1d_pct": -0.4,
+            "return_1d_pct": -1.5,
             "ema_200_distance_pct": -1.2,
             "atr_14_pct": 3.2,
             "fundamental_status": "balanced",
@@ -1437,8 +1435,15 @@ def test_sell_signal_framework_states():
             "effective_intent_score": 68.0,
             "z_score": 1.8,
             "return_1d_pct": 2.0,
+            "return_5d_pct": 2.0,
+            "return_10d_pct": 3.0,
+            "rel_return_5d_vs_nifty_pct": 1.0,
+            "cmf_20": 0.10,
+            "obv_slope_20": 10.0,
             "ema_200_distance_pct": 4.2,
+            "ema200_stretch_atr": 1.5,
             "atr_14_pct": 2.3,
+            "adx_14": 30.0,
             "fundamental_status": "strong",
         }
     )

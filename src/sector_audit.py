@@ -840,7 +840,6 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     )
 
     lines_out.append("▸ 1D / Tape")
-    lines_out.append(f"{_tape_snapshot_icon(audit)} Tape snapshot")
     lines_out.append(
         f"{_metric_icon(ret1d, bullish_above=1.0, bearish_below=-1.0)} "
         f"1D move: {_fmt_metric(ret1d)}% "
