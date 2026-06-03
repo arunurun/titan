@@ -114,7 +114,7 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
     assert "very short horizon (1d outlook):" in text.lower()
     assert "distance above long-term trend (ema200)" in text.lower()
     assert (
-        "bands: <=+5 healthy, +5 to +15 extended, +15 to +25 stretched, >+25 extreme; "
+        "bands: <=10% green, 10-15% yellow, 15-25% orange, >25% red; "
         "-5 to 0 near trend, <-5 below trend"
     ) in text
     assert "🔴⬇ Distance above long-term trend (EMA200): 47.29%" in text
@@ -147,10 +147,12 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
         (3.0, "🟢⬆"),
         (5.0, "🟢⬆"),
         (10.0, "🟢⬆"),
-        (15.0, "🟢⬆"),
-        (18.0, "🟡➡"),
-        (25.0, "🟡➡"),
+        (12.0, "🟡➡"),
+        (15.0, "🟡➡"),
+        (18.0, "🟠➡"),
+        (25.0, "🟠➡"),
         (30.0, "🔴⬇"),
+        (69.0, "🔴⬇"),
         (-3.0, "🟡➡"),
         (-7.0, "🔴⬇"),
         (float("nan"), "🟡➡"),

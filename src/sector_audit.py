@@ -161,7 +161,7 @@ def _metric_icon(v: Any, *, bullish_above: float, bearish_below: float) -> str:
 
 def _ema200_distance_bands_text() -> str:
     return (
-        "bands: <=+5 healthy, +5 to +15 extended, +15 to +25 stretched, >+25 extreme; "
+        "bands: <=10% green, 10-15% yellow, 15-25% orange, >25% red; "
         "-5 to 0 near trend, <-5 below trend"
     )
 
@@ -178,6 +178,8 @@ def _ema200_distance_icon(v: Any) -> str:
     if f > 25.0:
         return "🔴⬇"
     if f > 15.0:
+        return "🟠➡"
+    if f > 10.0:
         return "🟡➡"
     return "🟢⬆"
 
