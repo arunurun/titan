@@ -40,8 +40,14 @@ def _html_action_colored_cell(cell: str) -> str:
 
 
 def _html_sector_section_title(raw_title: str) -> str:
-    """Plain section label for HTML (strip digest ▸ prefix; native <summary> marker is the affordance)."""
-    return raw_title.strip().lstrip("▸").strip()
+    """Section label for HTML summary with visible ▸ prefix.
+
+    Gmail and some Outlook builds omit the native <summary> disclosure marker
+    when toggle is unsupported or sections are open; the text prefix is the
+    affordance in those clients.
+    """
+    label = raw_title.strip().lstrip("▸").strip()
+    return f"▸ {label}"
 
 
 def _sector_body_line_is_legend(line: str) -> bool:

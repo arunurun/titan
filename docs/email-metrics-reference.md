@@ -666,7 +666,7 @@ flowchart TD
 
 ## Collapsible HTML sections (email clients)
 
-Per-symbol digest sections (`▸ Trend Regime`, `▸ Model outlook`, etc.) render as HTML `<details>` / `<summary>` in `_html_collapsible_sector_sections` (`src/email_notify.py`). Plain-text email keeps the `▸` prefix; HTML strips it because the native disclosure marker is the toggle affordance.
+Per-symbol digest sections (`▸ Trend Regime`, `▸ Model outlook`, etc.) render as HTML `<details>` / `<summary>` in `_html_collapsible_sector_sections` (`src/email_notify.py`). Plain-text and HTML both keep the `▸` prefix in section labels because Gmail and some Outlook builds omit the native disclosure marker when toggle is unsupported or sections start open.
 
 All `<details>` blocks include **`open` by default** so section body lines stay visible when a client draws a static triangle but does not support toggling (common in Gmail and Outlook desktop).
 
