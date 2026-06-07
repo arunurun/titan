@@ -42,8 +42,12 @@ def test_build_options_audit_fields_computes_walls_and_pcr():
 
 
 def test_build_options_audit_fields_unavailable():
-    fields = build_options_audit_fields({"option_chain_unavailable": True}, spot=100.0)
+    fields = build_options_audit_fields(
+        {"option_chain_unavailable": True, "option_chain_unavailable_reason": "zero open interest"},
+        spot=100.0,
+    )
     assert fields["option_chain_unavailable"] is True
+    assert fields["option_chain_unavailable_reason"] == "zero open interest"
     assert math.isnan(fields["pcr"])
 
 

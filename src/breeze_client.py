@@ -211,6 +211,25 @@ def iter_monthly_expiry_candidates(
 _INDEX_WEEKLY_UNDERLYINGS = frozenset({"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"})
 
 
+def nfo_underlying_code_candidates(nse_symbol: str) -> list[str]:
+    """
+    Breeze NFO ``stock_code`` values for an NSE underlying.
+
+    Index underlyings (NIFTY) use the display symbol. Single-stock F&O often
+    requires ICICI scrip codes (e.g. RELIANCE→RELIND, BEL→BHAELE) while some
+    names (e.g. HAL) accept the NSE ticker — try both in order.
+    """
+    sym = str(nse_symbol or "").strip().upper()
+    if sym in _INDEX_WEEKLY_UNDERLYINGS:
+        return [sym]
+    resolved = resolve_breeze_stock_code(sym, "NSE")
+    out: list[str] = []
+    for code in (sym, resolved):
+        if code and code not in out:
+            out.append(code)
+    return out
+
+
 def expiry_candidates_for_underlying(
     stock_code: str,
     *,
@@ -360,6 +379,7 @@ def _empty_option_metrics_payload(
     *,
     underlying: str,
     tried: list[str],
+    reason: str | None = None,
 ) -> dict[str, Any]:
     return {
         "underlying": underlying,
@@ -370,6 +390,7 @@ def _empty_option_metrics_payload(
         "put_chain_df": pd.DataFrame(columns=["strike", "oi"]),
         "expiry_date": None,
         "option_chain_unavailable": True,
+        "option_chain_unavailable_reason": reason or "chain unavailable",
         "expiry_try_index": None,
         "expiry_tries": tried,
         "fallback_used": len(tried) > 1,
@@ -382,35 +403,55 @@ def fetch_option_metrics_with_expiry_fallback(
     *,
     max_expiry_tries: int = 8,
 ) -> dict[str, Any]:
-    """Try successive expiries until a chain returns non-zero OI depth."""
-    code = str(stock_code or "").strip().upper()
+    """Try successive expiries (and NFO code aliases) until a chain returns OI."""
+    nse_code = str(stock_code or "").strip().upper()
     tried: list[str] = []
-    for i, expiry in enumerate(
-        expiry_candidates_for_underlying(code, max_tries=max_expiry_tries),
-        start=1,
-    ):
-        tried.append(expiry)
-        try:
-            m = fetch_option_metrics_for_underlying(breeze, code, expiry)
-            if m["call_oi"] == 0.0 and m["put_oi"] == 0.0:
+    last_error: str | None = None
+    expiry_candidates = expiry_candidates_for_underlying(nse_code, max_tries=max_expiry_tries)
+    nfo_codes = nfo_underlying_code_candidates(nse_code)
+    try_index = 0
+    for nfo_code in nfo_codes:
+        if nfo_code != nse_code:
+            logger.info("NFO underlying code candidate for %s: %s", nse_code, nfo_code)
+        for expiry in expiry_candidates:
+            tried.append(f"{nfo_code}@{expiry}")
+            try_index += 1
+            try:
+                m = fetch_option_metrics_for_underlying(breeze, nfo_code, expiry)
+                if m["call_oi"] == 0.0 and m["put_oi"] == 0.0:
+                    logger.warning(
+                        "Option chain has zero OI for %s (%s) expiry %s; trying next.",
+                        nse_code,
+                        nfo_code,
+                        expiry,
+                    )
+                    last_error = "zero open interest"
+                    continue
+                m["underlying"] = nse_code
+                m["nfo_stock_code"] = nfo_code
+                m["expiry_try_index"] = try_index
+                m["expiry_tries"] = tried
+                m["fallback_used"] = try_index > 1
+                return m
+            except Exception as e:
+                last_error = str(e)
                 logger.warning(
-                    "Option chain has zero OI for %s expiry %s; trying next.",
-                    code,
+                    "Option chain fetch failed for %s (%s) expiry %s: %s",
+                    nse_code,
+                    nfo_code,
                     expiry,
+                    e,
                 )
-                continue
-            m["expiry_try_index"] = i
-            m["expiry_tries"] = tried
-            m["fallback_used"] = i > 1
-            return m
-        except Exception as e:
-            logger.warning("Option chain fetch failed for %s expiry %s: %s", code, expiry, e)
+    reason = last_error or "zero OI after expiry tries"
     logger.error(
-        "%s option chain unavailable after %s expiry tries; continuing without OI/PCR.",
-        code,
-        max_expiry_tries,
+        "%s option chain unavailable after %s tries (%s NFO codes × %s expiries); %s",
+        nse_code,
+        len(tried),
+        len(nfo_codes),
+        len(expiry_candidates),
+        reason,
     )
-    return _empty_option_metrics_payload(underlying=code, tried=tried)
+    return _empty_option_metrics_payload(underlying=nse_code, tried=tried, reason=reason)
 
 
 def fetch_nifty_option_metrics_with_expiry_fallback(

@@ -552,7 +552,7 @@ def test_format_symbol_options_context_non_fno_message():
         {"option_chain_unavailable": True, "option_chain_not_fno": True}
     )
     assert lines[0] == "▸ Options context"
-    assert "not in F&O list" in lines[1]
+    assert "not in F&O universe" in lines[1]
 
 
 def test_format_symbol_options_context_fetch_failed_message():
@@ -563,10 +563,53 @@ def test_format_symbol_options_context_fetch_failed_message():
             "option_chain_unavailable": True,
             "option_chain_not_fno": False,
             "option_chain_fetch_attempted": True,
+            "option_chain_unavailable_reason": "zero open interest",
         }
     )
     assert lines[0] == "▸ Options context"
-    assert "unavailable for this symbol" in lines[1]
+    assert "chain unavailable (zero open interest)" in lines[1]
+
+
+def test_format_symbol_options_context_success_with_mock_chain():
+    from sector_audit import _format_symbol_options_context_block
+
+    lines = _format_symbol_options_context_block(
+        {
+            "option_chain_unavailable": False,
+            "pcr": 1.15,
+            "put_oi_wall_strike": 4200.0,
+            "call_oi_wall_strike": 4400.0,
+            "options_expiry": "2026-06-30T06:00:00.000Z",
+            "close_last": 4350.0,
+            "spot_vs_put_wall_pct": 3.57,
+            "spot_vs_call_wall_pct": -1.14,
+        }
+    )
+    assert lines[0] == "▸ Options context"
+    assert "PCR 1.15" in lines[1]
+    assert "4400" in lines[1]
+    assert any("Spot" in line for line in lines)
+
+
+def test_format_sector_options_context_block_available():
+    from sector_audit import _format_sector_options_context_block
+
+    lines = _format_sector_options_context_block(
+        {
+            "sector_option_chain_unavailable": False,
+            "sector_options_underlying": "NIFTY",
+            "sector_pcr": 0.76,
+            "sector_put_wall_strike": 22500.0,
+            "sector_call_wall_strike": 24000.0,
+            "sector_options_expiry": "2026-06-09T06:00:00.000Z",
+            "sector_index_spot": 23366.7,
+            "sector_spot_vs_put_wall_pct": 3.85,
+            "sector_spot_vs_call_wall_pct": -2.64,
+        }
+    )
+    assert lines[0] == "▸ Sector options context"
+    assert "NIFTY PCR 0.76" in lines[1]
+    assert "Index spot" in lines[2]
 
 
 def test_build_equity_live_audit_cmf20_delta_is_numeric(monkeypatch):

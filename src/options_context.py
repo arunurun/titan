@@ -112,6 +112,7 @@ def build_options_audit_fields(
             "options_expiry": None,
             "option_expiry": None,
             "option_chain_unavailable": True,
+            "option_chain_unavailable_reason": opt.get("option_chain_unavailable_reason"),
             "oi_wall": {"strike": float("nan"), "oi": float("nan")},
         }
 

@@ -172,3 +172,29 @@ def test_success_html_sector_buy_card_is_green():
     html = _render_success_html(body, subject="Titan sector")
     assert "#34a853" in html
     assert "SAKSOFT" in html
+
+
+def test_render_success_html_sector_options_section():
+    body = (
+        "--- Sector options context ---\n"
+        "▸ Sector options context\n"
+        "  NIFTY PCR 0.76 | put wall 22500 | call wall 24000 | expiry 2026-06-09\n"
+        "  Index spot 23366.70 | vs put wall +3.85% | vs call wall -2.64%\n"
+    )
+    html = _render_success_html(body, subject="Titan sector")
+    assert "Sector options context" in html
+    assert "NIFTY PCR 0.76" in html
+    assert "Index spot 23366.70" in html
+
+
+def test_render_success_html_verbose_gate_preserves_sector_options():
+    body = (
+        "--- Prediction quality gate ---\n"
+        "Gate status: PASS\n"
+        "Successful symbols: 10/10 (100.00%)\n"
+        "▸ Sector options context\n"
+        "  NIFTY PCR 0.76 | put wall 22500 | call wall 24000\n"
+    )
+    html = _render_success_html(body, subject="Titan sector")
+    assert "NIFTY PCR 0.76" in html
+    assert "Sector options context" in html or "▸ Sector options context" in html

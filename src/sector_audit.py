@@ -662,12 +662,13 @@ def _format_symbol_options_context_block(audit: dict[str, Any]) -> list[str]:
         if audit.get("option_chain_not_fno"):
             return [
                 "▸ Options context",
-                "  Options: unavailable (not in F&O list)",
+                "  not in F&O universe (display only)",
             ]
         if audit.get("option_chain_fetch_attempted"):
+            reason = str(audit.get("option_chain_unavailable_reason") or "chain unavailable").strip()
             return [
                 "▸ Options context",
-                "  Options chain unavailable for this symbol.",
+                f"  chain unavailable ({reason})",
             ]
         return []
     lines = [
@@ -2752,6 +2753,7 @@ def build_equity_live_audit(
                 inst.exchange,
                 exc,
             )
+            opt_audit_defaults["option_chain_unavailable_reason"] = str(exc)
     pcr = opt_audit_defaults.get("pcr", float("nan"))
     intent = calculate_equity_technical_score(z, vpr_for_scoring)
     high_volume_down_day_proxy = (
@@ -2892,6 +2894,7 @@ def build_equity_live_audit(
         "equity_technical_score": intent,
         "rows": len(df),
         "option_chain_unavailable": bool(opt_audit_defaults.get("option_chain_unavailable", True)),
+        "option_chain_unavailable_reason": opt_audit_defaults.get("option_chain_unavailable_reason"),
         "option_chain_not_fno": option_chain_not_fno,
         "option_chain_fetch_attempted": option_chain_fetch_attempted,
         "institutional_flow": {
@@ -3445,7 +3448,7 @@ def run_sector_live(
             )
         sector_opt_lines = _format_sector_options_context_block(sector_options_ctx)
         if sector_opt_lines:
-            lines.extend(["", *sector_opt_lines])
+            lines.extend(["", "--- Sector options context ---", *sector_opt_lines])
         lines.append("--- Action summary ---")
         action_counts = {"buy": 0, "hold": 0, "trim": 0, "exit-risk": 0}
         for r in ok_results:

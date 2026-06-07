@@ -15,6 +15,7 @@ from breeze_client import (
     fetch_nifty_option_metrics_with_expiry_fallback,
     fetch_option_metrics_for_underlying,
     fetch_option_metrics_with_expiry_fallback,
+    nfo_underlying_code_candidates,
     volume_absorption_ratio,
     volume_participation_ratio,
 )
@@ -321,12 +322,65 @@ def test_fetch_option_metrics_for_underlying_stock():
     assert m["put_oi"] == 2000.0
 
 
+def test_nfo_underlying_code_candidates_tries_breeze_alias(monkeypatch):
+    monkeypatch.setattr(
+        "breeze_client.resolve_breeze_stock_code",
+        lambda sym, ex: "BHAELE" if sym == "BEL" else sym.strip().upper(),
+    )
+    assert nfo_underlying_code_candidates("BEL") == ["BEL", "BHAELE"]
+    assert nfo_underlying_code_candidates("NIFTY") == ["NIFTY"]
+
+
+def test_fetch_option_metrics_with_fallback_uses_breeze_nfo_code(monkeypatch):
+    monkeypatch.setattr(
+        "breeze_client.resolve_breeze_stock_code",
+        lambda sym, ex: "RELIND" if sym == "RELIANCE" else sym.strip().upper(),
+    )
+    monkeypatch.setattr(
+        "breeze_client.expiry_candidates_for_underlying",
+        lambda code, max_tries=8: ["2026-06-30T06:00:00.000Z"],
+    )
+
+    breeze = MagicMock()
+    no_data = {"Success": None, "Status": 500, "Error": "No Data Found"}
+
+    def _fetch(_breeze, nfo_code, _expiry):
+        if nfo_code == "RELIANCE":
+            return {
+                "underlying": "RELIANCE",
+                "call_oi": 0.0,
+                "put_oi": 0.0,
+                "chain_df": __import__("pandas").DataFrame(columns=["strike", "oi"]),
+                "call_chain_df": __import__("pandas").DataFrame(columns=["strike", "oi"]),
+                "put_chain_df": __import__("pandas").DataFrame(columns=["strike", "oi"]),
+                "expiry_date": _expiry,
+            }
+        return {
+            "underlying": "RELIANCE",
+            "call_oi": 500.0,
+            "put_oi": 700.0,
+            "chain_df": __import__("pandas").DataFrame({"strike": [2500.0], "oi": [500.0]}),
+            "call_chain_df": __import__("pandas").DataFrame({"strike": [2500.0], "oi": [500.0]}),
+            "put_chain_df": __import__("pandas").DataFrame({"strike": [2400.0], "oi": [700.0]}),
+            "expiry_date": _expiry,
+        }
+
+    monkeypatch.setattr("breeze_client.fetch_option_metrics_for_underlying", _fetch)
+    breeze.get_option_chain_quotes.return_value = no_data
+
+    m = fetch_option_metrics_with_expiry_fallback(breeze, "RELIANCE", max_expiry_tries=1)
+    assert m.get("option_chain_unavailable") is not True
+    assert m["nfo_stock_code"] == "RELIND"
+    assert m["call_oi"] == 500.0
+
+
 def test_fetch_option_metrics_with_fallback_degrades():
     breeze = MagicMock()
     no_data = {"Success": None, "Status": 500, "Error": "No Data Found"}
     breeze.get_option_chain_quotes.return_value = no_data
     m = fetch_option_metrics_with_expiry_fallback(breeze, "RELIANCE", max_expiry_tries=2)
     assert m.get("option_chain_unavailable") is True
+    assert m.get("option_chain_unavailable_reason")
 
 
 def test_fetch_nifty_option_metrics_no_data_found_returns_empty():
