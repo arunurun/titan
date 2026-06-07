@@ -44,3 +44,5 @@ Titan sector digests can include **open-interest (OI) context** from NSE F&O opt
 ## Errors
 
 Missing chains, zero OI, or API failures set `option_chain_unavailable=True` and skip corroborators. Per-stock fetch errors are logged per symbol; the sector run continues.
+
+Single-stock NFO fetches use ICICI Breeze `stock_code` values (e.g. `INDUSTOWER` → `BHAINF`, `BEL` → `BHAELE`), resolved from the live scrip master with a committed fallback map in `data/breeze_nse_aliases.json`. The resolved code is tried before the NSE display symbol. Breeze service errors (`Error while calling service…`) are classified separately from empty-chain / wrong-expiry responses.

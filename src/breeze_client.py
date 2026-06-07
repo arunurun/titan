@@ -215,16 +215,17 @@ def nfo_underlying_code_candidates(nse_symbol: str) -> list[str]:
     """
     Breeze NFO ``stock_code`` values for an NSE underlying.
 
-    Index underlyings (NIFTY) use the display symbol. Single-stock F&O often
-    requires ICICI scrip codes (e.g. RELIANCE→RELIND, BEL→BHAELE) while some
-    names (e.g. HAL) accept the NSE ticker — try both in order.
+    Index underlyings (NIFTY) use the display symbol. Single-stock F&O usually
+    requires ICICI scrip codes (e.g. INDUSTOWER→BHAINF, BEL→BHAELE); a few
+    names accept the NSE ticker — try the resolved Breeze code first, then the
+    display symbol.
     """
     sym = str(nse_symbol or "").strip().upper()
     if sym in _INDEX_WEEKLY_UNDERLYINGS:
         return [sym]
     resolved = resolve_breeze_stock_code(sym, "NSE")
     out: list[str] = []
-    for code in (sym, resolved):
+    for code in (resolved, sym):
         if code and code not in out:
             out.append(code)
     return out
@@ -271,15 +272,47 @@ def _is_breeze_rate_limit_response(raw: dict[str, Any]) -> bool:
     return ("limit exceed" in err) or ("api call per minute" in err)
 
 
+def _classify_breeze_option_chain_response(raw: dict[str, Any]) -> str:
+    """Classify option-chain API payloads for clearer user-facing reasons."""
+    if raw.get("Success") is not None:
+        return "ok"
+    if _is_breeze_no_data_response(raw):
+        return "no_chain_data"
+    err = str(raw.get("Error", "")).lower()
+    if "error while calling service" in err or "contact admin" in err:
+        return "breeze_service_error"
+    if _is_breeze_rate_limit_response(raw):
+        return "rate_limited"
+    status = raw.get("Status")
+    if status in (500, 502, 503, 504):
+        return "breeze_http_error"
+    return "unexpected_response"
+
+
+def _option_chain_error_message(raw: dict[str, Any], label: str) -> str:
+    kind = _classify_breeze_option_chain_response(raw)
+    err = str(raw.get("Error") or "").strip()
+    status = raw.get("Status")
+    if kind == "no_chain_data":
+        return f"[Breeze] {label}: no chain data ({err or 'No Data Found'})"
+    if kind == "breeze_service_error":
+        detail = err or "Error while calling service"
+        return f"[Breeze] {label}: Breeze service error (Status: {status}, {detail})"
+    if kind == "rate_limited":
+        return f"[Breeze] {label}: rate limited ({err or status})"
+    if kind == "breeze_http_error":
+        return f"[Breeze] {label}: HTTP {status} ({err or 'server error'})"
+    return f"[Breeze] {label}: unexpected Breeze response: {raw!r}"
+
+
 def _rows_from_option_response(raw: Any, label: str) -> list[dict[str, Any]]:
     if not isinstance(raw, dict):
         raise RuntimeError(f"[Breeze] {label}: unexpected Breeze response: {raw!r}")
     if raw.get("Success") is None:
-        # Breeze returns HTTP 200 with Success=None, Error='No Data Found' when chain is empty / unknown expiry.
-        if _is_breeze_no_data_response(raw):
+        if _classify_breeze_option_chain_response(raw) == "no_chain_data":
             logger.info("%s: no chain data (%s)", label, raw.get("Error"))
             return []
-        raise RuntimeError(f"[Breeze] {label}: unexpected Breeze response: {raw!r}")
+        raise RuntimeError(_option_chain_error_message(raw, label))
     rows = raw["Success"]
     if not isinstance(rows, list):
         raise RuntimeError(f"[Breeze] {label}: Success is not a list: {raw!r}")
@@ -409,10 +442,14 @@ def fetch_option_metrics_with_expiry_fallback(
     last_error: str | None = None
     expiry_candidates = expiry_candidates_for_underlying(nse_code, max_tries=max_expiry_tries)
     nfo_codes = nfo_underlying_code_candidates(nse_code)
+    logger.info(
+        "Option chain fetch for %s: NFO codes=%s, expiries=%s",
+        nse_code,
+        nfo_codes,
+        expiry_candidates,
+    )
     try_index = 0
     for nfo_code in nfo_codes:
-        if nfo_code != nse_code:
-            logger.info("NFO underlying code candidate for %s: %s", nse_code, nfo_code)
         for expiry in expiry_candidates:
             tried.append(f"{nfo_code}@{expiry}")
             try_index += 1
@@ -444,10 +481,10 @@ def fetch_option_metrics_with_expiry_fallback(
                 )
     reason = last_error or "zero OI after expiry tries"
     logger.error(
-        "%s option chain unavailable after %s tries (%s NFO codes × %s expiries); %s",
+        "%s option chain unavailable after %s tries (NFO codes %s × %s expiries); last: %s",
         nse_code,
         len(tried),
-        len(nfo_codes),
+        nfo_codes,
         len(expiry_candidates),
         reason,
     )

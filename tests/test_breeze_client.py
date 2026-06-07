@@ -6,6 +6,7 @@ import threading
 import time
 
 from breeze_client import (
+    _classify_breeze_option_chain_response,
     _rate_limited_historical_call,
     create_breeze_session,
     fetch_equity_data,
@@ -327,8 +328,16 @@ def test_nfo_underlying_code_candidates_tries_breeze_alias(monkeypatch):
         "breeze_client.resolve_breeze_stock_code",
         lambda sym, ex: "BHAELE" if sym == "BEL" else sym.strip().upper(),
     )
-    assert nfo_underlying_code_candidates("BEL") == ["BEL", "BHAELE"]
+    assert nfo_underlying_code_candidates("BEL") == ["BHAELE", "BEL"]
     assert nfo_underlying_code_candidates("NIFTY") == ["NIFTY"]
+
+
+def test_nfo_underlying_code_candidates_industower_resolves_to_bhainf(monkeypatch):
+    monkeypatch.setattr(
+        "breeze_client.resolve_breeze_stock_code",
+        lambda sym, ex: "BHAINF" if sym == "INDUSTOWER" else sym.strip().upper(),
+    )
+    assert nfo_underlying_code_candidates("INDUSTOWER") == ["BHAINF", "INDUSTOWER"]
 
 
 def test_fetch_option_metrics_with_fallback_uses_breeze_nfo_code(monkeypatch):
@@ -399,6 +408,21 @@ def test_fetch_nifty_option_metrics_with_fallback_degrades_gracefully():
     m = fetch_nifty_option_metrics_with_expiry_fallback(breeze, max_expiry_tries=2)
     assert m.get("option_chain_unavailable") is True
     assert m["put_oi"] == 0.0 and m["call_oi"] == 0.0
+
+
+def test_classify_breeze_option_chain_response():
+    assert _classify_breeze_option_chain_response({"Success": []}) == "ok"
+    assert _classify_breeze_option_chain_response({"Success": None, "Error": "No Data Found"}) == "no_chain_data"
+    assert (
+        _classify_breeze_option_chain_response(
+            {
+                "Success": None,
+                "Status": 500,
+                "Error": "Error while calling service, Please contact admin (T10:56)",
+            }
+        )
+        == "breeze_service_error"
+    )
 
 
 @patch("breeze_client.BreezeConnect")
