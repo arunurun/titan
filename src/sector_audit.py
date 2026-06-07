@@ -627,6 +627,63 @@ def _digest_flags_simple(audit: dict[str, Any]) -> list[str]:
     return out
 
 
+def _format_sector_options_context_block(ctx: dict[str, Any]) -> list[str]:
+    """Sector-level options header for digest email (Phase 1)."""
+    if not isinstance(ctx, dict) or not ctx:
+        return []
+    if bool(ctx.get("sector_option_chain_unavailable", True)):
+        return [
+            "▸ Sector options context",
+            "  Options chain unavailable for sector benchmark index.",
+        ]
+    underlying = str(ctx.get("sector_options_underlying") or "NIFTY")
+    lines = [
+        "▸ Sector options context",
+        (
+            f"  {underlying} PCR {_fmt_metric(ctx.get('sector_pcr'), 2)} "
+            f"| put wall {_fmt_metric(ctx.get('sector_put_wall_strike'), 0)} "
+            f"| call wall {_fmt_metric(ctx.get('sector_call_wall_strike'), 0)} "
+            f"| expiry {str(ctx.get('sector_options_expiry') or 'n/a')}"
+        ),
+    ]
+    spot = _safe_float(ctx.get("sector_index_spot"))
+    if not math.isnan(spot):
+        lines.append(
+            f"  Index spot {_fmt_metric(spot, 2)} "
+            f"| vs put wall {_fmt_signed_pct(ctx.get('sector_spot_vs_put_wall_pct'))}% "
+            f"| vs call wall {_fmt_signed_pct(ctx.get('sector_spot_vs_call_wall_pct'))}%"
+        )
+    return lines
+
+
+def _format_symbol_options_context_block(audit: dict[str, Any]) -> list[str]:
+    """Per-symbol options block for digest email (Phase 2)."""
+    if bool(audit.get("option_chain_unavailable", True)):
+        return []
+    lines = [
+        "▸ Options context",
+        (
+            f"  PCR {_fmt_metric(audit.get('pcr'), 2)} "
+            f"| put wall {_fmt_metric(audit.get('put_oi_wall_strike'), 0)} "
+            f"| call wall {_fmt_metric(audit.get('call_oi_wall_strike'), 0)} "
+            f"| expiry {str(audit.get('options_expiry') or audit.get('option_expiry') or 'n/a')}"
+        ),
+    ]
+    spot = _safe_float(audit.get("close_last"))
+    if not math.isnan(spot):
+        lines.append(
+            f"  Spot {_fmt_metric(spot, 2)} "
+            f"| vs put wall {_fmt_signed_pct(audit.get('spot_vs_put_wall_pct'))}% "
+            f"| vs call wall {_fmt_signed_pct(audit.get('spot_vs_call_wall_pct'))}%"
+        )
+    from options_context import options_confirmation_note
+
+    note = options_confirmation_note(audit)
+    if note:
+        lines.append(f"  {note}")
+    return lines
+
+
 def _prediction_brief_line(audit: dict[str, Any]) -> str:
     """One readable line instead of raw factor vectors."""
     breakdown = audit.get("prediction_breakdown")
@@ -674,6 +731,11 @@ def _prediction_brief_line(audit: dict[str, Any]) -> str:
         parts.append(f"{drag} weighing on the score")
     if penalties:
         parts.append(f"flags: {'; '.join(str(p) for p in penalties[:2])}")
+    from options_context import options_confirmation_note
+
+    opt_note = options_confirmation_note(audit)
+    if opt_note:
+        parts.append(opt_note)
     return " · ".join(parts)
 
 
@@ -1151,6 +1213,10 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
         f"{_atr_regime_icon(atr_ratio)} Volatility vs 3M baseline: {_fmt_metric(atr_ratio)}x "
         f"({_atr_ratio_band(atr_ratio)}; bands: <0.90 low, 0.90-1.10 normal, >1.10 high)"
     )
+
+    options_lines = _format_symbol_options_context_block(audit)
+    if options_lines:
+        lines_out.extend(options_lines)
 
     lines_out.append("▸ Model outlook")
     lines_out.append(
@@ -2650,7 +2716,30 @@ def build_equity_live_audit(
         )
         else float("nan")
     )
-    pcr = float("nan")
+    from options_context import build_options_audit_fields, is_fno_symbol
+
+    opt_audit_defaults = build_options_audit_fields(
+        {"option_chain_unavailable": True},
+        spot=close_last,
+    )
+    if is_fno_symbol(inst.symbol):
+        try:
+            from breeze_client import fetch_option_metrics_with_expiry_fallback
+
+            opt_raw = fetch_option_metrics_with_expiry_fallback(
+                breeze,
+                inst.symbol,
+                max_expiry_tries=4,
+            )
+            opt_audit_defaults = build_options_audit_fields(opt_raw, spot=close_last)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Option chain unavailable for %s (%s): %s",
+                inst.symbol,
+                inst.exchange,
+                exc,
+            )
+    pcr = opt_audit_defaults.get("pcr", float("nan"))
     intent = calculate_equity_technical_score(z, vpr_for_scoring)
     high_volume_down_day_proxy = (
         not math.isnan(ret1d) and ret1d < 0.0 and not math.isnan(vpr_raw) and vpr_raw >= 1.5
@@ -2770,15 +2859,26 @@ def build_equity_live_audit(
         **event_info,
         "history_lt_200_sessions": len(series_non_na) < 200,
         "pcr": pcr,
-        "put_oi": 0.0,
-        "call_oi": 0.0,
-        "oi_wall": {"strike": float("nan"), "oi": float("nan")},
-        "option_expiry": None,
+        "put_oi": opt_audit_defaults.get("put_oi", 0.0),
+        "call_oi": opt_audit_defaults.get("call_oi", 0.0),
+        "put_oi_wall_strike": opt_audit_defaults.get("put_oi_wall_strike", float("nan")),
+        "call_oi_wall_strike": opt_audit_defaults.get("call_oi_wall_strike", float("nan")),
+        "spot_vs_put_wall_pct": opt_audit_defaults.get("spot_vs_put_wall_pct", float("nan")),
+        "spot_vs_call_wall_pct": opt_audit_defaults.get("spot_vs_call_wall_pct", float("nan")),
+        "oi_wall": opt_audit_defaults.get(
+            "oi_wall",
+            {"strike": float("nan"), "oi": float("nan")},
+        ),
+        "option_expiry": opt_audit_defaults.get("option_expiry"),
+        "options_expiry": opt_audit_defaults.get("options_expiry"),
+        "option_chain_fallback_used": opt_audit_defaults.get("option_chain_fallback_used"),
+        "option_chain_expiry_try_index": opt_audit_defaults.get("option_chain_expiry_try_index"),
+        "option_chain_expiry_tries": opt_audit_defaults.get("option_chain_expiry_tries"),
         "intent_score": intent,
         "effective_intent_score": intent,
         "equity_technical_score": intent,
         "rows": len(df),
-        "option_chain_unavailable": True,
+        "option_chain_unavailable": bool(opt_audit_defaults.get("option_chain_unavailable", True)),
         "institutional_flow": {
             "available": False,
             "source": None,
@@ -2959,17 +3059,37 @@ def run_sector_live(
     cfg = load_config()
     # Preflight Breeze auth once to fail fast on expired tokens.
     # Without this, each worker thread would emit the same auth stacktrace.
-    create_breeze_session(cfg)
+    breeze = create_breeze_session(cfg)
     import pandas as pd
 
-    from breeze_client import fetch_nifty_data
+    from breeze_client import fetch_nifty_data, fetch_option_metrics_with_expiry_fallback
+    from options_context import build_sector_options_digest, sector_options_underlying
 
+    sector_options_ctx: dict[str, Any] = {"sector_option_chain_unavailable": True}
     try:
-        _nifty_df = fetch_nifty_data(cfg, lookback_calendar_days=210)
+        _nifty_df = fetch_nifty_data(cfg, breeze=breeze, lookback_calendar_days=210)
         _THREAD_LOCAL.sector_benchmark_ohlc = _nifty_df if not _nifty_df.empty else None
     except Exception as ex:
         logger.warning("NIFTY benchmark prefetch skipped: %s", ex)
         _THREAD_LOCAL.sector_benchmark_ohlc = None
+        _nifty_df = pd.DataFrame()
+
+    if digest:
+        try:
+            underlying = sector_options_underlying(sector_id)
+            opt = fetch_option_metrics_with_expiry_fallback(breeze, underlying, max_expiry_tries=6)
+            nifty_spot = float("nan")
+            if not _nifty_df.empty and "close" in _nifty_df.columns:
+                nifty_spot = float(
+                    pd.to_numeric(_nifty_df["close"], errors="coerce").dropna().iloc[-1]
+                )
+            sector_options_ctx = build_sector_options_digest(
+                opt,
+                spot=nifty_spot,
+                sector_id=sector_id,
+            )
+        except Exception as ex:
+            logger.warning("Sector options context fetch skipped for %s: %s", sector_id, ex)
 
     if instruments_override is not None:
         instruments = instruments_override
@@ -3119,6 +3239,8 @@ def run_sector_live(
         macro_applied, macro_reason = _apply_macro_guardrails(ok_results, macro_snapshot)
         _apply_sector_cross_section(ok_results, score_percentiles=False)
         for r in ok_results:
+            if isinstance(r.get("audit"), dict):
+                r["audit"]["sector_options_context"] = sector_options_ctx
             _refresh_symbol_scoring_outputs(r["audit"])
             inst = SectorInstrument(
                 symbol=str(r.get("symbol") or ""),
@@ -3306,6 +3428,9 @@ def run_sector_live(
                     "",
                 ]
             )
+        sector_opt_lines = _format_sector_options_context_block(sector_options_ctx)
+        if sector_opt_lines:
+            lines.extend(["", *sector_opt_lines])
         lines.append("--- Action summary ---")
         action_counts = {"buy": 0, "hold": 0, "trim": 0, "exit-risk": 0}
         for r in ok_results:

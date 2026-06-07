@@ -58,6 +58,11 @@ Icons are **display helpers** in `_metric_icon`, `_ema200_distance_icon`, etc. (
 | Model read confidence | Heuristic confidence from 1W outlook | high / medium / low |
 | tapeBlend | Technical composite term in 1W breakdown | Named driver in confidence line |
 | Macro fallback | News correlation when stock news missing | tailwind / headwind / neutral |
+| Sector options context | NIFTY (benchmark) PCR, put/call OI walls, spot vs walls | Text block before action summary |
+| Options context (F&O) | Per-stock PCR, put/call OI walls, spot vs walls | Text block on F&O symbols only |
+| Options confirmation | Align/conflict vs tape/action in model read line | Text only; optional |
+
+See also `docs/options-context.md` for fetch cadence and signal-engine corroborators.
 
 ---
 
@@ -649,8 +654,19 @@ flowchart TD
 
 ---
 
+### Options context (F&O)
+
+**Sector block (`▸ Sector options context`):** One NIFTY chain fetch per sector run. Shows PCR, put/call OI wall strikes, expiry, and index spot vs walls.
+
+**Per-symbol block (`▸ Options context`):** Fetched only for symbols in `config/fno_symbols.yaml`. Non-F&O names keep `option_chain_unavailable=True` and omit the block.
+
+**Signal engine:** Options can add Tier-2 corroborators (`into call OI wall`, `below put OI support`) in `src/signal_v2.py`. PCR is **not** fed into `calculate_equity_technical_score`.
+
+---
+
 ## Related documentation
 
+- [`docs/options-context.md`](options-context.md) — Options fetch phases, fields, and error handling.
 - [`docs/signal_v2_metrics_and_waterfall.md`](signal_v2_metrics_and_waterfall.md) — Full v2 engine formula reference with line citations.
 - [`docs/TITAN_FRAMEWORK_DEEP_DIVE.md`](TITAN_FRAMEWORK_DEEP_DIVE.md) — System architecture and runtime modes.
 

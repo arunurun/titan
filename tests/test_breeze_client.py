@@ -13,6 +13,8 @@ from breeze_client import (
     fetch_nifty_data,
     fetch_nifty_option_metrics,
     fetch_nifty_option_metrics_with_expiry_fallback,
+    fetch_option_metrics_for_underlying,
+    fetch_option_metrics_with_expiry_fallback,
     volume_absorption_ratio,
     volume_participation_ratio,
 )
@@ -303,6 +305,28 @@ def test_fetch_nifty_option_metrics_aggregates():
     assert m["put_oi"] == 75.0
     row_22k = m["chain_df"][m["chain_df"]["strike"] == 22000.0].iloc[0]
     assert row_22k["oi"] == 150.0
+    assert not m["call_chain_df"].empty
+    assert not m["put_chain_df"].empty
+
+
+def test_fetch_option_metrics_for_underlying_stock():
+    breeze = MagicMock()
+    breeze.get_option_chain_quotes.side_effect = [
+        {"Success": [{"strike_price": 2500.0, "open_interest": 1000.0}]},
+        {"Success": [{"strike_price": 2400.0, "open_interest": 2000.0}]},
+    ]
+    m = fetch_option_metrics_for_underlying(breeze, "RELIANCE", "2026-06-24T06:00:00.000Z")
+    assert m["underlying"] == "RELIANCE"
+    assert m["call_oi"] == 1000.0
+    assert m["put_oi"] == 2000.0
+
+
+def test_fetch_option_metrics_with_fallback_degrades():
+    breeze = MagicMock()
+    no_data = {"Success": None, "Status": 500, "Error": "No Data Found"}
+    breeze.get_option_chain_quotes.return_value = no_data
+    m = fetch_option_metrics_with_expiry_fallback(breeze, "RELIANCE", max_expiry_tries=2)
+    assert m.get("option_chain_unavailable") is True
 
 
 def test_fetch_nifty_option_metrics_no_data_found_returns_empty():
@@ -426,17 +450,21 @@ def test_fetch_nifty_option_metrics_with_fallback_skips_zero_oi_chain(monkeypatc
                 "call_oi": 0.0,
                 "put_oi": 0.0,
                 "chain_df": pd.DataFrame([{"strike": 25000.0, "oi": 0.0}]),
+                "call_chain_df": pd.DataFrame([{"strike": 25000.0, "oi": 0.0}]),
+                "put_chain_df": pd.DataFrame([{"strike": 25000.0, "oi": 0.0}]),
                 "expiry_date": "2026-04-14T06:00:00.000Z",
             },
             {
                 "call_oi": 10.0,
                 "put_oi": 20.0,
                 "chain_df": pd.DataFrame([{"strike": 25100.0, "oi": 30.0}]),
+                "call_chain_df": pd.DataFrame([{"strike": 25100.0, "oi": 10.0}]),
+                "put_chain_df": pd.DataFrame([{"strike": 25100.0, "oi": 20.0}]),
                 "expiry_date": "2026-04-21T06:00:00.000Z",
             },
         ],
     )
-    monkeypatch.setattr("breeze_client.fetch_nifty_option_metrics", mocked_fetch)
+    monkeypatch.setattr("breeze_client.fetch_option_metrics_for_underlying", mocked_fetch)
     m = fetch_nifty_option_metrics_with_expiry_fallback(breeze, max_expiry_tries=2)
     assert m["expiry_date"] == "2026-04-21T06:00:00.000Z"
     assert m["fallback_used"] is True

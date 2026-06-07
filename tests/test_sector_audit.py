@@ -459,6 +459,40 @@ def test_build_equity_live_audit_skips_narrative(monkeypatch):
     mock_gen.assert_not_called()
 
 
+def test_build_equity_live_audit_fno_populates_options(monkeypatch):
+    from sector_audit import build_equity_live_audit
+
+    closes = [100.0 + i * 0.1 for i in range(30)]
+    df = pd.DataFrame({"close": closes, "volume": [1e6] * 30})
+    monkeypatch.setattr("breeze_client.fetch_equity_data", lambda *a, **k: df)
+    monkeypatch.setattr(
+        "brain.generate_titan_narrative",
+        lambda audit, api_key=None, api_keys=None: "Post body",
+    )
+
+    opt_payload = {
+        "underlying": "RELIANCE",
+        "call_oi": 1000.0,
+        "put_oi": 1200.0,
+        "call_chain_df": pd.DataFrame({"strike": [100.0, 105.0], "oi": [100.0, 500.0]}),
+        "put_chain_df": pd.DataFrame({"strike": [95.0, 100.0], "oi": [200.0, 800.0]}),
+        "chain_df": pd.DataFrame({"strike": [100.0], "oi": [600.0]}),
+        "expiry_date": "2026-06-24T06:00:00.000Z",
+    }
+    monkeypatch.setattr(
+        "breeze_client.fetch_option_metrics_with_expiry_fallback",
+        lambda *a, **k: opt_payload,
+    )
+
+    breeze = MagicMock()
+    inst = SectorInstrument("RELIANCE", "NSE")
+    audit, _ = build_equity_live_audit(make_cfg(), breeze, inst, sector_id="energy")
+    assert audit["option_chain_unavailable"] is False
+    assert audit["put_oi_wall_strike"] == 100.0
+    assert audit["call_oi_wall_strike"] == 105.0
+    assert "pcr" in audit
+
+
 def test_build_equity_live_audit_success(monkeypatch):
     from sector_audit import build_equity_live_audit
 

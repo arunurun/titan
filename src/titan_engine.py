@@ -246,18 +246,47 @@ def get_pcr(total_put_oi: float, total_call_oi: float) -> float:
     return float(total_put_oi) / float(total_call_oi)
 
 
+def _max_oi_strike(df: pd.DataFrame) -> dict[str, Any]:
+    if df.empty or "oi" not in df.columns or "strike" not in df.columns:
+        return {"strike": float("nan"), "oi": float("nan")}
+    work = df.copy()
+    work["oi"] = pd.to_numeric(work["oi"], errors="coerce")
+    work = work.dropna(subset=["oi", "strike"])
+    if work.empty:
+        return {"strike": float("nan"), "oi": float("nan")}
+    idx = work["oi"].idxmax()
+    row = work.loc[idx]
+    return {"strike": float(row["strike"]), "oi": float(row["oi"])}
+
+
 def find_oi_walls(option_chain_df: pd.DataFrame) -> dict[str, Any]:
     """Return strike with maximum open interest (ignores NaN OI)."""
     df = option_chain_df.copy()
     if "oi" not in df.columns or "strike" not in df.columns:
         raise ValueError("option_chain_df must contain 'strike' and 'oi' columns")
-    df["oi"] = pd.to_numeric(df["oi"], errors="coerce")
-    df = df.dropna(subset=["oi", "strike"])
-    if df.empty:
-        return {"strike": float("nan"), "oi": float("nan")}
-    idx = df["oi"].idxmax()
-    row = df.loc[idx]
-    return {"strike": float(row["strike"]), "oi": float(row["oi"])}
+    return _max_oi_strike(df)
+
+
+def find_call_put_oi_walls(
+    call_chain_df: pd.DataFrame,
+    put_chain_df: pd.DataFrame,
+) -> dict[str, Any]:
+    """Separate call-wall (max call OI strike) and put-wall (max put OI strike)."""
+    call_wall = _max_oi_strike(call_chain_df.copy())
+    put_wall = _max_oi_strike(put_chain_df.copy())
+    combined = find_oi_walls(
+        pd.concat([call_chain_df, put_chain_df], ignore_index=True)
+        if not call_chain_df.empty or not put_chain_df.empty
+        else pd.DataFrame(columns=["strike", "oi"])
+    )
+    return {
+        "call_wall_strike": call_wall["strike"],
+        "call_wall_oi": call_wall["oi"],
+        "put_wall_strike": put_wall["strike"],
+        "put_wall_oi": put_wall["oi"],
+        "combined_wall_strike": combined["strike"],
+        "combined_wall_oi": combined["oi"],
+    }
 
 
 def calculate_intent_score(pcr: float, z_score: float, absorption: float) -> float:

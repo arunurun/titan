@@ -15,6 +15,7 @@ from titan_engine import (
     calculate_intent_score,
     calculate_obv_slope,
     calculate_z_score,
+    find_call_put_oi_walls,
     find_oi_walls,
     get_pcr,
 )
@@ -61,6 +62,14 @@ def test_find_oi_walls_skewed_itm():
     df = pd.DataFrame({"strike": [18000, 22000, 25000], "oi": [1e9, 500, 2e5]})
     w = find_oi_walls(df)
     assert w["strike"] == 18000.0
+
+
+def test_find_call_put_oi_walls_separate_sides():
+    call_df = pd.DataFrame({"strike": [100.0, 110.0], "oi": [100.0, 500.0]})
+    put_df = pd.DataFrame({"strike": [90.0, 100.0], "oi": [200.0, 800.0]})
+    w = find_call_put_oi_walls(call_df, put_df)
+    assert w["call_wall_strike"] == 110.0
+    assert w["put_wall_strike"] == 100.0
 
 
 def test_equity_technical_score_range():

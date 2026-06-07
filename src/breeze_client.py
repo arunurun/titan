@@ -178,6 +178,67 @@ def iter_weekly_expiry_candidates(
     return [_expiry_iso_for_calendar_date(first_tue + timedelta(days=7 * i)) for i in range(weeks_ahead)]
 
 
+def _last_tuesday_of_month(year: int, month: int) -> date:
+    """Last Tuesday of a calendar month (NSE monthly F&O expiry since Sep 2025)."""
+    if month == 12:
+        d = date(year + 1, 1, 1) - timedelta(days=1)
+    else:
+        d = date(year, month + 1, 1) - timedelta(days=1)
+    while d.weekday() != 1:
+        d -= timedelta(days=1)
+    return d
+
+
+def iter_monthly_expiry_candidates(
+    months_ahead: int = 4,
+    reference: datetime | None = None,
+) -> list[str]:
+    """Upcoming monthly stock/index F&O expiries (last Tuesday of month)."""
+    ref = reference or datetime.now(IST)
+    year, month = ref.year, ref.month
+    out: list[str] = []
+    for _ in range(months_ahead):
+        exp = _last_tuesday_of_month(year, month)
+        if exp >= ref.date():
+            out.append(_expiry_iso_for_calendar_date(exp))
+        month += 1
+        if month > 12:
+            month = 1
+            year += 1
+    return out
+
+
+_INDEX_WEEKLY_UNDERLYINGS = frozenset({"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"})
+
+
+def expiry_candidates_for_underlying(
+    stock_code: str,
+    *,
+    max_tries: int = 8,
+) -> list[str]:
+    """Weekly expiries for index options; monthly for single-stock F&O."""
+    code = str(stock_code or "").strip().upper()
+    if code in _INDEX_WEEKLY_UNDERLYINGS:
+        return iter_weekly_expiry_candidates(weeks_ahead=max_tries)
+    return iter_monthly_expiry_candidates(months_ahead=max_tries)
+
+
+_OPTION_CHAIN_LOCK = threading.Lock()
+_LAST_OPTION_CHAIN_CALL_AT = 0.0
+_MIN_OPTION_CHAIN_INTERVAL_SECONDS = 0.5
+
+
+def _throttle_option_chain_call() -> None:
+    global _LAST_OPTION_CHAIN_CALL_AT
+    interval = _min_hist_call_interval_seconds()
+    with _OPTION_CHAIN_LOCK:
+        now = time.monotonic()
+        wait = interval - (now - _LAST_OPTION_CHAIN_CALL_AT)
+        if wait > 0:
+            time.sleep(wait)
+        _LAST_OPTION_CHAIN_CALL_AT = time.monotonic()
+
+
 def _is_breeze_no_data_response(raw: dict[str, Any]) -> bool:
     err = raw.get("Error")
     if err is None:
@@ -226,17 +287,20 @@ def _strike_from_row(row: dict[str, Any]) -> float | None:
         return None
 
 
-def fetch_nifty_option_metrics(
+def fetch_option_metrics_for_underlying(
     breeze: BreezeConnect,
+    stock_code: str,
     expiry_date_iso: str,
 ) -> dict[str, Any]:
     """
-    Total call/put open interest and a strike×OI frame for find_oi_walls (nearest expiry chain).
+    Total call/put open interest and strike×OI frames for an F&O underlying.
     Two requests: full call side and full put side (Breeze requires explicit right when expiry is set).
     """
-    _ensure_breeze_allowed("fetch_nifty_option_metrics")
+    _ensure_breeze_allowed("fetch_option_metrics_for_underlying")
+    code = str(stock_code or "").strip().upper()
+    _throttle_option_chain_call()
     common = dict(
-        stock_code="NIFTY",
+        stock_code=code,
         exchange_code="NFO",
         expiry_date=expiry_date_iso,
         product_type="options",
@@ -244,10 +308,25 @@ def fetch_nifty_option_metrics(
     )
     raw_calls = breeze.get_option_chain_quotes(right="call", **common)
     raw_puts = breeze.get_option_chain_quotes(right="put", **common)
-    call_rows = _rows_from_option_response(raw_calls, "option chain (calls)")
-    put_rows = _rows_from_option_response(raw_puts, "option chain (puts)")
+    call_rows = _rows_from_option_response(raw_calls, f"option chain calls ({code})")
+    put_rows = _rows_from_option_response(raw_puts, f"option chain puts ({code})")
     total_call_oi = sum(_oi_from_row(r) for r in call_rows)
     total_put_oi = sum(_oi_from_row(r) for r in put_rows)
+
+    def _rows_to_df(rows: list[dict[str, Any]]) -> pd.DataFrame:
+        by_strike: dict[float, float] = {}
+        for r in rows:
+            sk = _strike_from_row(r)
+            if sk is None:
+                continue
+            by_strike[sk] = by_strike.get(sk, 0.0) + _oi_from_row(r)
+        return pd.DataFrame(
+            [{"strike": k, "oi": v} for k, v in sorted(by_strike.items())],
+            columns=["strike", "oi"],
+        )
+
+    call_chain_df = _rows_to_df(call_rows)
+    put_chain_df = _rows_to_df(put_rows)
     by_strike: dict[float, float] = {}
     for r in call_rows + put_rows:
         sk = _strike_from_row(r)
@@ -259,29 +338,64 @@ def fetch_nifty_option_metrics(
         columns=["strike", "oi"],
     )
     return {
+        "underlying": code,
         "call_oi": total_call_oi,
         "put_oi": total_put_oi,
         "chain_df": chain_df,
+        "call_chain_df": call_chain_df,
+        "put_chain_df": put_chain_df,
         "expiry_date": expiry_date_iso,
     }
 
 
-def fetch_nifty_option_metrics_with_expiry_fallback(
+def fetch_nifty_option_metrics(
     breeze: BreezeConnect,
+    expiry_date_iso: str,
+) -> dict[str, Any]:
+    """NIFTY wrapper around :func:`fetch_option_metrics_for_underlying`."""
+    return fetch_option_metrics_for_underlying(breeze, "NIFTY", expiry_date_iso)
+
+
+def _empty_option_metrics_payload(
+    *,
+    underlying: str,
+    tried: list[str],
+) -> dict[str, Any]:
+    return {
+        "underlying": underlying,
+        "call_oi": 0.0,
+        "put_oi": 0.0,
+        "chain_df": pd.DataFrame(columns=["strike", "oi"]),
+        "call_chain_df": pd.DataFrame(columns=["strike", "oi"]),
+        "put_chain_df": pd.DataFrame(columns=["strike", "oi"]),
+        "expiry_date": None,
+        "option_chain_unavailable": True,
+        "expiry_try_index": None,
+        "expiry_tries": tried,
+        "fallback_used": len(tried) > 1,
+    }
+
+
+def fetch_option_metrics_with_expiry_fallback(
+    breeze: BreezeConnect,
+    stock_code: str,
     *,
     max_expiry_tries: int = 8,
 ) -> dict[str, Any]:
-    """Try successive weekly expiries until a chain returns at least one strike or non-zero OI."""
-    last_err: Exception | None = None
+    """Try successive expiries until a chain returns non-zero OI depth."""
+    code = str(stock_code or "").strip().upper()
     tried: list[str] = []
-    for i, expiry in enumerate(iter_weekly_expiry_candidates(weeks_ahead=max_expiry_tries), start=1):
+    for i, expiry in enumerate(
+        expiry_candidates_for_underlying(code, max_tries=max_expiry_tries),
+        start=1,
+    ):
         tried.append(expiry)
         try:
-            m = fetch_nifty_option_metrics(breeze, expiry)
-            # Skip unusable chains where there is no real OI depth yet.
+            m = fetch_option_metrics_for_underlying(breeze, code, expiry)
             if m["call_oi"] == 0.0 and m["put_oi"] == 0.0:
                 logger.warning(
-                    "Option chain has zero OI for expiry %s; trying next week.",
+                    "Option chain has zero OI for %s expiry %s; trying next.",
+                    code,
                     expiry,
                 )
                 continue
@@ -290,22 +404,22 @@ def fetch_nifty_option_metrics_with_expiry_fallback(
             m["fallback_used"] = i > 1
             return m
         except Exception as e:
-            last_err = e
-            logger.warning("Option chain fetch failed for expiry %s: %s", expiry, e)
+            logger.warning("Option chain fetch failed for %s expiry %s: %s", code, expiry, e)
     logger.error(
-        "NIFTY option chain unavailable after %s expiry tries; continuing without OI/PCR.",
+        "%s option chain unavailable after %s expiry tries; continuing without OI/PCR.",
+        code,
         max_expiry_tries,
     )
-    return {
-        "call_oi": 0.0,
-        "put_oi": 0.0,
-        "chain_df": pd.DataFrame(columns=["strike", "oi"]),
-        "expiry_date": None,
-        "option_chain_unavailable": True,
-        "expiry_try_index": None,
-        "expiry_tries": tried,
-        "fallback_used": len(tried) > 1,
-    }
+    return _empty_option_metrics_payload(underlying=code, tried=tried)
+
+
+def fetch_nifty_option_metrics_with_expiry_fallback(
+    breeze: BreezeConnect,
+    *,
+    max_expiry_tries: int = 8,
+) -> dict[str, Any]:
+    """NIFTY wrapper around :func:`fetch_option_metrics_with_expiry_fallback`."""
+    return fetch_option_metrics_with_expiry_fallback(breeze, "NIFTY", max_expiry_tries=max_expiry_tries)
 
 
 def volume_participation_ratio(ohlc_df: pd.DataFrame) -> float:
