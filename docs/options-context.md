@@ -13,7 +13,7 @@ Titan sector digests can include **open-interest (OI) context** from NSE F&O opt
 ## Data flow
 
 1. `run_sector_live` prefetches NIFTY cash OHLC and fetches **one** index option chain (`sector_options_context` on each audit + digest header block `▸ Sector options context`).
-2. `build_equity_live_audit` fetches a stock chain when the symbol is in `config/fno_symbols.yaml` (or the built-in Nifty-50 default list).
+2. `build_equity_live_audit` fetches a stock chain when the symbol is in `config/fno_symbols.yaml`. The allowlist covers every symbol in `data/sector_allowlists/*.json` that is an NSE F&O underlying (cross-checked against NSE `fo_mktlots.csv`), plus a small set of liquid index constituents not tied to a single sector. Non-F&O allowlist names show `not in F&O universe (display only)`; failed fetches show `chain unavailable ({reason})`.
 3. `signal_v2.layer_b` may add corroborators when options align with bearish tape:
    - **into call OI wall** — spot within ~1% of max call-OI strike + trim/bearish context
    - **below put OI support** — spot below max put-OI strike + distribution / negative tape

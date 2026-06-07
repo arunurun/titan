@@ -14,20 +14,11 @@ logger = logging.getLogger(__name__)
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _FNO_YAML = _REPO_ROOT / "config" / "fno_symbols.yaml"
 
-# Sensible default Nifty 50 core F&O names when YAML is missing.
+# Minimal fallback when config/fno_symbols.yaml is missing (production uses YAML).
 _DEFAULT_FNO_SYMBOLS: frozenset[str] = frozenset(
     {
-        "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "HINDUNILVR", "ITC", "SBIN",
-        "BHARTIARTL", "KOTAKBANK", "LT", "AXISBANK", "ASIANPAINT", "MARUTI", "TITAN",
-        "SUNPHARMA", "BAJFINANCE", "WIPRO", "ULTRACEMCO", "NESTLEIND", "HCLTECH",
-        "TATAMOTORS", "POWERGRID", "NTPC", "ONGC", "M&M", "ADANIENT", "JSWSTEEL",
-        "TATASTEEL", "INDUSINDBK", "BAJAJFINSV", "TECHM", "HINDALCO", "COALINDIA",
-        "GRASIM", "CIPLA", "DRREDDY", "EICHERMOT", "APOLLOHOSP", "DIVISLAB", "BPCL",
-        "HEROMOTOCO", "BRITANNIA", "TATACONSUM", "SBILIFE", "HDFCLIFE", "ADANIPORTS",
-        "LTIM", "BAJAJ-AUTO",
-        # Defence sector F&O names (overlap with data/sector_allowlists/defence.json)
-        "HAL", "BEL", "BDL", "MAZDOCK", "GRSE", "COCHINSHIP", "DATAPATTNS", "PARAS",
-        "ASTRAMICRO", "MTARTECH", "BEML", "MIDHANI", "IDEAFORGE", "ZENTEC",
+        "RELIANCE", "TCS", "HDFCBANK", "INFY", "ICICIBANK", "SBIN", "BHARTIARTL",
+        "HAL", "BEL",
     }
 )
 

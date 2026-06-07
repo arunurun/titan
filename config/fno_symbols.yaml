@@ -1,67 +1,175 @@
 # NSE F&O universe allowlist for per-stock option chain fetches in sector digests.
 # Symbols must match Breeze NFO stock_code (uppercase, no suffix).
+# Source: NSE fo_mktlots.csv cross-referenced with data/sector_allowlists/*.json
 symbols:
-  - RELIANCE
-  - TCS
-  - HDFCBANK
-  - INFY
-  - ICICIBANK
-  - HINDUNILVR
-  - ITC
-  - SBIN
-  - BHARTIARTL
-  - KOTAKBANK
-  - LT
-  - AXISBANK
-  - ASIANPAINT
-  - MARUTI
-  - TITAN
-  - SUNPHARMA
-  - BAJFINANCE
-  - WIPRO
-  - ULTRACEMCO
-  - NESTLEIND
-  - HCLTECH
-  - TATAMOTORS
-  - POWERGRID
-  - NTPC
-  - ONGC
-  - M&M
+  # Liquid index constituents (Nifty 50 overlap, not sector-scoped)
   - ADANIENT
-  - JSWSTEEL
-  - TATASTEEL
-  - INDUSINDBK
-  - BAJAJFINSV
-  - TECHM
-  - HINDALCO
+  - ADANIPORTS
+  - APOLLOHOSP
+  - ASIANPAINT
   - COALINDIA
   - GRASIM
-  - CIPLA
-  - DRREDDY
-  - EICHERMOT
-  - APOLLOHOSP
-  - DIVISLAB
-  - BPCL
-  - HEROMOTOCO
-  - BRITANNIA
-  - TATACONSUM
-  - SBILIFE
-  - HDFCLIFE
-  - ADANIPORTS
-  - LTIM
+  # auto
+  - ASHOKLEY
   - BAJAJ-AUTO
-  # Defence sector (NSE F&O underlyings overlapping sector allowlist)
-  - HAL
-  - BEL
+  - EICHERMOT
+  - FORCEMOT
+  - HEROMOTOCO
+  - HYUNDAI
+  - M&M
+  - MARUTI
+  - TIINDIA
+  - TVSMOTOR
+  # auto ancillary
+  - BHARATFORG
+  - BOSCHLTD
+  - EXIDEIND
+  - MOTHERSON
+  - SONACOMS
+  - UNOMINDA
+  # banks private
+  - AXISBANK
+  - BANDHANBNK
+  - FEDERALBNK
+  - HDFCBANK
+  - ICICIBANK
+  - IDFCFIRSTB
+  - INDUSINDBK
+  - KOTAKBANK
+  - RBLBANK
+  - YESBANK
+  # banks psu
+  - BANKBARODA
+  - BANKINDIA
+  - CANBK
+  - INDIANB
+  - PNB
+  - SBIN
+  - UNIONBANK
+  # capital goods industrials
+  - ABB
+  - BHEL
+  - LT
+  - SIEMENS
+  - VOLTAS
+  # cement building materials
+  - AMBUJACEM
+  - DALBHARAT
+  - SHREECEM
+  - ULTRACEMCO
+  # chemicals
+  - PIDILITIND
+  - PIIND
+  - SRF
+  - UPL
+  # consumer discretionary
+  - INDIGO
+  - JUBLFOOD
+  - PAGEIND
+  - TITAN
+  - TRENT
+  # defence
   - BDL
-  - MAZDOCK
-  - GRSE
+  - BEL
   - COCHINSHIP
-  - DATAPATTNS
-  - PARAS
-  - ASTRAMICRO
-  - MTARTECH
-  - BEML
-  - MIDHANI
-  - IDEAFORGE
-  - ZENTEC
+  - HAL
+  - MAZDOCK
+  # fmcg staples
+  - BRITANNIA
+  - COLPAL
+  - DABUR
+  - GODREJCP
+  - HINDUNILVR
+  - ITC
+  - MARICO
+  - NESTLEIND
+  - RADICO
+  - TATACONSUM
+  - VBL
+  # infrastructure construction
+  - GMRAIRPORT
+  - RVNL
+  # insurance
+  - HDFCLIFE
+  - ICICIGI
+  - ICICIPRULI
+  - LICI
+  - MAXHEALTH
+  - SBILIFE
+  # it
+  - COFORGE
+  - HCLTECH
+  - INFY
+  - MPHASIS
+  - OFSS
+  - PERSISTENT
+  - TCS
+  - TECHM
+  - WIPRO
+  # logistics
+  - CONCOR
+  - DELHIVERY
+  # media
+  - NAM-INDIA
+  # metals mining
+  - APLAPOLLO
+  - HINDALCO
+  - HINDZINC
+  - JINDALSTEL
+  - JSWSTEEL
+  - NATIONALUM
+  - NMDC
+  - SAIL
+  - TATASTEEL
+  - VEDL
+  # nbfc financial services
+  - ANGELONE
+  - BAJAJFINSV
+  - BAJFINANCE
+  - CHOLAFIN
+  - LICHSGFIN
+  - LTF
+  - MANAPPURAM
+  - MUTHOOTFIN
+  - PNBHOUSING
+  - SHRIRAMFIN
+  # oil gas energy
+  - BPCL
+  - GAIL
+  - HINDPETRO
+  - IOC
+  - OIL
+  - ONGC
+  - PETRONET
+  - RELIANCE
+  # pharma healthcare
+  - ALKEM
+  - AUROPHARMA
+  - BIOCON
+  - CIPLA
+  - DIVISLAB
+  - DRREDDY
+  - LAURUSLABS
+  - LUPIN
+  - SUNPHARMA
+  - TORNTPHARM
+  - ZYDUSLIFE
+  # power utilities
+  - ADANIGREEN
+  - ADANIPOWER
+  - JSWENERGY
+  - NHPC
+  - NTPC
+  - POWERGRID
+  - TATAPOWER
+  # realty reits
+  - DLF
+  - GODREJPROP
+  - LODHA
+  - OBEROIRLTY
+  - PHOENIXLTD
+  - PRESTIGE
+  # telecom
+  - BHARTIARTL
+  - IDEA
+  - INDUSTOWER

@@ -68,21 +68,56 @@ def test_is_fno_symbol_uses_allowlist():
     assert "HAL" in load_fno_symbols()
 
 
-def test_defence_allowlist_overlaps_fno_symbols():
+def _sector_symbols(repo: Path, sector_id: str) -> list[str]:
     import json
+
+    return json.loads(
+        (repo / "data" / "sector_allowlists" / f"{sector_id}.json").read_text()
+    )["symbols"]
+
+
+def test_defence_allowlist_overlaps_fno_symbols():
     from pathlib import Path
 
     repo = Path(__file__).resolve().parent.parent
-    defence = json.loads((repo / "data" / "sector_allowlists" / "defence.json").read_text())[
-        "symbols"
-    ]
+    defence = _sector_symbols(repo, "defence")
     fno = load_fno_symbols()
     overlap = sorted(sym for sym in defence if sym in fno)
     assert "HAL" in overlap
     assert "BEL" in overlap
     assert "MAZDOCK" in overlap
     assert "DYNAMATECH" not in overlap
-    assert len(overlap) >= 10
+    assert "ASTRAMICRO" not in overlap
+    assert len(overlap) >= 5
+
+
+def test_telecom_textiles_banking_fno_overlap():
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parent.parent
+    fno = load_fno_symbols()
+    telecom = _sector_symbols(repo, "telecom")
+    textiles = _sector_symbols(repo, "textiles")
+    banks = _sector_symbols(repo, "banks_private")
+
+    assert is_fno_symbol("BHARTIARTL")
+    assert is_fno_symbol("IDEA")
+    assert is_fno_symbol("INDUSTOWER")
+    assert "BHARTIARTL" in telecom
+    assert "IDEA" in telecom
+    assert "INDUSTOWER" in telecom
+
+    assert is_fno_symbol("PAGEIND")
+    assert "PAGEIND" in textiles
+
+    assert is_fno_symbol("FEDERALBNK")
+    assert is_fno_symbol("HDFCBANK")
+    assert "FEDERALBNK" in banks
+    assert "HDFCBANK" in banks
+
+    assert sum(1 for sym in telecom if sym in fno) >= 3
+    assert sum(1 for sym in textiles if sym in fno) >= 1
+    assert sum(1 for sym in banks if sym in fno) >= 5
 
 
 def test_options_confirmation_note_near_call_wall():
