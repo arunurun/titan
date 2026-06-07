@@ -323,35 +323,22 @@ def test_fetch_option_metrics_for_underlying_stock():
     assert m["put_oi"] == 2000.0
 
 
-def test_nfo_underlying_code_candidates_tries_breeze_alias(monkeypatch):
-    monkeypatch.setattr(
-        "breeze_client.resolve_breeze_stock_code",
-        lambda sym, ex: "BHAELE" if sym == "BEL" else sym.strip().upper(),
-    )
+def test_nfo_underlying_code_candidates_tries_breeze_alias():
     assert nfo_underlying_code_candidates("BEL") == ["BHAELE", "BEL"]
     assert nfo_underlying_code_candidates("NIFTY") == ["NIFTY"]
 
 
-def test_nfo_underlying_code_candidates_industower_resolves_to_bhainf(monkeypatch):
-    monkeypatch.setattr(
-        "breeze_client.resolve_breeze_stock_code",
-        lambda sym, ex: "BHAINF" if sym == "INDUSTOWER" else sym.strip().upper(),
-    )
+def test_nfo_underlying_code_candidates_industower_resolves_to_bhainf():
     assert nfo_underlying_code_candidates("INDUSTOWER") == ["BHAINF", "INDUSTOWER"]
 
 
 def test_fetch_option_metrics_with_fallback_uses_breeze_nfo_code(monkeypatch):
-    monkeypatch.setattr(
-        "breeze_client.resolve_breeze_stock_code",
-        lambda sym, ex: "RELIND" if sym == "RELIANCE" else sym.strip().upper(),
-    )
     monkeypatch.setattr(
         "breeze_client.expiry_candidates_for_underlying",
         lambda code, max_tries=8: ["2026-06-30T06:00:00.000Z"],
     )
 
     breeze = MagicMock()
-    no_data = {"Success": None, "Status": 500, "Error": "No Data Found"}
 
     def _fetch(_breeze, nfo_code, _expiry):
         if nfo_code == "RELIANCE":
@@ -375,7 +362,6 @@ def test_fetch_option_metrics_with_fallback_uses_breeze_nfo_code(monkeypatch):
         }
 
     monkeypatch.setattr("breeze_client.fetch_option_metrics_for_underlying", _fetch)
-    breeze.get_option_chain_quotes.return_value = no_data
 
     m = fetch_option_metrics_with_expiry_fallback(breeze, "RELIANCE", max_expiry_tries=1)
     assert m.get("option_chain_unavailable") is not True

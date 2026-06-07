@@ -8,6 +8,7 @@ import os
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Protocol
 
 import pandas as pd
@@ -17,6 +18,9 @@ from zoneinfo import ZoneInfo
 from breeze_scrip_master import resolve_breeze_stock_code
 
 IST = ZoneInfo("Asia/Kolkata")
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_FNO_BREEZE_MAPPING_YAML = _REPO_ROOT / "config" / "fno_breeze_mapping.yaml"
+_FNO_BREEZE_MAPPING_CACHE: dict[str, str] | None = None
 
 
 class _BreezeCredentials(Protocol):
@@ -211,21 +215,67 @@ def iter_monthly_expiry_candidates(
 _INDEX_WEEKLY_UNDERLYINGS = frozenset({"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"})
 
 
+def _parse_fno_breeze_mapping_yaml(text: str) -> dict[str, str]:
+    """Minimal YAML parser for ``mapping: KEY: VALUE`` entries without PyYAML."""
+    mapping: dict[str, str] = {}
+    in_mapping = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("mapping:"):
+            in_mapping = True
+            continue
+        if not in_mapping:
+            continue
+        if ":" not in stripped:
+            continue
+        key, _, val = stripped.partition(":")
+        sym = key.strip().strip('"').strip("'").upper()
+        code = val.strip().strip('"').strip("'").upper()
+        if sym and code:
+            mapping[sym] = code
+    return mapping
+
+
+def load_fno_breeze_mapping() -> dict[str, str]:
+    """Load committed NSE→Breeze NFO underlying codes from config/fno_breeze_mapping.yaml."""
+    global _FNO_BREEZE_MAPPING_CACHE
+    if _FNO_BREEZE_MAPPING_CACHE is not None:
+        return _FNO_BREEZE_MAPPING_CACHE
+    mapping: dict[str, str] = {}
+    if _FNO_BREEZE_MAPPING_YAML.is_file():
+        try:
+            mapping = _parse_fno_breeze_mapping_yaml(
+                _FNO_BREEZE_MAPPING_YAML.read_text(encoding="utf-8")
+            )
+        except OSError as exc:
+            logger.warning("Could not read %s: %s", _FNO_BREEZE_MAPPING_YAML, exc)
+    _FNO_BREEZE_MAPPING_CACHE = mapping
+    return mapping
+
+
+def clear_fno_breeze_mapping_cache_for_tests() -> None:
+    """Reset mapping cache (tests only)."""
+    global _FNO_BREEZE_MAPPING_CACHE
+    _FNO_BREEZE_MAPPING_CACHE = None
+
+
 def nfo_underlying_code_candidates(nse_symbol: str) -> list[str]:
     """
     Breeze NFO ``stock_code`` values for an NSE underlying.
 
-    Index underlyings (NIFTY) use the display symbol. Single-stock F&O usually
-    requires ICICI scrip codes (e.g. INDUSTOWER→BHAINF, BEL→BHAELE); a few
-    names accept the NSE ticker — try the resolved Breeze code first, then the
-    display symbol.
+    Order: explicit ``config/fno_breeze_mapping.yaml`` entry, then ICICI scrip
+    resolver, then the NSE display symbol. Index underlyings (NIFTY) use the
+    display symbol only.
     """
     sym = str(nse_symbol or "").strip().upper()
     if sym in _INDEX_WEEKLY_UNDERLYINGS:
         return [sym]
+    explicit = load_fno_breeze_mapping().get(sym)
     resolved = resolve_breeze_stock_code(sym, "NSE")
     out: list[str] = []
-    for code in (resolved, sym):
+    for code in (explicit, resolved, sym):
         if code and code not in out:
             out.append(code)
     return out
@@ -481,11 +531,13 @@ def fetch_option_metrics_with_expiry_fallback(
                 )
     reason = last_error or "zero OI after expiry tries"
     logger.error(
-        "%s option chain unavailable after %s tries (NFO codes %s × %s expiries); last: %s",
+        "%s option chain unavailable after %s tries; NFO codes=%s, expiries=%s, "
+        "combinations tried=%s; last error: %s",
         nse_code,
         len(tried),
         nfo_codes,
-        len(expiry_candidates),
+        expiry_candidates,
+        tried,
         reason,
     )
     return _empty_option_metrics_payload(underlying=nse_code, tried=tried, reason=reason)

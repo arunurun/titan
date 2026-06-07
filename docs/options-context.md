@@ -38,6 +38,7 @@ Titan sector digests can include **open-interest (OI) context** from NSE F&O opt
 | Breeze fetch + expiry fallback | `src/breeze_client.py` — `fetch_option_metrics_for_underlying`, `fetch_option_metrics_with_expiry_fallback` |
 | PCR / walls | `src/titan_engine.py` — `get_pcr`, `find_call_put_oi_walls` |
 | F&O allowlist + audit helpers | `src/options_context.py` |
+| NFO underlying code map | `config/fno_breeze_mapping.yaml` — `load_fno_breeze_mapping` in `src/breeze_client.py` |
 | Email blocks | `src/sector_audit.py` — `_format_sector_options_context_block`, `_format_symbol_options_context_block` |
 | Tier-2 corroborators | `src/signal_v2.py` — `_options_into_call_wall`, `_options_below_put_support` |
 
@@ -45,4 +46,11 @@ Titan sector digests can include **open-interest (OI) context** from NSE F&O opt
 
 Missing chains, zero OI, or API failures set `option_chain_unavailable=True` and skip corroborators. Per-stock fetch errors are logged per symbol; the sector run continues.
 
-Single-stock NFO fetches use ICICI Breeze `stock_code` values (e.g. `INDUSTOWER` → `BHAINF`, `BEL` → `BHAELE`), resolved from the live scrip master with a committed fallback map in `data/breeze_nse_aliases.json`. The resolved code is tried before the NSE display symbol. Breeze service errors (`Error while calling service…`) are classified separately from empty-chain / wrong-expiry responses.
+Single-stock NFO fetches use ICICI Breeze `stock_code` values (e.g. `INDUSTOWER` → `BHAINF`, `BEL` → `BHAELE`). Resolution order:
+
+1. **`config/fno_breeze_mapping.yaml`** — committed map for all sector F&O symbols (142) plus liquid index constituents in `fno_symbols.yaml` (148 total). Validated against NSE `fo_mktlots.csv`.
+2. **Live scrip master** — `data/cache/StockScriptNew.csv` via `breeze_scrip_master.resolve_breeze_stock_code`.
+3. **Static fallback** — `data/breeze_nse_aliases.json`.
+4. **NSE display symbol** — last resort.
+
+Breeze service errors (`Error while calling service…`, HTTP 500) are classified separately from empty-chain / wrong-expiry responses. Transient 500s can still occur even with correct mappings; live verification is optional (`pytest -m breeze_live` with credentials).
