@@ -1288,6 +1288,59 @@ def test_run_sector_live_digest_one_gemini_call(mock_load, mock_metrics, mock_em
 @patch("email_notify.send_success_post_email")
 @patch("sector_audit._process_one_metrics")
 @patch("sector_audit.load_sector_instruments")
+def test_run_sector_live_metals_mining_includes_pm_macro(
+    mock_load, mock_metrics, mock_email, monkeypatch
+):
+    from pathlib import Path
+
+    from sector_audit import run_sector_live
+
+    fixture = Path(__file__).parent / "fixtures" / "pm_macro_series.csv"
+    monkeypatch.setenv("TITAN_PM_MACRO_EMAIL", "1")
+    monkeypatch.setenv("TITAN_PM_LIVE_FETCH", "0")
+    monkeypatch.setenv("TITAN_PM_MACRO_CSV", str(fixture))
+    mock_load.return_value = [SectorInstrument("WELCORP", "NSE")]
+    mock_metrics.side_effect = [
+        {
+            "ok": True,
+            "symbol": "WELCORP",
+            "exchange": "NSE",
+            "audit": {
+                "symbol": "WELCORP",
+                "z_score": 1.0,
+                "intent_score": 0.5,
+                "absorption_ratio": 0.3,
+                "rows": 30,
+                "ohlc_bar_as_of_date": "2026-06-05",
+            },
+            "error": None,
+        }
+    ]
+    with patch("breeze_client.create_breeze_session", return_value=MagicMock()):
+        with patch("brain.generate_sector_digest_narrative", return_value="Metals narrative"):
+            with patch("supabase_log.save_audit_log"):
+                with patch(
+                    "analysis_store.persist_sector_run_analytics",
+                    return_value={"persisted": True, "run_id": "test-metals-pm"},
+                ):
+                    with patch("analysis_store.update_sector_period_rollups"):
+                        with patch(
+                            "analysis_store.build_comparison_payload",
+                            return_value={"enabled": False},
+                        ):
+                            with patch(
+                                "analysis_store.persist_llm_digest_memory",
+                                return_value={"persisted": True},
+                            ):
+                                run_sector_live("metals_mining", max_workers=1, digest=True)
+    body = mock_email.call_args[0][0]
+    assert "--- Precious metals macro ---" in body
+    assert "▸ Recommended allocation" in body
+
+
+@patch("email_notify.send_success_post_email")
+@patch("sector_audit._process_one_metrics")
+@patch("sector_audit.load_sector_instruments")
 def test_run_sector_live_digest_verbose_sections_enabled(
     mock_load, mock_metrics, mock_email, monkeypatch
 ):

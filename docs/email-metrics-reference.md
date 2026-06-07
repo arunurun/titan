@@ -667,6 +667,7 @@ flowchart TD
 ## Related documentation
 
 - [`docs/options-context.md`](options-context.md) — Options fetch phases, fields, and error handling.
+- [`docs/precious-metals-algo.md`](precious-metals-algo.md) — `metals_mining` digest block (`--- Precious metals macro ---`): DXY/GSR/SGE allocation, gated by `TITAN_PM_MACRO_EMAIL`.
 - [`docs/signal_v2_metrics_and_waterfall.md`](signal_v2_metrics_and_waterfall.md) — Full v2 engine formula reference with line citations.
 - [`docs/TITAN_FRAMEWORK_DEEP_DIVE.md`](TITAN_FRAMEWORK_DEEP_DIVE.md) — System architecture and runtime modes.
 

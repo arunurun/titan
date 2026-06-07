@@ -681,6 +681,62 @@ def _digest_eod_as_of_date(results: list[dict[str, Any]]) -> str | None:
     return min(dates).isoformat()
 
 
+def _pm_macro_email_enabled(sector_id: str) -> bool:
+    """Gate precious-metals macro block in sector digest emails."""
+    raw = os.environ.get("TITAN_PM_MACRO_EMAIL")
+    if raw is not None:
+        return raw.strip().lower() in ("1", "true", "yes", "on")
+    return sector_id == "metals_mining"
+
+
+def _build_precious_metals_macro_digest_lines(
+    as_of_date: str | None = None,
+) -> list[str]:
+    """Build PM macro section; never raises (returns unavailable message on failure)."""
+    try:
+        from pm_macro_data import load_pm_macro_series
+        from precious_metals_algo import (
+            PreciousMetalsAlgo,
+            format_precious_metals_digest_lines,
+            resolve_pm_book_value_inr,
+        )
+
+        data, pm_notes = load_pm_macro_series()
+        if data is None:
+            return [
+                "--- Precious metals macro ---",
+                "Data unavailable — live fetch failed and no CSV fallback",
+            ]
+        obs = len(next(iter(data.values())))
+        z_window = min(252, max(20, obs))
+        algo = PreciousMetalsAlgo(z_window=z_window)
+        features = algo.generate_features(data)
+        result = algo.execute_allocation_logic(features)
+        as_of = as_of_date or datetime.now(IST).date().isoformat()
+        lines = format_precious_metals_digest_lines(
+            result,
+            features,
+            as_of,
+            book_value_inr=resolve_pm_book_value_inr(),
+        )
+        insert_at = 2
+        for note in pm_notes:
+            lines.insert(insert_at, note)
+            insert_at += 1
+        if obs < 252:
+            lines.insert(
+                insert_at,
+                f"Note: using {z_window}-day Z-window ({obs} observations; 252 preferred)",
+            )
+        return lines
+    except Exception as ex:
+        logger.warning("Precious metals macro section skipped: %s", ex, exc_info=True)
+        return [
+            "--- Precious metals macro ---",
+            "Data unavailable — live fetch failed and no CSV fallback",
+        ]
+
+
 def _digest_flags_simple(audit: dict[str, Any]) -> list[str]:
     out: list[str] = []
     if _high_volume_down_day_stress(audit):
@@ -3507,6 +3563,12 @@ def run_sector_live(
             ),
             "",
         ]
+        if _pm_macro_email_enabled(sector_id):
+            pm_lines = _build_precious_metals_macro_digest_lines(
+                as_of_date=_digest_eod_as_of_date(results),
+            )
+            if pm_lines:
+                lines.extend([""] + pm_lines + [""])
         if _digest_reconcile_mode_enabled():
             lines.extend(build_reconcile_digest_lines(reconcile_summary))
         if verbose_sections:
