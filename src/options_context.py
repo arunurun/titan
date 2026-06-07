@@ -25,6 +25,9 @@ _DEFAULT_FNO_SYMBOLS: frozenset[str] = frozenset(
         "GRASIM", "CIPLA", "DRREDDY", "EICHERMOT", "APOLLOHOSP", "DIVISLAB", "BPCL",
         "HEROMOTOCO", "BRITANNIA", "TATACONSUM", "SBILIFE", "HDFCLIFE", "ADANIPORTS",
         "LTIM", "BAJAJ-AUTO",
+        # Defence sector F&O names (overlap with data/sector_allowlists/defence.json)
+        "HAL", "BEL", "BDL", "MAZDOCK", "GRSE", "COCHINSHIP", "DATAPATTNS", "PARAS",
+        "ASTRAMICRO", "MTARTECH", "BEML", "MIDHANI", "IDEAFORGE", "ZENTEC",
     }
 )
 

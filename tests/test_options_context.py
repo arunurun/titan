@@ -57,8 +57,28 @@ def test_build_sector_options_digest():
 
 def test_is_fno_symbol_uses_allowlist():
     assert is_fno_symbol("RELIANCE")
-    assert not is_fno_symbol("HAL")
+    assert is_fno_symbol("HAL")
+    assert is_fno_symbol("BEL")
+    assert not is_fno_symbol("DYNAMATECH")
     assert "RELIANCE" in load_fno_symbols()
+    assert "HAL" in load_fno_symbols()
+
+
+def test_defence_allowlist_overlaps_fno_symbols():
+    import json
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parent.parent
+    defence = json.loads((repo / "data" / "sector_allowlists" / "defence.json").read_text())[
+        "symbols"
+    ]
+    fno = load_fno_symbols()
+    overlap = sorted(sym for sym in defence if sym in fno)
+    assert "HAL" in overlap
+    assert "BEL" in overlap
+    assert "MAZDOCK" in overlap
+    assert "DYNAMATECH" not in overlap
+    assert len(overlap) >= 10
 
 
 def test_options_confirmation_note_near_call_wall():

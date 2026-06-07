@@ -511,6 +511,8 @@ def test_build_equity_live_audit_success(monkeypatch):
     assert audit["symbol"] == "HAL"
     assert audit["sector"] == "defence"
     assert audit["option_chain_unavailable"] is True
+    assert audit["option_chain_fetch_attempted"] is True
+    assert audit["option_chain_not_fno"] is False
     assert "return_1d_pct" in audit
     assert "ema_200_distance_pct" in audit
     assert "atr_14_pct" in audit
@@ -522,6 +524,49 @@ def test_build_equity_live_audit_success(monkeypatch):
     assert "effective_intent_score" in audit
     assert audit.get("z_score_blend") == "20d_only"
     assert "high_volume_down_day_proxy" in audit
+
+
+def test_build_equity_live_audit_non_fno_flags_not_fno(monkeypatch):
+    from sector_audit import build_equity_live_audit
+
+    closes = [100.0 + i * 0.1 for i in range(30)]
+    df = pd.DataFrame({"close": closes, "volume": [1e6] * 30})
+    monkeypatch.setattr("breeze_client.fetch_equity_data", lambda *a, **k: df)
+    monkeypatch.setattr(
+        "brain.generate_titan_narrative",
+        lambda audit, api_key=None, api_keys=None: "Post body",
+    )
+
+    breeze = MagicMock()
+    inst = SectorInstrument("DYNAMATECH", "NSE")
+    audit, _ = build_equity_live_audit(make_cfg(), breeze, inst, sector_id="defence")
+    assert audit["option_chain_unavailable"] is True
+    assert audit["option_chain_not_fno"] is True
+    assert audit["option_chain_fetch_attempted"] is False
+
+
+def test_format_symbol_options_context_non_fno_message():
+    from sector_audit import _format_symbol_options_context_block
+
+    lines = _format_symbol_options_context_block(
+        {"option_chain_unavailable": True, "option_chain_not_fno": True}
+    )
+    assert lines[0] == "▸ Options context"
+    assert "not in F&O list" in lines[1]
+
+
+def test_format_symbol_options_context_fetch_failed_message():
+    from sector_audit import _format_symbol_options_context_block
+
+    lines = _format_symbol_options_context_block(
+        {
+            "option_chain_unavailable": True,
+            "option_chain_not_fno": False,
+            "option_chain_fetch_attempted": True,
+        }
+    )
+    assert lines[0] == "▸ Options context"
+    assert "unavailable for this symbol" in lines[1]
 
 
 def test_build_equity_live_audit_cmf20_delta_is_numeric(monkeypatch):

@@ -659,6 +659,16 @@ def _format_sector_options_context_block(ctx: dict[str, Any]) -> list[str]:
 def _format_symbol_options_context_block(audit: dict[str, Any]) -> list[str]:
     """Per-symbol options block for digest email (Phase 2)."""
     if bool(audit.get("option_chain_unavailable", True)):
+        if audit.get("option_chain_not_fno"):
+            return [
+                "▸ Options context",
+                "  Options: unavailable (not in F&O list)",
+            ]
+        if audit.get("option_chain_fetch_attempted"):
+            return [
+                "▸ Options context",
+                "  Options chain unavailable for this symbol.",
+            ]
         return []
     lines = [
         "▸ Options context",
@@ -2718,11 +2728,14 @@ def build_equity_live_audit(
     )
     from options_context import build_options_audit_fields, is_fno_symbol
 
+    option_chain_not_fno = not is_fno_symbol(inst.symbol)
+    option_chain_fetch_attempted = False
     opt_audit_defaults = build_options_audit_fields(
         {"option_chain_unavailable": True},
         spot=close_last,
     )
     if is_fno_symbol(inst.symbol):
+        option_chain_fetch_attempted = True
         try:
             from breeze_client import fetch_option_metrics_with_expiry_fallback
 
@@ -2879,6 +2892,8 @@ def build_equity_live_audit(
         "equity_technical_score": intent,
         "rows": len(df),
         "option_chain_unavailable": bool(opt_audit_defaults.get("option_chain_unavailable", True)),
+        "option_chain_not_fno": option_chain_not_fno,
+        "option_chain_fetch_attempted": option_chain_fetch_attempted,
         "institutional_flow": {
             "available": False,
             "source": None,

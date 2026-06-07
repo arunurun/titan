@@ -50,3 +50,18 @@ symbols:
   - ADANIPORTS
   - LTIM
   - BAJAJ-AUTO
+  # Defence sector (NSE F&O underlyings overlapping sector allowlist)
+  - HAL
+  - BEL
+  - BDL
+  - MAZDOCK
+  - GRSE
+  - COCHINSHIP
+  - DATAPATTNS
+  - PARAS
+  - ASTRAMICRO
+  - MTARTECH
+  - BEML
+  - MIDHANI
+  - IDEAFORGE
+  - ZENTEC

@@ -658,7 +658,7 @@ flowchart TD
 
 **Sector block (`▸ Sector options context`):** One NIFTY chain fetch per sector run. Shows PCR, put/call OI wall strikes, expiry, and index spot vs walls.
 
-**Per-symbol block (`▸ Options context`):** Fetched only for symbols in `config/fno_symbols.yaml`. Non-F&O names keep `option_chain_unavailable=True` and omit the block.
+**Per-symbol block (`▸ Options context`):** Fetched only for symbols in `config/fno_symbols.yaml`. Non-F&O names show `Options: unavailable (not in F&O list)`. Fetch failures show `Options chain unavailable for this symbol.`
 
 **Signal engine:** Options can add Tier-2 corroborators (`into call OI wall`, `below put OI support`) in `src/signal_v2.py`. PCR is **not** fed into `calculate_equity_technical_score`.
 
