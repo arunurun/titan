@@ -3313,16 +3313,17 @@ def run_sector_live(
                 ]
             )
         lines.append("--- Action summary ---")
-        action_counts = {"buy": 0, "hold": 0, "trim": 0, "exit-risk": 0}
+        from action_signals import normalize_action_signal
+
+        action_counts = {"buy": 0, "accumulate": 0, "hold": 0, "trim": 0, "exit-risk": 0}
         for r in ok_results:
-            sig = str((r.get("audit") or {}).get("sell_signal") or "hold").lower()
-            if sig not in action_counts:
-                sig = "hold"
-            action_counts[sig] = action_counts.get(sig, 0) + 1
+            sig = normalize_action_signal((r.get("audit") or {}).get("sell_signal"))
+            action_counts[sig] += 1
         lines.extend(
             [
-                f"BUY: {action_counts['buy']} | HOLD: {action_counts['hold']} | "
-                f"TRIM: {action_counts['trim']} | EXIT RISK: {action_counts['exit-risk']}",
+                f"BUY: {action_counts['buy']} | ACCUMULATE: {action_counts['accumulate']} | "
+                f"HOLD: {action_counts['hold']} | TRIM: {action_counts['trim']} | "
+                f"EXIT RISK: {action_counts['exit-risk']}",
             ]
         )
         report_only_mode = _digest_report_only_mode_enabled()
