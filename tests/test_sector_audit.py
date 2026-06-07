@@ -1056,6 +1056,76 @@ def test_run_sector_live_all_fail_raises(mock_load, mock_email):
 @patch("email_notify.send_success_post_email")
 @patch("sector_audit._process_one_metrics")
 @patch("sector_audit.load_sector_instruments")
+def test_digest_action_summary_counts_accumulate_separately(mock_load, mock_metrics, mock_email):
+    from sector_audit import run_sector_live
+
+    mock_load.return_value = [
+        SectorInstrument("ACC", "NSE"),
+        SectorInstrument("HLD", "NSE"),
+        SectorInstrument("TRM", "NSE"),
+        SectorInstrument("EXT", "NSE"),
+    ]
+    mock_metrics.side_effect = [
+        {
+            "ok": True,
+            "symbol": "ACC",
+            "exchange": "NSE",
+            "audit": {"symbol": "ACC", "z_score": 0.5, "intent_score": 0.5, "rows": 30, "sell_signal": "accumulate"},
+            "error": None,
+        },
+        {
+            "ok": True,
+            "symbol": "HLD",
+            "exchange": "NSE",
+            "audit": {"symbol": "HLD", "z_score": 0.2, "intent_score": 0.4, "rows": 30, "sell_signal": "hold"},
+            "error": None,
+        },
+        {
+            "ok": True,
+            "symbol": "TRM",
+            "exchange": "NSE",
+            "audit": {"symbol": "TRM", "z_score": -0.5, "intent_score": 0.3, "rows": 30, "sell_signal": "trim"},
+            "error": None,
+        },
+        {
+            "ok": True,
+            "symbol": "EXT",
+            "exchange": "NSE",
+            "audit": {"symbol": "EXT", "z_score": -1.0, "intent_score": 0.1, "rows": 30, "sell_signal": "exit-risk"},
+            "error": None,
+        },
+    ]
+    def _preserve_preset_sell_signal(audit):
+        preset = str(audit.get("sell_signal") or "hold")
+        return preset, 3.0, ["preset signal"]
+
+    with patch("breeze_client.create_breeze_session", return_value=MagicMock()):
+        with patch("sector_audit._derive_sell_signal", side_effect=_preserve_preset_sell_signal):
+            with patch("brain.generate_sector_digest_narrative", return_value="Action mix post"):
+                with patch("supabase_log.save_audit_log"):
+                    with patch(
+                        "analysis_store.persist_sector_run_analytics",
+                        return_value={"persisted": True, "run_id": "test-action-summary"},
+                    ):
+                        with patch("analysis_store.update_sector_period_rollups"):
+                            with patch(
+                                "analysis_store.build_comparison_payload",
+                                return_value={"enabled": False},
+                            ):
+                                with patch(
+                                    "analysis_store.persist_llm_digest_memory",
+                                    return_value={"persisted": True},
+                                ):
+                                    run_sector_live("defence", max_workers=4, digest=True)
+
+    body = mock_email.call_args[0][0]
+    assert "--- Action summary ---" in body
+    assert "BUY: 0 | ACCUMULATE: 1 | HOLD: 1 | TRIM: 1 | EXIT RISK: 1" in body
+
+
+@patch("email_notify.send_success_post_email")
+@patch("sector_audit._process_one_metrics")
+@patch("sector_audit.load_sector_instruments")
 def test_run_sector_live_digest_one_gemini_call(mock_load, mock_metrics, mock_email):
     from sector_audit import run_sector_live
 
