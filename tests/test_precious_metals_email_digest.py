@@ -72,7 +72,35 @@ def test_load_pm_macro_series_from_fixture():
     data = load_pm_macro_series_from_csv(fixture)
     assert data is not None
     assert "GOLD" in data
-    assert len(data["GOLD"]) >= 30
+    assert len(data["GOLD"]) >= 252
+
+
+def test_load_pm_macro_series_fallback_to_example(tmp_path, monkeypatch):
+    """When primary cache is missing, loader falls back to .example then fixture."""
+    import precious_metals_algo as pm
+
+    monkeypatch.delenv("TITAN_PM_MACRO_CSV", raising=False)
+    monkeypatch.setattr(pm, "_DEFAULT_PM_MACRO_CSV", tmp_path / "missing.csv")
+    monkeypatch.setattr(
+        pm,
+        "_PM_MACRO_CSV_FALLBACKS",
+        (
+            Path(__file__).parent.parent / "data" / "cache" / "pm_macro_series.csv.example",
+            Path(__file__).parent / "fixtures" / "pm_macro_series.csv",
+        ),
+    )
+    data = load_pm_macro_series_from_csv()
+    assert data is not None
+    assert len(data["GOLD"]) >= 252
+
+
+def test_load_pm_macro_series_default_cache():
+    cache = Path(__file__).parent.parent / "data" / "cache" / "pm_macro_series.csv"
+    if not cache.is_file():
+        pytest.skip("committed cache not present")
+    data = load_pm_macro_series_from_csv(cache)
+    assert data is not None
+    assert len(data["GOLD"]) >= 252
 
 
 def test_sample_formatted_output_snapshot(silver_catch_up_result):

@@ -58,6 +58,10 @@ _STRONG_TIGHT_GOLD_FLOOR = 0.20
 _STRONG_TIGHT_SILVER_FLOOR = 0.10
 
 _DEFAULT_PM_MACRO_CSV = Path("data/cache/pm_macro_series.csv")
+_PM_MACRO_CSV_FALLBACKS = (
+    Path("data/cache/pm_macro_series.csv.example"),
+    Path("tests/fixtures/pm_macro_series.csv"),
+)
 _DEFAULT_BOOK_INR = 10_000_000  # ₹100L
 
 
@@ -268,18 +272,17 @@ def _build_waterfall_steps(
     return steps
 
 
-def load_pm_macro_series_from_csv(
-    path: str | Path | None = None,
-) -> dict[str, pd.Series] | None:
-    """
-    Load PM macro series from CSV cache.
+def _pm_macro_csv_candidates(path: str | Path | None = None) -> list[Path]:
+    """Resolve CSV paths in priority order (explicit path/env, then cache + fallbacks)."""
+    if path is not None:
+        return [Path(path)]
+    env_path = os.environ.get("TITAN_PM_MACRO_CSV")
+    if env_path:
+        return [Path(env_path)]
+    return [_DEFAULT_PM_MACRO_CSV, *_PM_MACRO_CSV_FALLBACKS]
 
-    Expected columns: date, GOLD, SILVER, DXY, SGE_PREMIUM_PCT, SGE_WITHDRAWAL.
-    Returns None when the file is missing or empty.
-    """
-    csv_path = Path(path or os.environ.get("TITAN_PM_MACRO_CSV", _DEFAULT_PM_MACRO_CSV))
-    if not csv_path.is_file():
-        return None
+
+def _read_pm_macro_csv(csv_path: Path) -> dict[str, pd.Series] | None:
     try:
         df = pd.read_csv(csv_path)
     except Exception:
@@ -300,6 +303,25 @@ def load_pm_macro_series_from_csv(
     if not all(k in out for k in required):
         return None
     return out
+
+
+def load_pm_macro_series_from_csv(
+    path: str | Path | None = None,
+) -> dict[str, pd.Series] | None:
+    """
+    Load PM macro series from CSV cache.
+
+    Expected columns: date, GOLD, SILVER, DXY, SGE_PREMIUM_PCT, SGE_WITHDRAWAL.
+    Tries ``data/cache/pm_macro_series.csv`` first, then ``.example`` and the test
+    fixture when the primary file is missing. Returns None when no valid file exists.
+    """
+    for csv_path in _pm_macro_csv_candidates(path):
+        if not csv_path.is_file():
+            continue
+        data = _read_pm_macro_csv(csv_path)
+        if data is not None:
+            return data
+    return None
 
 
 def generate_synthetic_pm_macro_series(n: int = 35, seed: int = 42) -> dict[str, pd.Series]:

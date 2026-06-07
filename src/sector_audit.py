@@ -638,16 +638,24 @@ def _build_precious_metals_macro_digest_lines(
                 "--- Precious metals macro ---",
                 "Data unavailable — configure data/cache/pm_macro_series.csv",
             ]
-        algo = PreciousMetalsAlgo(z_window=min(252, max(20, len(next(iter(data.values()))))))
+        obs = len(next(iter(data.values())))
+        z_window = min(252, max(20, obs))
+        algo = PreciousMetalsAlgo(z_window=z_window)
         features = algo.generate_features(data)
         result = algo.execute_allocation_logic(features)
         as_of = as_of_date or datetime.now(IST).date().isoformat()
-        return format_precious_metals_digest_lines(
+        lines = format_precious_metals_digest_lines(
             result,
             features,
             as_of,
             book_value_inr=resolve_pm_book_value_inr(),
         )
+        if obs < 252:
+            lines.insert(
+                2,
+                f"Note: using {z_window}-day Z-window ({obs} observations; 252 preferred)",
+            )
+        return lines
     except Exception as ex:
         logger.warning("Precious metals macro section skipped: %s", ex, exc_info=True)
         return [
