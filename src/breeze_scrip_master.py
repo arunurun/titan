@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import logging
 import threading
 import time
@@ -16,6 +17,8 @@ import urllib.request
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+_STATIC_NSE_ALIASES: dict[str, str] | None = None
 
 # Daily file; cache on disk to avoid downloading every symbol.
 SCRIP_CSV_URL = "https://traderweb.icicidirect.com/Content/File/txtFile/ScripFile/StockScriptNew.csv"
@@ -26,11 +29,40 @@ _CACHE_LOADED_AT: float = 0.0
 _LOAD_FAIL_UNTIL: float = 0.0
 
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
 def _default_cache_path() -> Path:
-    root = Path(__file__).resolve().parent.parent
-    d = root / "data" / "cache"
+    d = _repo_root() / "data" / "cache"
     d.mkdir(parents=True, exist_ok=True)
     return d / "StockScriptNew.csv"
+
+
+def _static_nse_aliases_path() -> Path:
+    return _repo_root() / "data" / "breeze_nse_aliases.json"
+
+
+def _load_static_nse_aliases() -> dict[str, str]:
+    """Committed NSE→Breeze fallbacks when ICICI scrip download is unavailable."""
+    global _STATIC_NSE_ALIASES
+    if _STATIC_NSE_ALIASES is not None:
+        return _STATIC_NSE_ALIASES
+    path = _static_nse_aliases_path()
+    aliases: dict[str, str] = {}
+    if path.is_file():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                aliases = {
+                    str(k).strip().upper(): str(v).strip().upper()
+                    for k, v in raw.items()
+                    if str(k).strip() and str(v).strip()
+                }
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as e:
+            logger.warning("Could not read %s: %s", path, e)
+    _STATIC_NSE_ALIASES = aliases
+    return aliases
 
 
 def _load_cache_bytes(path: Path) -> bytes | None:
@@ -98,7 +130,12 @@ def _ensure_lookup() -> dict[tuple[str, str], str]:
         try:
             text = _fetch_scrip_csv(path)
         except (urllib.error.URLError, OSError, TimeoutError) as e:
-            logger.warning("Could not refresh scrip master: %s — using ticker as stock_code.", e)
+            static = _load_static_nse_aliases()
+            logger.warning(
+                "Could not refresh scrip master: %s — using %s committed NSE aliases as fallback.",
+                e,
+                len(static),
+            )
             _LOAD_FAIL_UNTIL = now + 300.0
             return {}
         _MEMO = _build_lookup(text)
@@ -121,13 +158,20 @@ def resolve_breeze_stock_code(symbol: str, exchange_code: str) -> str:
         return "NIFTY"
     table = _ensure_lookup()
     key = (ex, sym)
-    return table.get(key, sym)
+    if key in table:
+        return table[key]
+    if ex == "NSE":
+        static = _load_static_nse_aliases()
+        if sym in static:
+            return static[sym]
+    return sym
 
 
 def clear_scrip_cache_for_tests() -> None:
     """Reset in-memory map (tests only)."""
-    global _MEMO, _CACHE_LOADED_AT, _LOAD_FAIL_UNTIL
+    global _MEMO, _CACHE_LOADED_AT, _LOAD_FAIL_UNTIL, _STATIC_NSE_ALIASES
     with _CACHE_LOCK:
         _MEMO = None
         _CACHE_LOADED_AT = 0.0
         _LOAD_FAIL_UNTIL = 0.0
+        _STATIC_NSE_ALIASES = None

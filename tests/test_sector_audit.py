@@ -441,6 +441,40 @@ def test_build_equity_live_audit_skips_narrative(monkeypatch):
     mock_gen.assert_not_called()
 
 
+def test_build_equity_live_audit_fno_populates_options(monkeypatch):
+    from sector_audit import build_equity_live_audit
+
+    closes = [100.0 + i * 0.1 for i in range(30)]
+    df = pd.DataFrame({"close": closes, "volume": [1e6] * 30})
+    monkeypatch.setattr("breeze_client.fetch_equity_data", lambda *a, **k: df)
+    monkeypatch.setattr(
+        "brain.generate_titan_narrative",
+        lambda audit, api_key=None, api_keys=None: "Post body",
+    )
+
+    opt_payload = {
+        "underlying": "RELIANCE",
+        "call_oi": 1000.0,
+        "put_oi": 1200.0,
+        "call_chain_df": pd.DataFrame({"strike": [100.0, 105.0], "oi": [100.0, 500.0]}),
+        "put_chain_df": pd.DataFrame({"strike": [95.0, 100.0], "oi": [200.0, 800.0]}),
+        "chain_df": pd.DataFrame({"strike": [100.0], "oi": [600.0]}),
+        "expiry_date": "2026-06-24T06:00:00.000Z",
+    }
+    monkeypatch.setattr(
+        "breeze_client.fetch_option_metrics_with_expiry_fallback",
+        lambda *a, **k: opt_payload,
+    )
+
+    breeze = MagicMock()
+    inst = SectorInstrument("RELIANCE", "NSE")
+    audit, _ = build_equity_live_audit(make_cfg(), breeze, inst, sector_id="energy")
+    assert audit["option_chain_unavailable"] is False
+    assert audit["put_oi_wall_strike"] == 100.0
+    assert audit["call_oi_wall_strike"] == 105.0
+    assert "pcr" in audit
+
+
 def test_build_equity_live_audit_success(monkeypatch):
     from sector_audit import build_equity_live_audit
 
@@ -459,6 +493,8 @@ def test_build_equity_live_audit_success(monkeypatch):
     assert audit["symbol"] == "HAL"
     assert audit["sector"] == "defence"
     assert audit["option_chain_unavailable"] is True
+    assert audit["option_chain_fetch_attempted"] is True
+    assert audit["option_chain_not_fno"] is False
     assert "return_1d_pct" in audit
     assert "ema_200_distance_pct" in audit
     assert "atr_14_pct" in audit
@@ -470,6 +506,92 @@ def test_build_equity_live_audit_success(monkeypatch):
     assert "effective_intent_score" in audit
     assert audit.get("z_score_blend") == "20d_only"
     assert "high_volume_down_day_proxy" in audit
+
+
+def test_build_equity_live_audit_non_fno_flags_not_fno(monkeypatch):
+    from sector_audit import build_equity_live_audit
+
+    closes = [100.0 + i * 0.1 for i in range(30)]
+    df = pd.DataFrame({"close": closes, "volume": [1e6] * 30})
+    monkeypatch.setattr("breeze_client.fetch_equity_data", lambda *a, **k: df)
+    monkeypatch.setattr(
+        "brain.generate_titan_narrative",
+        lambda audit, api_key=None, api_keys=None: "Post body",
+    )
+
+    breeze = MagicMock()
+    inst = SectorInstrument("DYNAMATECH", "NSE")
+    audit, _ = build_equity_live_audit(make_cfg(), breeze, inst, sector_id="defence")
+    assert audit["option_chain_unavailable"] is True
+    assert audit["option_chain_not_fno"] is True
+    assert audit["option_chain_fetch_attempted"] is False
+
+
+def test_format_symbol_options_context_non_fno_message():
+    from sector_audit import _format_symbol_options_context_block
+
+    lines = _format_symbol_options_context_block(
+        {"option_chain_unavailable": True, "option_chain_not_fno": True}
+    )
+    assert lines[0] == "▸ Options context"
+    assert "not in F&O universe" in lines[1]
+
+
+def test_format_symbol_options_context_fetch_failed_message():
+    from sector_audit import _format_symbol_options_context_block
+
+    lines = _format_symbol_options_context_block(
+        {
+            "option_chain_unavailable": True,
+            "option_chain_not_fno": False,
+            "option_chain_fetch_attempted": True,
+            "option_chain_unavailable_reason": "zero open interest",
+        }
+    )
+    assert lines[0] == "▸ Options context"
+    assert "chain unavailable (zero open interest)" in lines[1]
+
+
+def test_format_symbol_options_context_success_with_mock_chain():
+    from sector_audit import _format_symbol_options_context_block
+
+    lines = _format_symbol_options_context_block(
+        {
+            "option_chain_unavailable": False,
+            "pcr": 1.15,
+            "put_oi_wall_strike": 4200.0,
+            "call_oi_wall_strike": 4400.0,
+            "options_expiry": "2026-06-30T06:00:00.000Z",
+            "close_last": 4350.0,
+            "spot_vs_put_wall_pct": 3.57,
+            "spot_vs_call_wall_pct": -1.14,
+        }
+    )
+    assert lines[0] == "▸ Options context"
+    assert "PCR 1.15" in lines[1]
+    assert "4400" in lines[1]
+    assert any("Spot" in line for line in lines)
+
+
+def test_format_sector_options_context_block_available():
+    from sector_audit import _format_sector_options_context_block
+
+    lines = _format_sector_options_context_block(
+        {
+            "sector_option_chain_unavailable": False,
+            "sector_options_underlying": "NIFTY",
+            "sector_pcr": 0.76,
+            "sector_put_wall_strike": 22500.0,
+            "sector_call_wall_strike": 24000.0,
+            "sector_options_expiry": "2026-06-09T06:00:00.000Z",
+            "sector_index_spot": 23366.7,
+            "sector_spot_vs_put_wall_pct": 3.85,
+            "sector_spot_vs_call_wall_pct": -2.64,
+        }
+    )
+    assert lines[0] == "▸ Sector options context"
+    assert "NIFTY PCR 0.76" in lines[1]
+    assert "Index spot" in lines[2]
 
 
 def test_build_equity_live_audit_cmf20_delta_is_numeric(monkeypatch):

@@ -6,6 +6,7 @@ import threading
 import time
 
 from breeze_client import (
+    _classify_breeze_option_chain_response,
     _rate_limited_historical_call,
     create_breeze_session,
     fetch_equity_data,
@@ -13,6 +14,9 @@ from breeze_client import (
     fetch_nifty_data,
     fetch_nifty_option_metrics,
     fetch_nifty_option_metrics_with_expiry_fallback,
+    fetch_option_metrics_for_underlying,
+    fetch_option_metrics_with_expiry_fallback,
+    nfo_underlying_code_candidates,
     volume_absorption_ratio,
     volume_participation_ratio,
 )
@@ -303,6 +307,75 @@ def test_fetch_nifty_option_metrics_aggregates():
     assert m["put_oi"] == 75.0
     row_22k = m["chain_df"][m["chain_df"]["strike"] == 22000.0].iloc[0]
     assert row_22k["oi"] == 150.0
+    assert not m["call_chain_df"].empty
+    assert not m["put_chain_df"].empty
+
+
+def test_fetch_option_metrics_for_underlying_stock():
+    breeze = MagicMock()
+    breeze.get_option_chain_quotes.side_effect = [
+        {"Success": [{"strike_price": 2500.0, "open_interest": 1000.0}]},
+        {"Success": [{"strike_price": 2400.0, "open_interest": 2000.0}]},
+    ]
+    m = fetch_option_metrics_for_underlying(breeze, "RELIANCE", "2026-06-24T06:00:00.000Z")
+    assert m["underlying"] == "RELIANCE"
+    assert m["call_oi"] == 1000.0
+    assert m["put_oi"] == 2000.0
+
+
+def test_nfo_underlying_code_candidates_tries_breeze_alias():
+    assert nfo_underlying_code_candidates("BEL") == ["BHAELE", "BEL"]
+    assert nfo_underlying_code_candidates("NIFTY") == ["NIFTY"]
+
+
+def test_nfo_underlying_code_candidates_industower_resolves_to_bhainf():
+    assert nfo_underlying_code_candidates("INDUSTOWER") == ["BHAINF", "INDUSTOWER"]
+
+
+def test_fetch_option_metrics_with_fallback_uses_breeze_nfo_code(monkeypatch):
+    monkeypatch.setattr(
+        "breeze_client.expiry_candidates_for_underlying",
+        lambda code, max_tries=8: ["2026-06-30T06:00:00.000Z"],
+    )
+
+    breeze = MagicMock()
+
+    def _fetch(_breeze, nfo_code, _expiry):
+        if nfo_code == "RELIANCE":
+            return {
+                "underlying": "RELIANCE",
+                "call_oi": 0.0,
+                "put_oi": 0.0,
+                "chain_df": __import__("pandas").DataFrame(columns=["strike", "oi"]),
+                "call_chain_df": __import__("pandas").DataFrame(columns=["strike", "oi"]),
+                "put_chain_df": __import__("pandas").DataFrame(columns=["strike", "oi"]),
+                "expiry_date": _expiry,
+            }
+        return {
+            "underlying": "RELIANCE",
+            "call_oi": 500.0,
+            "put_oi": 700.0,
+            "chain_df": __import__("pandas").DataFrame({"strike": [2500.0], "oi": [500.0]}),
+            "call_chain_df": __import__("pandas").DataFrame({"strike": [2500.0], "oi": [500.0]}),
+            "put_chain_df": __import__("pandas").DataFrame({"strike": [2400.0], "oi": [700.0]}),
+            "expiry_date": _expiry,
+        }
+
+    monkeypatch.setattr("breeze_client.fetch_option_metrics_for_underlying", _fetch)
+
+    m = fetch_option_metrics_with_expiry_fallback(breeze, "RELIANCE", max_expiry_tries=1)
+    assert m.get("option_chain_unavailable") is not True
+    assert m["nfo_stock_code"] == "RELIND"
+    assert m["call_oi"] == 500.0
+
+
+def test_fetch_option_metrics_with_fallback_degrades():
+    breeze = MagicMock()
+    no_data = {"Success": None, "Status": 500, "Error": "No Data Found"}
+    breeze.get_option_chain_quotes.return_value = no_data
+    m = fetch_option_metrics_with_expiry_fallback(breeze, "RELIANCE", max_expiry_tries=2)
+    assert m.get("option_chain_unavailable") is True
+    assert m.get("option_chain_unavailable_reason")
 
 
 def test_fetch_nifty_option_metrics_no_data_found_returns_empty():
@@ -321,6 +394,21 @@ def test_fetch_nifty_option_metrics_with_fallback_degrades_gracefully():
     m = fetch_nifty_option_metrics_with_expiry_fallback(breeze, max_expiry_tries=2)
     assert m.get("option_chain_unavailable") is True
     assert m["put_oi"] == 0.0 and m["call_oi"] == 0.0
+
+
+def test_classify_breeze_option_chain_response():
+    assert _classify_breeze_option_chain_response({"Success": []}) == "ok"
+    assert _classify_breeze_option_chain_response({"Success": None, "Error": "No Data Found"}) == "no_chain_data"
+    assert (
+        _classify_breeze_option_chain_response(
+            {
+                "Success": None,
+                "Status": 500,
+                "Error": "Error while calling service, Please contact admin (T10:56)",
+            }
+        )
+        == "breeze_service_error"
+    )
 
 
 @patch("breeze_client.BreezeConnect")
@@ -426,17 +514,21 @@ def test_fetch_nifty_option_metrics_with_fallback_skips_zero_oi_chain(monkeypatc
                 "call_oi": 0.0,
                 "put_oi": 0.0,
                 "chain_df": pd.DataFrame([{"strike": 25000.0, "oi": 0.0}]),
+                "call_chain_df": pd.DataFrame([{"strike": 25000.0, "oi": 0.0}]),
+                "put_chain_df": pd.DataFrame([{"strike": 25000.0, "oi": 0.0}]),
                 "expiry_date": "2026-04-14T06:00:00.000Z",
             },
             {
                 "call_oi": 10.0,
                 "put_oi": 20.0,
                 "chain_df": pd.DataFrame([{"strike": 25100.0, "oi": 30.0}]),
+                "call_chain_df": pd.DataFrame([{"strike": 25100.0, "oi": 10.0}]),
+                "put_chain_df": pd.DataFrame([{"strike": 25100.0, "oi": 20.0}]),
                 "expiry_date": "2026-04-21T06:00:00.000Z",
             },
         ],
     )
-    monkeypatch.setattr("breeze_client.fetch_nifty_option_metrics", mocked_fetch)
+    monkeypatch.setattr("breeze_client.fetch_option_metrics_for_underlying", mocked_fetch)
     m = fetch_nifty_option_metrics_with_expiry_fallback(breeze, max_expiry_tries=2)
     assert m["expiry_date"] == "2026-04-21T06:00:00.000Z"
     assert m["fallback_used"] is True

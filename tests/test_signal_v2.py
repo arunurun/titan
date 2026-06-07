@@ -217,6 +217,39 @@ def test_layer_b_vpr_proxies_count_as_one():
     assert b["forced_label"] == "trim"
 
 
+def test_layer_b_options_into_call_wall_corroborator():
+    b = v2.layer_b(
+        {
+            "option_chain_unavailable": False,
+            "close_last": 104.9,
+            "call_oi_wall_strike": 105.0,
+            "put_oi_wall_strike": 95.0,
+            "sell_signal": "trim",
+            "cmf_20": -0.1,
+            "return_1d_pct": -1.0,
+        },
+        {"over_extension_hot": False},
+        {},
+    )
+    assert "into call OI wall" in " ".join(b.get("reasons", []))
+
+
+def test_layer_b_options_below_put_support_corroborator():
+    b = v2.layer_b(
+        {
+            "option_chain_unavailable": False,
+            "close_last": 94.0,
+            "call_oi_wall_strike": 110.0,
+            "put_oi_wall_strike": 95.0,
+            "cmf_20": -0.2,
+            "return_1d_pct": -2.0,
+        },
+        {"over_extension_hot": False},
+        {},
+    )
+    assert "below put OI support" in " ".join(b.get("reasons", []))
+
+
 def test_layer_b_three_corroborators_exit():
     b = v2.layer_b(
         {

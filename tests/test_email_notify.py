@@ -221,3 +221,49 @@ def test_success_html_action_summary_keeps_pipe_format():
     html = _render_success_html(body, subject="Titan sector")
     assert "BUY: 0 | ACCUMULATE: 0 | HOLD: 8 | TRIM: 6 | EXIT RISK: 1" in html
     assert ">BUY</td><td" not in html
+
+
+def test_render_success_html_sector_options_section():
+    body = (
+        "--- Sector options context ---\n"
+        "▸ Sector options context\n"
+        "  NIFTY PCR 0.76 | put wall 22500 | call wall 24000 | expiry 2026-06-09\n"
+        "  Index spot 23366.70 | vs put wall +3.85% | vs call wall -2.64%\n"
+    )
+    html = _render_success_html(body, subject="Titan sector")
+    assert "Sector options context" in html
+    assert "NIFTY PCR 0.76" in html
+    assert "Index spot 23366.70" in html
+
+
+def test_success_html_per_symbol_options_context_preserved_in_card():
+    body = (
+        "--- Per-symbol metrics ---\n"
+        "INDUSTOWER (NSE) — Hold\n"
+        "▸ Options context\n"
+        "  PCR 0.76 | put wall 22500 | call wall 24000 | expiry 2026-06-09T06:00:00.000Z\n"
+        "  Spot 435.50 | vs put wall +3.57% | vs call wall -1.14%\n"
+        "  options: low put/call OI (call-heavy positioning)\n"
+        "▸ Model outlook\n"
+        "1W outlook: 54.0 / 100 (neutral band)\n"
+    )
+    html = _render_success_html(body, subject="Titan sector")
+    assert "PCR 0.76" in html
+    assert "put wall 22500" in html
+    assert "Spot 435.50" in html
+    assert "call-heavy positioning" in html
+    assert "INDUSTOWER (NSE)" in html
+
+
+def test_render_success_html_verbose_gate_preserves_sector_options():
+    body = (
+        "--- Prediction quality gate ---\n"
+        "Gate status: PASS\n"
+        "Successful symbols: 10/10 (100.00%)\n"
+        "▸ Sector options context\n"
+        "  NIFTY PCR 0.76 | put wall 22500 | call wall 24000\n"
+    )
+    html = _render_success_html(body, subject="Titan sector")
+    assert "NIFTY PCR 0.76" in html
+    assert "Sector options context" in html or "▸ Sector options context" in html
+

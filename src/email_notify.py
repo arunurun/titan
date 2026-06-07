@@ -271,6 +271,7 @@ def _render_success_html(
             badge_color = "#34a853" if gate_ok else "#ea4335"
             badge_text = "PASS" if gate_ok else "FAIL"
             kv_rows = []
+            extra_lines: list[str] = []
             for item in items:
                 if ":" in item:
                     k, v = item.split(":", 1)
@@ -280,25 +281,54 @@ def _render_success_html(
                         f'<td style="padding:8px;border-bottom:1px solid #eee;">{escape(v.strip())}</td>'
                         "</tr>"
                     )
+                else:
+                    extra_lines.append(item)
             body = (
                 f'<div style="margin:0 0 10px;"><span style="display:inline-block;padding:4px 10px;border-radius:999px;'
                 f'background:{badge_color};color:#fff;font-weight:700;font-size:12px;">{badge_text}</span></div>'
                 '<table style="width:100%;border-collapse:collapse;">'
                 f"<tbody>{''.join(kv_rows)}</tbody></table>"
             )
+            if extra_lines:
+                body += "".join(
+                    f'<p style="margin:10px 0 0;color:#3c4043;font-size:12px;line-height:1.45;">{escape(line)}</p>'
+                    for line in extra_lines
+                )
             blocks.append(card(name, body, color=badge_color))
             continue
+        if name.lower() == "sector options context":
+            parts: list[str] = []
+            for item in items:
+                stripped = item.strip()
+                if stripped.startswith("▸"):
+                    parts.append(
+                        '<div style="margin:0 0 6px;font-weight:700;font-size:12px;color:#5f6368;">'
+                        f"{escape(stripped)}</div>"
+                    )
+                else:
+                    parts.append(
+                        f'<p style="margin:0 0 8px;color:#3c4043;font-size:12px;line-height:1.45;">{escape(stripped)}</p>'
+                    )
+            blocks.append(card(name, "".join(parts) if parts else "<p>No data.</p>", color=color))
+            continue
         if name.lower() == "per-symbol metrics":
+            filtered_items = [
+                item
+                for item in items
+                if not (item.startswith("--- ") and item.endswith(" ---"))
+            ]
+            # Pipe tables (portfolio digest) live in the preamble before symbol headlines.
+            # Per-symbol card lines also use "|" (options PCR/wall rows) and must stay in cards.
+            preamble, sym_blocks = _split_sector_per_symbol_digest_blocks(filtered_items)
             pipe_rows: list[list[str]] = []
             other_lines: list[str] = []
-            for item in items:
-                stripped_item = item.strip()
-                if stripped_item.startswith("--- ") and stripped_item.endswith(" ---"):
-                    continue
+            for item in preamble:
                 if "|" in item:
                     pipe_rows.append([x.strip() for x in item.split("|")])
                 else:
                     other_lines.append(item)
+            for block in sym_blocks:
+                other_lines.extend(block)
             parts: list[str] = []
             if pipe_rows and len({len(r) for r in pipe_rows}) == 1:
                 ncol = len(pipe_rows[0])

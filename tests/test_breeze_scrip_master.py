@@ -46,4 +46,5 @@ def test_fetch_failure_falls_back(monkeypatch):
 
     monkeypatch.setattr("breeze_scrip_master._fetch_scrip_csv", boom)
 
-    assert resolve_breeze_stock_code("BEL", "NSE") == "BEL"
+    assert resolve_breeze_stock_code("BEL", "NSE") == "BHAELE"
+    assert resolve_breeze_stock_code("INDUSTOWER", "NSE") == "BHAINF"

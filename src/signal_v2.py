@@ -91,6 +91,53 @@ def _sf(v: Any) -> float:
     return x if not math.isnan(x) else float("nan")
 
 
+def _spot_vs_strike_pct(spot: float, strike: float) -> float:
+    if math.isnan(spot) or math.isnan(strike) or strike == 0.0:
+        return float("nan")
+    return ((spot / strike) - 1.0) * 100.0
+
+
+def _options_into_call_wall(audit: dict[str, Any]) -> bool:
+    """Tier-2 corroborator: spot within ~1% of call OI wall with bearish/trim context."""
+    if bool(audit.get("option_chain_unavailable", True)):
+        return False
+    spot = _sf(audit.get("close_last"))
+    call_wall = _sf(audit.get("call_oi_wall_strike"))
+    if math.isnan(spot) or math.isnan(call_wall):
+        return False
+    near_wall = abs(_spot_vs_strike_pct(spot, call_wall)) <= 1.0
+    if not near_wall:
+        return False
+    sell = str(audit.get("sell_signal") or "").lower()
+    cmf = _sf(audit.get("cmf_20"))
+    ret1d = _sf(audit.get("return_1d_pct"))
+    z = _sf(audit.get("z_score"))
+    bearish_context = (
+        sell in ("trim", "exit-risk")
+        or (not math.isnan(cmf) and cmf < -0.05)
+        or (not math.isnan(ret1d) and ret1d < 0.0)
+        or (not math.isnan(z) and z < 0.0)
+    )
+    return bearish_context
+
+
+def _options_below_put_support(audit: dict[str, Any]) -> bool:
+    """Tier-2 corroborator: spot below put OI wall with distribution/negative tape."""
+    if bool(audit.get("option_chain_unavailable", True)):
+        return False
+    spot = _sf(audit.get("close_last"))
+    put_wall = _sf(audit.get("put_oi_wall_strike"))
+    if math.isnan(spot) or math.isnan(put_wall) or spot >= put_wall:
+        return False
+    cmf = _sf(audit.get("cmf_20"))
+    ret1d = _sf(audit.get("return_1d_pct"))
+    return (
+        (not math.isnan(cmf) and cmf < -0.05)
+        or (not math.isnan(ret1d) and ret1d < 0.0)
+        or bool(audit.get("high_volume_down_day_proxy"))
+    )
+
+
 def _clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
@@ -485,6 +532,10 @@ def layer_b(audit: dict[str, Any], c: dict[str, Any], d: dict[str, Any]) -> dict
         signals.append("event risk")
     if bool(d.get("staleflow_downgrade")):
         signals.append("stale-flow downgrade")
+    if _options_into_call_wall(audit):
+        signals.append("into call OI wall")
+    if _options_below_put_support(audit):
+        signals.append("below put OI support")
 
     count = len(signals)
     out["corroborators"] = count
