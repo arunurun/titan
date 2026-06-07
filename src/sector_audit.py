@@ -625,18 +625,18 @@ def _build_precious_metals_macro_digest_lines(
 ) -> list[str]:
     """Build PM macro section; never raises (returns unavailable message on failure)."""
     try:
+        from pm_macro_data import load_pm_macro_series
         from precious_metals_algo import (
             PreciousMetalsAlgo,
             format_precious_metals_digest_lines,
-            load_pm_macro_series_from_csv,
             resolve_pm_book_value_inr,
         )
 
-        data = load_pm_macro_series_from_csv()
+        data, pm_notes = load_pm_macro_series()
         if data is None:
             return [
                 "--- Precious metals macro ---",
-                "Data unavailable — configure data/cache/pm_macro_series.csv",
+                "Data unavailable — live fetch failed and no CSV fallback",
             ]
         obs = len(next(iter(data.values())))
         z_window = min(252, max(20, obs))
@@ -650,9 +650,13 @@ def _build_precious_metals_macro_digest_lines(
             as_of,
             book_value_inr=resolve_pm_book_value_inr(),
         )
+        insert_at = 2
+        for note in pm_notes:
+            lines.insert(insert_at, note)
+            insert_at += 1
         if obs < 252:
             lines.insert(
-                2,
+                insert_at,
                 f"Note: using {z_window}-day Z-window ({obs} observations; 252 preferred)",
             )
         return lines
@@ -660,7 +664,7 @@ def _build_precious_metals_macro_digest_lines(
         logger.warning("Precious metals macro section skipped: %s", ex, exc_info=True)
         return [
             "--- Precious metals macro ---",
-            "Data unavailable — configure data/cache/pm_macro_series.csv",
+            "Data unavailable — live fetch failed and no CSV fallback",
         ]
 
 

@@ -1193,6 +1193,7 @@ def test_run_sector_live_metals_mining_includes_pm_macro(
 
     fixture = Path(__file__).parent / "fixtures" / "pm_macro_series.csv"
     monkeypatch.setenv("TITAN_PM_MACRO_EMAIL", "1")
+    monkeypatch.setenv("TITAN_PM_LIVE_FETCH", "0")
     monkeypatch.setenv("TITAN_PM_MACRO_CSV", str(fixture))
     mock_load.return_value = [SectorInstrument("WELCORP", "NSE")]
     mock_metrics.side_effect = [

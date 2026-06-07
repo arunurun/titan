@@ -12,6 +12,22 @@ DXY × GSR-band matrix allocator for gold/silver/cash with an SGE physical-deman
 
 Z-scores use a 252-day rolling window by default (±1.0 thresholds). Tests use shorter windows.
 
+## Live data (default)
+
+Each `metals_mining` run fetches macro series via `src/pm_macro_data.py` (Yahoo Finance / `yfinance`):
+
+| Series | Yahoo ticker | Notes |
+|--------|--------------|-------|
+| GOLD | `GC=F` | COMEX gold futures close |
+| SILVER | `SI=F` | COMEX silver futures close |
+| DXY | `DX-Y.NYB` (fallback `DX=F`) | US Dollar Index |
+| SGE premium | derived | `SHAU.SHF` (Shanghai gold benchmark, CNY/gram) or `518880.SS` (gold ETF, 0.01g/share) vs `GC=F` with `CNY=X` FX |
+| SGE withdrawal | — | No free live feed; overlay uses premium only; email shows withdrawals as unavailable |
+
+GSR is **not** fetched — it is computed as `GOLD / SILVER` in `generate_features()`.
+
+After a successful live fetch, rows are written to `data/cache/pm_macro_series.csv` for audit (overwritten each run).
+
 ## Inputs
 
 | Column | Required | Description |
@@ -22,8 +38,6 @@ Z-scores use a 252-day rolling window by default (±1.0 thresholds). Tests use s
 | `SGE_PREMIUM_PCT` | Optional | Shanghai premium vs London (%) |
 | `SGE_WITHDRAWAL` | Optional | SGE withdrawal volume; z-score adds tightness signal |
 | `SGE_GOLD` | Optional | Shanghai gold price; used to derive premium vs `GOLD` |
-
-Sector emails read daily series from `data/cache/pm_macro_series.csv` (see example file). Override path with `TITAN_PM_MACRO_CSV`.
 
 ## Logic
 
@@ -77,46 +91,46 @@ Environment:
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `TITAN_PM_MACRO_EMAIL` | `1` for `metals_mining` | Enable/disable PM block |
-| `TITAN_PM_MACRO_CSV` | `data/cache/pm_macro_series.csv` | Series cache path |
+| `TITAN_PM_LIVE_FETCH` | `1` | Live Yahoo fetch each run; `0` forces CSV only |
+| `TITAN_PM_MACRO_CSV` | `data/cache/pm_macro_series.csv` | Cache path (written after live fetch; CSV fallback when live fails) |
 | `TITAN_PM_BOOK_INR` | `10000000` (₹100L) | Book size for USD allocation lines |
 
-If CSV is missing, the section shows `Data unavailable — configure data/cache/pm_macro_series.csv` without failing the sector run.
+If live fetch and CSV fallback both fail, the section shows `Data unavailable — live fetch failed and no CSV fallback` without failing the sector run.
 
 ## Usage
 
 ```python
+from pm_macro_data import load_pm_macro_series
 from precious_metals_algo import (
     PreciousMetalsAlgo,
     format_precious_metals_digest_lines,
-    load_pm_macro_series_from_csv,
 )
 
-data = load_pm_macro_series_from_csv()
+data, notes = load_pm_macro_series()
 algo = PreciousMetalsAlgo(z_window=252, z_threshold=1.0, sge_z_threshold=1.0)
 features = algo.generate_features(data)
 result = algo.execute_allocation_logic(features)
 lines = format_precious_metals_digest_lines(result, features, "2026-06-05", book_value_inr=10_000_000)
 ```
 
-## Populate `pm_macro_series.csv`
+## Offline / CSV fallback
 
-Copy `data/cache/pm_macro_series.csv.example` to `data/cache/pm_macro_series.csv` and refresh daily rows:
+For local dev without network, set `TITAN_PM_LIVE_FETCH=0` or rely on automatic CSV fallback after a failed live fetch.
+
+Copy `data/cache/pm_macro_series.csv.example` to `data/cache/pm_macro_series.csv`:
 
 ```text
 date,GOLD,SILVER,DXY,SGE_PREMIUM_PCT,SGE_WITHDRAWAL
 2026-06-05,2017.0,25.7,93.8,2.1,185.0
 ```
 
-- **date** — ISO date (EOD as-of)
-- **GOLD / SILVER / DXY** — aligned daily closes (≥252 rows recommended for production z-scores)
-- **SGE_PREMIUM_PCT** — Shanghai vs London premium (%)
-- **SGE_WITHDRAWAL** — warehouse withdrawal index or volume
-
 Need at least ~20 overlapping rows for test windows; 252+ for live z-scores.
 
 ## Tests
 
 ```bash
-pytest tests/test_precious_metals_algo.py tests/test_precious_metals_email_digest.py -q
+pytest tests/test_pm_macro_data.py tests/test_precious_metals_algo.py tests/test_precious_metals_email_digest.py -q
 pytest tests/test_sector_audit.py -k pm_macro -q
 ```
+
+CI mocks `yfinance` — tests do not hit Yahoo live.

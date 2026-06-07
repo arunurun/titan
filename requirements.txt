@@ -14,4 +14,5 @@ newsapi-python>=0.1.1
 finnhub-python>=1.2.14
 feedparser>=6.0.10
 requests>=2.32.0
+yfinance>=0.2.40  # live PM macro series (DXY, gold, silver, SGE proxy)
 nltk>=3.8.1
