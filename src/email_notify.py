@@ -281,7 +281,8 @@ def _render_success_html(
                 parts.append(_html_per_symbol_sector_cards(other_lines))
             blocks.append(card(name, "".join(parts) if parts else "<p>No data.</p>", color=color))
             continue
-        if all(":" in item for item in items):
+        # Pipe-separated summary lines (e.g. "BUY: 0 | HOLD: 8") are not key-value rows.
+        if all(":" in item for item in items) and not any("|" in item for item in items):
             rows = []
             for item in items:
                 k, v = item.split(":", 1)

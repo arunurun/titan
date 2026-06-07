@@ -172,3 +172,13 @@ def test_success_html_sector_buy_card_is_green():
     html = _render_success_html(body, subject="Titan sector")
     assert "#34a853" in html
     assert "SAKSOFT" in html
+
+
+def test_success_html_action_summary_keeps_pipe_format():
+    body = (
+        "--- Action summary ---\n"
+        "BUY: 0 | ACCUMULATE: 0 | HOLD: 8 | TRIM: 6 | EXIT RISK: 1\n"
+    )
+    html = _render_success_html(body, subject="Titan sector")
+    assert "BUY: 0 | ACCUMULATE: 0 | HOLD: 8 | TRIM: 6 | EXIT RISK: 1" in html
+    assert ">BUY</td><td" not in html
