@@ -96,44 +96,37 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
     assert "techScore" not in text
     assert "WELCORP (NSE)" in text
     assert "TRIM" in text or "trim" in text.lower()
-    assert "1w outlook" in text.lower()
+    assert "1W outlook:" in text
     assert "neutral band" in text.lower()
-    assert "trend regime (14d)" in text.lower()
-    assert "strength bands: <20 sideways, 20-24 weak trend, >=25 strong trend" in text.lower()
-    assert "direction rule: +di" in text.lower()
-    assert "20d range position" in text.lower()
-    assert "thresholds: near-high >=-1%, near-low <=1%" in text.lower()
-    assert "volatility vs 3m baseline" in text.lower()
-    assert "money flow trend (20d)" in text.lower()
-    assert "bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution" in text
-    assert "▸ trend regime (14d)" in text.lower()
-    assert "▸ 20d money flow" in text.lower()
-    assert "▸ 1d / tape" in text.lower()
-    assert "▸ model outlook" in text.lower()
-    assert "bands: leader >=67, average 34-66, laggard <=33" in text
-    assert "very short horizon (1d outlook):" in text.lower()
-    assert "distance above long-term trend (ema200)" in text.lower()
-    assert (
-        "bands: <=10% green, 10-15% yellow, 15-25% orange, >25% red; "
-        "-5 to 0 near trend, <-5 below trend"
-    ) in text
-    assert "🔴⬇ Distance above long-term trend (EMA200): 47.29%" in text
-    assert "typical daily swing (atr14)" in text.lower()
-    assert "bands: <2.0 calm, 2.0-4.0 moderate, >4.0 elevated" in text
+    assert "Regime: Buy trend" in text
+    assert "ADX 22.60 (weak)" in text
+    assert "+DI 29.10 > −DI 18.40" in text
+    assert "20D range: -0.80% to high · +9.40% above low · near-high" in text
+    assert "ADX strength: <20 sideways · 20–24 weak · ≥25 strong" in text
+    assert "vs 3M: 1.12x high" in text
+    assert "CMF (EOD): 0.110 accumulation" in text
+    assert "CMF: >0.05 acc · −0.05 to 0.05 neutral · <−0.05 dist" in text
+    assert "▸ Trend Regime (14D)" in text
+    assert "▸ 20D Money Flow" in text
+    assert "▸ 1D / Tape" in text
+    assert "▸ Model outlook" in text
+    assert "Percentile: ≥67 leader · 34–66 average · ≤33 laggard" in text
+    assert "1D outlook:" in text
+    assert "EMA200: +47.29% · hot" in text
+    assert "ATR14: 3.42% moderate" in text
+    assert "ATR14: <2 calm · 2–4 moderate · >4 elevated" in text
     assert "1D move (EOD):" in text
-    assert "bands: >=1.5 high, 1.0-1.49 above-avg, 0.7-0.99 below-avg, <0.7 thin" in text
-    assert "bands: >=70 strong, 55-69 constructive, 45-54 neutral, 35-44 caution, <35 defensive" in text
-    assert "bands: >=70 high-long, 55-69 moderate-long, 45-54 neutral, 30-44 defensive, <30 high-defensive" in text
-    assert "Why this action" in text
+    assert "VPR: ≥1.5 high · 1.0–1.49 above-avg · 0.7–0.99 below · <0.7 thin" in text
+    assert "Horizon bands: ≥70 strong · 55–69 constructive" in text
+    assert "Intent bands: ≥70 high-long · 55–69 mod-long" in text
+    assert "Why this action:" in text
+    assert "   • nextWeek soft 51.84" in text
     assert "\n" in text
-    assert "model read confidence" in text.lower()
-    assert "bands: >=70 high, 55-69 medium, <55 low" in text
-    assert "🟢⬆ Trend regime (14D): Buy trend" in text
+    assert "Model read:" in text
+    assert "Confidence: ≥70 high · 55–69 medium · <55 low" in text
+    assert "🟢⬆ Regime: Buy trend" in text
     assert "🔴⬇ 1D move (EOD): -4.28%" in text
-    assert any(
-        f"{icon} Intent score — percentile among sector peers: 62.00" in text
-        for icon in ("🟢⬆", "🟡➡", "🔴⬇")
-    )
+    assert "Intent percentile: 62.00 average" in text
     headline_end = text.index("\n")
     model_idx = text.lower().index("▸ model outlook")
     assert model_idx > headline_end
@@ -180,17 +173,12 @@ def test_symbol_digest_default_shows_neutral_na_for_missing_new_metrics(monkeypa
         "prediction_breakdown": {"week": {}, "day": {}, "penalties": []},
     }
     text = _format_symbol_metrics_line({"symbol": "HAL", "exchange": "NSE", "audit": audit})
-    assert (
-        "Trend regime (14D): Sideways (ADX n/a; strength n/a; strength bands: <20 sideways, 20-24 weak trend, >=25 strong trend; direction rule: direction source unavailable)"
-        in text
-    )
-    assert "20D Range Position: n/a% to 20D high \u00b7 n/a% above 20D low (near-high (within ~1% of 20D high); thresholds: near-high >=-1%, near-low <=1%)" in text
-    assert "Volatility vs 3M baseline: n/ax (n/a; bands: <0.90 low, 0.90-1.10 normal, >1.10 high)" in text
-    assert (
-        "Money flow trend (20D) (EOD): n/a (n/a) · as of n/a" in text
-    )
-    assert "   CMF bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution" in text
-    assert "Volume participation (EOD): 1.10x (above-avg) · as of n/a" in text
+    assert "Regime: Sideways · ADX n/a (n/a) · DI unavailable" in text
+    assert "20D range: n/a% to high · n/a% above low · n/a" in text
+    assert "vs 3M: n/ax n/a" in text
+    assert "CMF (EOD): n/a n/a · as of n/a" in text
+    assert "CMF: >0.05 acc · −0.05 to 0.05 neutral · <−0.05 dist" in text
+    assert "VPR (EOD): 1.10x above-avg · as of n/a" in text
     assert "News correlation unavailable: correlation metadata missing" in text
 
 
@@ -236,17 +224,12 @@ def test_symbol_digest_includes_global_news_correlation_line(monkeypatch):
         },
     }
     text = _format_symbol_metrics_line({"symbol": "HAL", "exchange": "NSE", "audit": audit})
-    assert "Stock news relation:" in text
-    assert "stock_driver=AI chip investment surge (FeedX)" in text
-    assert "affected_metric=momentum 5D" in text
-    assert "direction=tailwind" in text
-    assert "stock_news_fetched_count=2" in text
-    assert "coverage=fetched" in text
-    assert "bands: >=0.75 high, 0.50-0.74 medium, <0.50 low" in text
-    assert "News evidence: net_news_impact_score=0.2142" in text
-    assert "source=Reuters" in text
-    assert "published_at=2026-05-30T08:00:00+00:00" in text
-    assert "impact_contribution_score=0.1822" in text
+    assert "Stock news: AI chip investment surge (FeedX)" in text
+    assert "tailwind" in text
+    assert "momentum 5D" in text
+    assert "fetched=2" in text
+    assert "News evidence: impact 0.2142 (tailwind)" in text
+    assert "Reuters" in text
 
 
 def test_apply_global_news_correlation_uses_explicit_fallback_when_sector_missing(monkeypatch):
@@ -332,9 +315,8 @@ def test_symbol_digest_news_line_present_with_fallback_label(monkeypatch):
         },
     }
     text = _format_symbol_metrics_line({"symbol": "HAL", "exchange": "NSE", "audit": audit})
-    assert "Macro fallback relation:" in text
-    assert "fallback_reason=using_global_market_driver" in text
-    assert "fallback=sector_specific_match_missing_using_global_market_driver" in text
+    assert "Macro:" in text
+    assert "fallback=using_global_market_driver" in text
 
 
 def test_apply_global_news_correlation_sets_line_for_all_audits_when_snapshot_empty(monkeypatch):
@@ -1250,7 +1232,7 @@ def test_symbol_digest_explicit_news_unavailable_message(monkeypatch):
         },
     }
     text = _format_symbol_metrics_line({"symbol": "HAL", "exchange": "NSE", "audit": audit})
-    assert "News correlation unavailable: global_news_snapshot_unavailable" in text
+    assert "News: unavailable (global_news_snapshot_unavailable)" in text
 
 
 @patch("email_notify.send_success_post_email")
@@ -1701,19 +1683,19 @@ def test_format_symbol_metrics_triple_z_score_lines_both_windows(monkeypatch):
         {"symbol": "TAPE", "exchange": "NSE", "audit": audit}
     )
     assert (
-        "🟢⬆ 1D z-score (20D window): +2.10 (strong bullish deviation) · as of 2026-06-06"
+        "🟢⬆ 1D z-score (20D): +2.10 strong bull · as of 2026-06-06"
         in text
     )
     assert (
-        "🟢⬆ 1D z-score (60D window): +1.40 (bullish deviation) · as of 2026-06-06"
+        "🟢⬆ 1D z-score (60D): +1.40 bullish · as of 2026-06-06"
         in text
     )
     assert (
-        "   Z bands: >=+2 strong bullish, +1 to +2 bullish, -1 to +1 near mean, "
-        "-2 to -1 bearish, <=-2 strong bearish"
+        "   Z bands: ≥+2 strong bull · +1 to +2 bull · −1 to +1 mean · "
+        "−2 to −1 bear · ≤−2 strong bear"
     ) in text
     assert (
-        "🟢⬆ 1D z-score (blend, scoring): +1.80 (bullish deviation) · as of 2026-06-06"
+        "🟢⬆ 1D z-score (blend, scoring): +1.80 bullish · as of 2026-06-06"
         in text
     )
     assert "1D z-score: " not in text
@@ -1741,16 +1723,17 @@ def test_format_symbol_metrics_triple_z_score_short_history_no_60d(monkeypatch):
     text = _format_symbol_metrics_line(
         {"symbol": "TAPE", "exchange": "NSE", "audit": audit}
     )
-    assert "1D z-score (20D window):" in text
-    assert "1D z-score (60D window):" not in text
-    assert "1D z-score (blend, scoring):" in text
+    assert "1D z-score (20D):" in text
+    assert "1D z-score (60D):" not in text
+    assert "1D z-score (blend, scoring):" not in text
+    assert "blend (scoring): +0.90" in text
     assert (
-        "   Z bands: >=+2 strong bullish, +1 to +2 bullish, -1 to +1 near mean, "
-        "-2 to -1 bearish, <=-2 strong bearish"
+        "   Z bands: ≥+2 strong bull · +1 to +2 bull · −1 to +1 mean · "
+        "−2 to −1 bear · ≤−2 strong bear"
     ) in text
     z_section = text.split("▸ 1D / Tape")[1].split("▸ Model outlook")[0]
-    assert z_section.index("(20D window)") < z_section.index("Z bands:")
-    assert z_section.index("Z bands:") < z_section.index("(blend, scoring)")
+    assert z_section.index("(20D):") < z_section.index("Z bands:")
+    assert "blend (scoring)" in z_section
 
 
 def test_format_symbol_metrics_dual_cmf_vpr_lines(monkeypatch):
@@ -1777,12 +1760,12 @@ def test_format_symbol_metrics_dual_cmf_vpr_lines(monkeypatch):
     text = _format_symbol_metrics_line(
         {"symbol": "TAPE", "exchange": "NSE", "audit": audit}
     )
-    assert "🔴⬇ Money flow trend (20D) (EOD): -0.254 (distribution) · as of 2026-06-06" in text
-    assert "🟡➡ Money flow trend (live): -0.030 (neutral) · as of 14:32 IST" in text
-    assert "   CMF bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution" in text
-    assert "🟡➡ Volume participation (EOD): 1.42x (above-avg) · as of 2026-06-06" in text
-    assert "🟡➡ Volume participation (live): 0.85x (below-avg) · as of 14:32 IST" in text
-    assert "   VPR bands: >=1.5 high, 1.0-1.49 above-avg, 0.7-0.99 below-avg, <0.7 thin" in text
+    assert "🔴⬇ CMF (EOD): -0.254 distribution · as of 2026-06-06" in text
+    assert "🟡➡ CMF (live): -0.030 neutral · as of 14:32 IST" in text
+    assert "   CMF: >0.05 acc · −0.05 to 0.05 neutral · <−0.05 dist" in text
+    assert "🟡➡ VPR (EOD): 1.42x above-avg · as of 2026-06-06" in text
+    assert "🟡➡ VPR (live): 0.85x below-avg · as of 14:32 IST" in text
+    assert "   VPR: ≥1.5 high · 1.0–1.49 above-avg · 0.7–0.99 below · <0.7 thin" in text
     assert "2.10x" not in text
 
 
@@ -1848,3 +1831,38 @@ def test_build_equity_live_audit_uses_prior_bar_when_session_incomplete(monkeypa
     assert not math.isnan(audit["session_cmf_20"])
     assert not math.isnan(audit["session_volume_participation_ratio"])
     assert audit["session_volume_participation_ratio"] == pytest.approx(0.5, rel=0.01)
+
+
+@pytest.mark.parametrize(
+    "to_high,above_low,expected",
+    [
+        (float("nan"), float("nan"), "n/a"),
+        (-0.5, 9.0, "near-high"),
+        (-2.0, 0.8, "near-low"),
+        (-4.0, 12.0, "mid-range"),
+    ],
+)
+def test_range_position_context_honest_labels(to_high, above_low, expected):
+    from sector_audit import _range_position_context
+
+    assert _range_position_context(to_high, above_low) == expected
+
+
+def test_compact_digest_section_headers_preserved(monkeypatch):
+    monkeypatch.delenv("TITAN_DIGEST_VERBOSE_SYMBOLS", raising=False)
+    from sector_audit import _format_symbol_metrics_line
+
+    audit = {
+        "effective_intent_score": 50.0,
+        "z_score": 0.5,
+        "volume_participation_ratio": 1.0,
+        "return_1d_pct": 1.0,
+        "atr_14_pct": 2.0,
+        "next_week_score": 55.0,
+        "sell_signal": "hold",
+        "sell_signal_reasons": [],
+        "prediction_breakdown": {"week": {}, "day": {}, "penalties": []},
+    }
+    text = _format_symbol_metrics_line({"symbol": "HDR", "exchange": "NSE", "audit": audit})
+    for header in ("▸ Trend Regime (14D)", "▸ 20D Money Flow", "▸ 1D / Tape", "▸ Model outlook"):
+        assert header in text

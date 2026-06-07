@@ -471,6 +471,75 @@ def _adx_strength_band(adx_val: Any) -> str:
     return "weak (<20)"
 
 
+def _adx_strength_band_compact(adx_val: Any) -> str:
+    adx = _safe_float(adx_val)
+    if math.isnan(adx):
+        return "n/a"
+    if adx >= 25.0:
+        return "strong"
+    if adx >= 20.0:
+        return "weak"
+    return "sideways"
+
+
+def _di_direction_compact(plus_di_val: Any, minus_di_val: Any) -> str:
+    plus_di = _safe_float(plus_di_val)
+    minus_di = _safe_float(minus_di_val)
+    if math.isnan(plus_di) or math.isnan(minus_di):
+        return "DI unavailable"
+    if plus_di > minus_di:
+        return f"+DI {_fmt_metric(plus_di)} > \u2212DI {_fmt_metric(minus_di)}"
+    if plus_di < minus_di:
+        return f"+DI {_fmt_metric(plus_di)} < \u2212DI {_fmt_metric(minus_di)}"
+    return f"+DI {_fmt_metric(plus_di)} = \u2212DI {_fmt_metric(minus_di)}"
+
+
+def _ema200_distance_band_label(v: Any) -> str:
+    f = _safe_float(v)
+    if math.isnan(f):
+        return "n/a"
+    if f <= -5.0:
+        return "below"
+    if f < 0.0:
+        return "near"
+    if f <= 10.0:
+        return "healthy"
+    if f <= 15.0:
+        return "mod"
+    if f <= 25.0:
+        return "extended"
+    return "hot"
+
+
+def _atr_pct_band_label(atr_pct: Any) -> str:
+    v = _safe_float(atr_pct)
+    if math.isnan(v):
+        return "n/a"
+    if v < 2.0:
+        return "calm"
+    if v <= 4.0:
+        return "moderate"
+    return "elevated"
+
+
+def _z_label_short(z: Any) -> str:
+    try:
+        v = float(z)
+    except (TypeError, ValueError):
+        return "unknown"
+    if math.isnan(v):
+        return "unknown"
+    if v >= 2.0:
+        return "strong bull"
+    if v >= 1.0:
+        return "bullish"
+    if v <= -2.0:
+        return "strong bear"
+    if v <= -1.0:
+        return "bearish"
+    return "mean"
+
+
 def _trend_regime_label(adx_val: Any, plus_di_val: Any, minus_di_val: Any) -> str:
     adx = _safe_float(adx_val)
     plus_di = _safe_float(plus_di_val)
@@ -524,12 +593,12 @@ def _range_position_context(pct_to_high: Any, pct_above_low: Any) -> str:
     to_high = _safe_float(pct_to_high)
     above_low = _safe_float(pct_above_low)
     if math.isnan(to_high) and math.isnan(above_low):
-        return "range context unavailable"
+        return "n/a"
     if not math.isnan(to_high) and to_high >= -1.0:
-        return "near-high (within ~1% of 20D high)"
+        return "near-high"
     if not math.isnan(above_low) and above_low <= 1.0:
-        return "near-low (within ~1% of 20D low)"
-    return "inside 20D range"
+        return "near-low"
+    return "mid-range"
 
 
 def _cmf_or_obv_for_digest(audit: dict[str, Any]) -> tuple[str, float]:
@@ -627,7 +696,7 @@ def _digest_flags_simple(audit: dict[str, Any]) -> list[str]:
     return out
 
 
-def _prediction_brief_line(audit: dict[str, Any]) -> str:
+def _prediction_brief_line(audit: dict[str, Any], *, compact: bool = False) -> str:
     """One readable line instead of raw factor vectors."""
     breakdown = audit.get("prediction_breakdown")
     if not isinstance(breakdown, dict):
@@ -664,6 +733,16 @@ def _prediction_brief_line(audit: dict[str, Any]) -> str:
     drv = drivers[0] if drivers else None
     drag = drags[0] if drags else None
 
+    if compact:
+        parts = [f"Model read: {confidence} confidence"]
+        if drv:
+            parts.append(f"{drv} supportive")
+        if drag:
+            parts.append(f"{drag} weighing on the score")
+        if penalties:
+            parts.append(f"flags: {'; '.join(str(p) for p in penalties[:2])}")
+        return " · ".join(parts)
+
     parts = [
         "Model read confidence: "
         f"{confidence} (bands: >=70 high, 55-69 medium, <55 low; directional heuristic, not a guarantee)"
@@ -675,6 +754,12 @@ def _prediction_brief_line(audit: dict[str, Any]) -> str:
     if penalties:
         parts.append(f"flags: {'; '.join(str(p) for p in penalties[:2])}")
     return " · ".join(parts)
+
+
+def _prediction_confidence_bands_line(*, compact: bool = False) -> str:
+    if compact:
+        return "   Confidence: \u226570 high \u00b7 55\u201369 medium \u00b7 <55 low"
+    return ""
 
 
 def _infer_news_affected_metric(audit: dict[str, Any]) -> str:
@@ -793,7 +878,7 @@ def _stock_news_fetch_reason(corr: dict[str, Any], evidence: dict[str, Any]) -> 
     return ""
 
 
-def _news_evidence_line(audit: dict[str, Any]) -> str:
+def _news_evidence_line(audit: dict[str, Any], *, compact: bool = False) -> str:
     corr = audit.get("news_correlation")
     if not isinstance(corr, dict):
         return ""
@@ -810,6 +895,43 @@ def _news_evidence_line(audit: dict[str, Any]) -> str:
     stock_meta = corr.get("stock_news")
     if isinstance(stock_meta, dict):
         stock_query_used = str(stock_meta.get("query_used") or "").strip()
+
+    def _headline_snippet(name: str) -> str:
+        rows = top_headlines.get(name)
+        if not isinstance(rows, list) or not rows:
+            if name == "stock":
+                if stock_fetch_error:
+                    detail = f"fetch_error={stock_fetch_error}"
+                    if stock_query_used:
+                        detail += f"; query={stock_query_used}"
+                    return f"stock=none ({detail})"
+                coverage = str(corr.get("stock_news_coverage") or "").strip()
+                if coverage == "helper_unavailable":
+                    return "stock=none (fetch_error=helper_unavailable)"
+            return f"{name}=none"
+        row = rows[0] if isinstance(rows[0], dict) else {}
+        headline = str(row.get("headline") or "").strip()
+        if not headline:
+            return f"{name}=none"
+        source = str(row.get("source") or "unknown").strip()
+        if compact:
+            return f"{name}: {headline[:60]}{'…' if len(headline) > 60 else ''} ({source})"
+        impact = _fmt_metric(row.get("impact_contribution_score"), 4)
+        published_at = str(row.get("published_at") or "n/a").strip() or "n/a"
+        return (
+            f"{name}={headline} [source={source}; published_at={published_at}; "
+            f"impact_contribution_score={impact}]"
+        )
+
+    if compact:
+        snippets = [_headline_snippet(b) for b in ("global", "stock", "local", "market")]
+        active = [s for s in snippets if not s.endswith("=none") and "none (" not in s]
+        stock_none = next((s for s in snippets if s.startswith("stock=none")), "")
+        parts = [f"News evidence: impact {_fmt_metric(net_score, 4)} ({direction})"]
+        parts.extend(active)
+        if stock_none:
+            parts.append(stock_none)
+        return " · ".join(parts)
 
     def _bucket_txt(name: str) -> str:
         rows = top_headlines.get(name)
@@ -846,14 +968,18 @@ def _news_evidence_line(audit: dict[str, Any]) -> str:
     )
 
 
-def _news_correlation_line(audit: dict[str, Any]) -> str:
+def _news_correlation_line(audit: dict[str, Any], *, compact: bool = False) -> str:
     corr = audit.get("news_correlation")
     if not isinstance(corr, dict):
         return "News correlation unavailable: correlation metadata missing"
     unavailable_reason = str(corr.get("unavailable_reason") or "").strip()
     if unavailable_reason:
+        if compact:
+            return f"News: unavailable ({unavailable_reason})"
         return f"News correlation unavailable: {unavailable_reason}"
     if corr.get("available") is False:
+        if compact:
+            return "News: unavailable (correlation data unavailable)"
         return "News correlation unavailable: correlation data unavailable"
     driver = str(corr.get("driver") or "").strip()
     metric = str(corr.get("affected_metric") or "").strip()
@@ -866,6 +992,8 @@ def _news_correlation_line(audit: dict[str, Any]) -> str:
     coverage_status = str(corr.get("stock_news_coverage") or "").strip().lower() or "unknown"
     fallback_label = str(corr.get("fallback_label") or "").strip()
     if not driver or not metric:
+        if compact:
+            return "News: unavailable (incomplete payload)"
         return "News correlation unavailable: incomplete correlation payload"
     if direction == "tailwind":
         dir_label = "tailwind"
@@ -884,6 +1012,11 @@ def _news_correlation_line(audit: dict[str, Any]) -> str:
         conf_band = "low"
     theme_txt = theme if theme else "global macro"
     if driver_source == "stock":
+        if compact:
+            return (
+                f"Stock news: {driver} · {dir_label} · conf {conf_txt} ({conf_band}) · "
+                f"{metric} · fetched={stock_news_fetched_count}"
+            )
         return (
             f"Stock news relation: stock_driver={driver} · theme={theme_txt} · "
             f"affected_metric={metric} · direction={dir_label} · confidence={conf_txt} "
@@ -904,6 +1037,16 @@ def _news_correlation_line(audit: dict[str, Any]) -> str:
     if isinstance(stock_meta, dict):
         fetch_error = str(stock_meta.get("fetch_error") or "").strip()
     fetch_error_txt = f" · stock_fetch_error={fetch_error}" if fetch_error else ""
+    if compact:
+        fb = fallback_label.replace("sector_specific_match_missing_", "") if fallback_label else fallback_reason
+        line = (
+            f"Macro: {driver} · {dir_label} · conf {conf_txt} ({conf_band}) · {metric}"
+        )
+        if fb:
+            line += f" · fallback={fb}"
+        if fetch_error:
+            line += f" · stock_fetch_error={fetch_error}"
+        return line
     return (
         f"Macro fallback relation: macro_driver={driver} · theme={theme_txt} · "
         f"affected_metric={metric} · direction={dir_label} · confidence={conf_txt} "
@@ -1005,51 +1148,40 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
 
     lines_out.append("▸ Trend Regime (14D)")
     trend_regime = _trend_regime_label(adx_14, plus_di_14, minus_di_14)
-    if not math.isnan(_safe_float(plus_di_14)) and not math.isnan(_safe_float(minus_di_14)):
-        if _safe_float(plus_di_14) > _safe_float(minus_di_14):
-            direction_rule = (
-                f"+DI {_fmt_metric(plus_di_14)} > -DI {_fmt_metric(minus_di_14)} => buy trend"
-            )
-        elif _safe_float(plus_di_14) < _safe_float(minus_di_14):
-            direction_rule = (
-                f"+DI {_fmt_metric(plus_di_14)} < -DI {_fmt_metric(minus_di_14)} => sell trend"
-            )
-        else:
-            direction_rule = (
-                f"+DI {_fmt_metric(plus_di_14)} = -DI {_fmt_metric(minus_di_14)} => neutral trend"
-            )
-    else:
-        direction_rule = "direction source unavailable"
     trend_icon = "🟡➡"
     if trend_regime == "Buy trend":
         trend_icon = "🟢⬆"
     elif trend_regime == "Sell trend":
         trend_icon = "🔴⬇"
+    range_ctx = _range_position_context(breakout_to_high, breakout_above_low)
     lines_out.append(
-        f"{trend_icon} Trend regime (14D): {trend_regime} "
-        f"(ADX {_fmt_metric(adx_14)}; strength {_adx_strength_band(adx_14)}; "
-        f"strength bands: <20 sideways, 20-24 weak trend, >=25 strong trend; direction rule: {direction_rule})"
+        f"{trend_icon} Regime: {trend_regime} · ADX {_fmt_metric(adx_14)} "
+        f"({_adx_strength_band_compact(adx_14)}) · "
+        f"{_di_direction_compact(plus_di_14, minus_di_14)}"
     )
     lines_out.append(
         f"{_breakout_state_icon(breakout_to_high, breakout_above_low)} "
-        f"20D Range Position: {_fmt_metric(breakout_to_high)}% to 20D high \u00b7 "
-        f"{_fmt_metric(breakout_above_low)}% above 20D low "
-        "(near-high (within ~1% of 20D high); thresholds: near-high >=-1%, near-low <=1%)"
+        f"20D range: {_fmt_signed_pct(breakout_to_high)}% to high · "
+        f"{_fmt_signed_pct(breakout_above_low)}% above low · {range_ctx}"
     )
     lines_out.append(
         f"{_ema200_distance_icon(ema_dist)} "
-        f"Distance above long-term trend (EMA200): {_fmt_metric(ema_dist)}% "
-        f"({_ema200_distance_bands_text()})"
+        f"EMA200: {_fmt_signed_pct(ema_dist)}% · {_ema200_distance_band_label(ema_dist)}"
+    )
+    lines_out.append("   ADX strength: <20 sideways · 20–24 weak · ≥25 strong")
+    lines_out.append("   20D range: near-high ≥−1% · near-low ≤+1% to low")
+    lines_out.append(
+        "   EMA200: ≤10% healthy · 10–15% mod · 15–25% extended · >25% hot · "
+        "−5–0 near · <−5 below"
     )
 
     lines_out.append("▸ 20D Money Flow")
     ohlc_as_of_mf = str(audit.get("ohlc_bar_as_of_date") or "").strip()
     mf_eod_as_of = ohlc_as_of_mf if ohlc_as_of_mf else "n/a"
-    cmf_proxy_suffix = f" [{cmf_label} proxy]" if cmf_label != "CMF20" else ""
+    cmf_display = cmf_label if cmf_label != "CMF20" else "CMF"
     lines_out.append(
         f"{_metric_icon(cmf_val, bullish_above=0.05, bearish_below=-0.05)} "
-        f"Money flow trend (20D) (EOD): {_fmt_metric(cmf_val, 3)} "
-        f"({_cmf_band(cmf_val)}){cmf_proxy_suffix} · as of {mf_eod_as_of}"
+        f"{cmf_display} (EOD): {_fmt_metric(cmf_val, 3)} {_cmf_band(cmf_val)} · as of {mf_eod_as_of}"
     )
     session_cmf = audit.get("session_cmf_20")
     if (
@@ -1061,18 +1193,15 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
         session_cmf_f = _safe_float(session_cmf)
         lines_out.append(
             f"{_metric_icon(session_cmf_f, bullish_above=0.05, bearish_below=-0.05)} "
-            f"Money flow trend (live): {_fmt_metric(session_cmf_f, 3)} "
-            f"({_cmf_band(session_cmf_f)}) · as of {snap_cmf}"
+            f"CMF (live): {_fmt_metric(session_cmf_f, 3)} {_cmf_band(session_cmf_f)} · as of {snap_cmf}"
         )
-    lines_out.append(
-        "   CMF bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution"
-    )
+    lines_out.append("   CMF: >0.05 acc · −0.05 to 0.05 neutral · <−0.05 dist")
     vpr_eod = audit.get("volume_participation_ratio", audit.get("absorption_ratio"))
     vpr_eod_f = _safe_float(vpr_eod)
     lines_out.append(
         f"{_metric_icon(vpr_eod_f, bullish_above=1.5, bearish_below=0.7)} "
-        f"Volume participation (EOD): {_fmt_metric(vpr_eod)}x "
-        f"({_volume_participation_label_short(vpr_eod)}) · as of {mf_eod_as_of}"
+        f"VPR (EOD): {_fmt_metric(vpr_eod)}x {_volume_participation_label_short(vpr_eod)} · "
+        f"as of {mf_eod_as_of}"
     )
     session_vpr = audit.get("session_volume_participation_ratio")
     if audit.get("price_snapshot_ts") and not math.isnan(_safe_float(session_vpr)):
@@ -1080,24 +1209,21 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
         session_vpr_f = _safe_float(session_vpr)
         lines_out.append(
             f"{_metric_icon(session_vpr_f, bullish_above=1.5, bearish_below=0.7)} "
-            f"Volume participation (live): {_fmt_metric(session_vpr)}x "
-            f"({_volume_participation_label_short(session_vpr)}) · as of {snap_vpr}"
+            f"VPR (live): {_fmt_metric(session_vpr)}x {_volume_participation_label_short(session_vpr)} · "
+            f"as of {snap_vpr}"
         )
-    lines_out.append(
-        "   VPR bands: >=1.5 high, 1.0-1.49 above-avg, 0.7-0.99 below-avg, <0.7 thin"
-    )
+    lines_out.append("   VPR: ≥1.5 high · 1.0–1.49 above-avg · 0.7–0.99 below · <0.7 thin")
     sp_int = audit.get("sector_pctile_effective_intent")
     lines_out.append(
         f"{_metric_icon(sp_int, bullish_above=67.0, bearish_below=33.0)} "
-        f"Intent score — percentile among sector peers: {_fmt_metric(sp_int)} "
-        f"({_sector_rank_band(sp_int)}; bands: leader >=67, average 34-66, laggard <=33)"
+        f"Intent percentile: {_fmt_metric(sp_int)} {_sector_rank_band(sp_int)}"
     )
     sp_nw = audit.get("sector_pctile_next_week_score")
     lines_out.append(
         f"{_metric_icon(sp_nw, bullish_above=67.0, bearish_below=33.0)} "
-        f"1W outlook — percentile among sector peers: {_fmt_metric(sp_nw)} "
-        f"({_sector_rank_band(sp_nw)}; bands: leader >=67, average 34-66, laggard <=33)"
+        f"1W outlook percentile: {_fmt_metric(sp_nw)} {_sector_rank_band(sp_nw)}"
     )
+    lines_out.append("   Percentile: ≥67 leader · 34–66 average · ≤33 laggard")
 
     lines_out.append("▸ 1D / Tape")
     ohlc_as_of = str(audit.get("ohlc_bar_as_of_date") or "").strip()
@@ -1116,26 +1242,31 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     z_fast = audit.get("z_score_fast_20", z)
     z_slow = audit.get("z_score_slow")
     z_bands = (
-        "   Z bands: >=+2 strong bullish, +1 to +2 bullish, -1 to +1 near mean, "
-        "-2 to -1 bearish, <=-2 strong bearish"
+        "   Z bands: ≥+2 strong bull · +1 to +2 bull · −1 to +1 mean · "
+        "−2 to −1 bear · ≤−2 strong bear"
     )
-    lines_out.append(
-        f"{_metric_icon(z_fast, bullish_above=1.0, bearish_below=-1.0)} "
-        f"1D z-score (20D window): {_fmt_signed_pct(z_fast)} "
-        f"({_z_label(z_fast)}) · as of {eod_as_of}"
-    )
-    if math.isfinite(_safe_float(z_slow)):
+    z_slow_finite = math.isfinite(_safe_float(z_slow))
+    if z_slow_finite:
+        lines_out.append(
+            f"{_metric_icon(z_fast, bullish_above=1.0, bearish_below=-1.0)} "
+            f"1D z-score (20D): {_fmt_signed_pct(z_fast)} {_z_label_short(z_fast)} · as of {eod_as_of}"
+        )
         lines_out.append(
             f"{_metric_icon(z_slow, bullish_above=1.0, bearish_below=-1.0)} "
-            f"1D z-score (60D window): {_fmt_signed_pct(z_slow)} "
-            f"({_z_label(z_slow)}) · as of {eod_as_of}"
+            f"1D z-score (60D): {_fmt_signed_pct(z_slow)} {_z_label_short(z_slow)} · as of {eod_as_of}"
         )
-    lines_out.append(z_bands)
-    lines_out.append(
-        f"{_metric_icon(z, bullish_above=1.0, bearish_below=-1.0)} "
-        f"1D z-score (blend, scoring): {_fmt_signed_pct(z)} "
-        f"({_z_label(z)}) · as of {eod_as_of}"
-    )
+        lines_out.append(z_bands)
+        lines_out.append(
+            f"{_metric_icon(z, bullish_above=1.0, bearish_below=-1.0)} "
+            f"1D z-score (blend, scoring): {_fmt_signed_pct(z)} {_z_label_short(z)} · as of {eod_as_of}"
+        )
+    else:
+        lines_out.append(
+            f"{_metric_icon(z_fast, bullish_above=1.0, bearish_below=-1.0)} "
+            f"1D z-score (20D): {_fmt_signed_pct(z_fast)} {_z_label_short(z_fast)} · "
+            f"blend (scoring): {_fmt_signed_pct(z)} · as of {eod_as_of}"
+        )
+        lines_out.append(z_bands)
     atr_icon = "🟡➡"
     atr_v = _safe_float(atr_pct)
     if not math.isnan(atr_v):
@@ -1144,70 +1275,76 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
         elif atr_v > 4.0:
             atr_icon = "🔴⬇"
     lines_out.append(
-        f"{atr_icon} Typical daily swing (ATR14): {_fmt_metric(atr_pct)}% "
-        f"(bands: <2.0 calm, 2.0-4.0 moderate, >4.0 elevated)"
+        f"{atr_icon} ATR14: {_fmt_metric(atr_pct)}% {_atr_pct_band_label(atr_pct)} · "
+        f"vs 3M: {_fmt_metric(atr_ratio)}x {_atr_ratio_band(atr_ratio)}"
     )
-    lines_out.append(
-        f"{_atr_regime_icon(atr_ratio)} Volatility vs 3M baseline: {_fmt_metric(atr_ratio)}x "
-        f"({_atr_ratio_band(atr_ratio)}; bands: <0.90 low, 0.90-1.10 normal, >1.10 high)"
-    )
+    lines_out.append("   ATR14: <2 calm · 2–4 moderate · >4 elevated")
+    lines_out.append("   ATR ratio: <0.90 low · 0.90–1.10 normal · >1.10 high")
 
     lines_out.append("▸ Model outlook")
     lines_out.append(
         f"{_metric_icon(intent, bullish_above=55.0, bearish_below=45.0)} "
-        f"Technical intent: {_fmt_metric(intent)} / 100 "
-        f"({_equity_technical_label(intent)}; bands: >=70 high-long, 55-69 moderate-long, 45-54 neutral, 30-44 defensive, <30 high-defensive)"
+        f"Technical intent: {_fmt_metric(intent)}/100 · {_equity_technical_label(intent)}"
     )
     nw_l = _horizon_score_label(next_week)
     lines_out.append(
         f"{_metric_icon(next_week, bullish_above=55.0, bearish_below=45.0)} "
-        f"1W outlook: {_fmt_metric(next_week)} / 100 ({nw_l}; {_horizon_score_bands_text()})"
+        f"1W outlook: {_fmt_metric(next_week)}/100 · {nw_l}"
     )
     nd_l = _horizon_score_label(nf)
     lines_out.append(
         f"{_metric_icon(nf, bullish_above=55.0, bearish_below=45.0)} "
-        f"Very short horizon (1D outlook): {_fmt_metric(nf)} / 100 "
-        f"({nd_l}; {_horizon_score_bands_text()})"
+        f"1D outlook: {_fmt_metric(nf)}/100 · {nd_l}"
+    )
+    lines_out.append(
+        "   Intent bands: ≥70 high-long · 55–69 mod-long · 45–54 neutral · "
+        "30–44 defensive · <30 high-defensive"
+    )
+    lines_out.append(
+        "   Horizon bands: ≥70 strong · 55–69 constructive · 45–54 neutral · "
+        "35–44 caution · <35 defensive"
     )
 
     if sell_reasons:
-        sr = "; ".join(str(x) for x in sell_reasons[:3])
-        lines_out.append(f"Why this action: {sr}")
+        lines_out.append("Why this action:")
+        for reason in sell_reasons[:3]:
+            lines_out.append(f"   • {reason}")
 
-    pred = _prediction_brief_line(audit)
+    pred = _prediction_brief_line(audit, compact=True)
     if pred:
         lines_out.append(pred)
+        lines_out.append(_prediction_confidence_bands_line(compact=True))
 
     context_tail: list[str] = []
     cmf_delta = _cmf_delta_line(audit)
     if cmf_delta:
         context_tail.append(cmf_delta)
 
-    news_rel = _news_correlation_line(audit)
+    news_rel = _news_correlation_line(audit, compact=True)
     if news_rel:
         context_tail.append(news_rel)
-    news_evidence = _news_evidence_line(audit)
+    news_evidence = _news_evidence_line(audit, compact=True)
     if news_evidence:
         context_tail.append(news_evidence)
 
     flag_simple = _digest_flags_simple(audit)
-    if flag_simple:
-        context_tail.append("Context: " + "; ".join(flag_simple))
+    for flag in flag_simple:
+        context_tail.append(f"• {flag}")
 
     if support_tag != "technical_only":
-        context_tail.append(f"Evidence mix: {support_tag.replace('_', ' ')}")
+        context_tail.append(f"• Evidence mix: {support_tag.replace('_', ' ')}")
 
     if fundamental_status.lower() not in ("unavailable", "na", "n/a", "") and not str(fundamental_status).startswith(
         "unavailable",
     ):
         fr = "; ".join(str(x) for x in fundamental_reasons[:2]) if fundamental_reasons else ""
         context_tail.append(
-            f"Fundamentals: {fundamental_status} ({_fmt_metric(fundamental_score)})"
+            f"• Fundamentals: {fundamental_status} ({_fmt_metric(fundamental_score)})"
             + (f" — {fr}" if fr else ""),
         )
 
     if fallback_used and exchange_used.upper() != str(exchange).upper():
-        context_tail.append(f"Price feed: pulled from {exchange_used} (alternate to {exchange}).")
+        context_tail.append(f"• Price feed: {exchange_used} (alternate to {exchange})")
 
     if context_tail:
         lines_out.append("▸ Context")
