@@ -39,6 +39,78 @@ def _html_action_colored_cell(cell: str) -> str:
     )
 
 
+def _sector_section_default_open(section_title: str) -> bool:
+    """Only Model outlook is expanded by default in sector digest cards."""
+    normalized = section_title.strip().lstrip("▸").strip().lower()
+    return normalized == "model outlook" or normalized.startswith("model outlook")
+
+
+def _sector_body_line_is_legend(line: str) -> bool:
+    """Legend/helper lines are extra-indented beneath a section header."""
+    return len(line) - len(line.lstrip()) >= 4
+
+
+def _html_sector_section_body_line(line: str) -> str:
+    stripped = line.strip()
+    if not stripped:
+        return ""
+    if _sector_body_line_is_legend(line):
+        return (
+            f'<div style="margin:4px 0 0;font-size:11px;line-height:1.45;color:#80868b;">'
+            f"{escape(stripped)}</div>"
+        )
+    return (
+        f'<div style="margin:6px 0 0;font-size:12px;line-height:1.55;color:#3c4043;">'
+        f"{escape(stripped)}</div>"
+    )
+
+
+def _html_collapsible_sector_sections(body_lines: list[str]) -> str:
+    """Group sector digest body lines into Gmail-friendly <details> sections."""
+    parts: list[str] = []
+    preamble: list[str] = []
+    current_title: str | None = None
+    current_lines: list[str] = []
+
+    def flush_section() -> None:
+        nonlocal current_title, current_lines
+        if current_title is None:
+            return
+        open_attr = " open" if _sector_section_default_open(current_title) else ""
+        inner = "".join(_html_sector_section_body_line(ln) for ln in current_lines)
+        parts.append(
+            f'<details{open_attr} style="margin-top:8px;border:1px solid #e8eaed;border-radius:6px;'
+            f'background:#fff;">'
+            f'<summary style="cursor:pointer;padding:8px 10px;font-weight:600;font-size:12px;'
+            f'color:#5f6368;line-height:1.4;">{escape(current_title)}</summary>'
+            f'<div style="padding:0 10px 8px;">{inner}</div>'
+            f"</details>"
+        )
+        current_title = None
+        current_lines = []
+
+    for line in body_lines:
+        stripped = line.strip()
+        if stripped.startswith("▸"):
+            flush_section()
+            current_title = stripped
+            current_lines = []
+        elif current_title is not None:
+            current_lines.append(line)
+        else:
+            preamble.append(line)
+
+    flush_section()
+
+    preamble_html = "".join(
+        f'<div style="margin:6px 0 0;font-size:12px;line-height:1.55;color:#3c4043;">'
+        f"{escape(line.strip())}</div>"
+        for line in preamble
+        if line.strip()
+    )
+    return preamble_html + "".join(parts)
+
+
 def _split_sector_per_symbol_digest_blocks(lines: list[str]) -> tuple[list[str], list[list[str]]]:
     """Group multi-line sector digest metrics under each SYMBOL (EXCH) headline."""
     preamble: list[str] = []
@@ -103,22 +175,7 @@ def _html_per_symbol_sector_cards(other_lines: list[str]) -> str:
         body = block[1:]
         inner = f'<div style="{card_style}"><div style="margin:0;">{head}</div>'
         if body:
-            row_parts: list[str] = []
-            for b in body:
-                stripped = b.strip()
-                if stripped.startswith("▸"):
-                    row_parts.append(
-                        '<div style="margin-top:10px;font-weight:700;font-size:11px;color:#5f6368;'
-                        'text-transform:uppercase;letter-spacing:0.02em;line-height:1.4;">'
-                        f"{escape(stripped)}</div>",
-                    )
-                else:
-                    row_parts.append(
-                        f'<div style="margin:6px 0 0;font-size:12px;line-height:1.55;color:#3c4043;">'
-                        f"{escape(stripped)}</div>",
-                    )
-            rows = "".join(row_parts)
-            inner += f'<div style="margin-top:4px;">{rows}</div>'
+            inner += f'<div style="margin-top:4px;">{_html_collapsible_sector_sections(body)}</div>'
         inner += "</div>"
         parts.append(inner)
     return "".join(parts)
@@ -184,14 +241,15 @@ def _render_success_html(
     current_section = "Overview"
     sections: dict[str, list[str]] = {current_section: []}
     for line in lines:
-        text = line.strip()
-        if not text:
+        if not line.strip():
             continue
+        text = line.strip()
         if text.startswith("--- ") and text.endswith(" ---"):
             current_section = text.strip("- ").strip()
             sections.setdefault(current_section, [])
             continue
-        sections.setdefault(current_section, []).append(text)
+        # Keep leading indent for sector digest legend lines (extra-indented helpers).
+        sections.setdefault(current_section, []).append(line)
 
     palette = ["#4285f4", "#ea4335", "#fbbc05", "#34a853"]
 
@@ -234,7 +292,8 @@ def _render_success_html(
             pipe_rows: list[list[str]] = []
             other_lines: list[str] = []
             for item in items:
-                if item.startswith("--- ") and item.endswith(" ---"):
+                stripped_item = item.strip()
+                if stripped_item.startswith("--- ") and stripped_item.endswith(" ---"):
                     continue
                 if "|" in item:
                     pipe_rows.append([x.strip() for x in item.split("|")])
@@ -303,7 +362,7 @@ def _render_success_html(
             )
         else:
             list_html = "".join(
-                f'<li style="margin:0 0 6px;">{escape(item)}</li>'
+                f'<li style="margin:0 0 6px;">{escape(item.strip())}</li>'
                 for item in items
             )
             blocks.append(

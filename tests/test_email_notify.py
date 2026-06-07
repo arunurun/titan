@@ -154,11 +154,50 @@ def test_success_html_sector_per_symbol_metrics_use_cards():
     assert html.count("border-radius:10px;padding:12px 14px") == 2
     assert "MTARTECH (NSE)" in html and "IDEAFORGE (NSE)" in html
     assert "Trend regime (14D)" in html
-    assert "text-transform:uppercase" in html
+    assert "<details" in html and "<summary" in html
     assert "▸ Trend Regime (14D)" in html
     assert "▸ Model outlook" in html
     assert "#ea4335" in html
     assert "#fbbc05" in html or "#fef7e0" in html
+
+
+def test_success_html_sector_collapsible_sections_use_details():
+    body = (
+        "--- Per-symbol metrics ---\n"
+        "RELIANCE (NSE) — HOLD — steady posture\n"
+        "  ▸ Trend Regime (14D)\n"
+        "  Trend regime (14D): Sideways\n"
+        "  ▸ 20D Money Flow\n"
+        "  Money flow trend (20D) (EOD): 0.03\n"
+        "     CMF bands: >0.05 accumulation, -0.05 to 0.05 neutral\n"
+        "  ▸ Model outlook\n"
+        "  1W outlook: 54.0 / 100 (neutral band)\n"
+        "  ▸ Context\n"
+        "  Context: flag one\n"
+    )
+    html = _render_success_html(body, subject="Titan sector")
+    assert html.count("<details") >= 4
+    assert html.count("<summary") >= 4
+    assert '▸ Model outlook</summary>' in html
+    assert html.count(" open") >= 1
+    assert "CMF bands:" in html
+    assert "font-size:11px" in html and "#80868b" in html
+
+
+def test_success_html_sector_model_outlook_section_open_by_default():
+    body = (
+        "--- Per-symbol metrics ---\n"
+        "TCS (NSE) — HOLD\n"
+        "  ▸ Trend Regime (14D)\n"
+        "  Trend regime (14D): Buy trend\n"
+        "  ▸ Model outlook\n"
+        "  1W outlook: 60.0 / 100\n"
+    )
+    html = _render_success_html(body, subject="Titan sector")
+    assert '<details open style=' in html
+    assert html.index('<details open') < html.index("▸ Model outlook")
+    trend_chunk = html.split("▸ Trend Regime (14D)")[0].rsplit("<details", 1)[-1]
+    assert " open" not in trend_chunk
 
 
 def test_success_html_sector_buy_card_is_green():
