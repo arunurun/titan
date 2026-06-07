@@ -39,10 +39,9 @@ def _html_action_colored_cell(cell: str) -> str:
     )
 
 
-def _sector_section_default_open(section_title: str) -> bool:
-    """Only Model outlook is expanded by default in sector digest cards."""
-    normalized = section_title.strip().lstrip("▸").strip().lower()
-    return normalized == "model outlook" or normalized.startswith("model outlook")
+def _html_sector_section_title(raw_title: str) -> str:
+    """Plain section label for HTML (strip digest ▸ prefix; native <summary> marker is the affordance)."""
+    return raw_title.strip().lstrip("▸").strip()
 
 
 def _sector_body_line_is_legend(line: str) -> bool:
@@ -66,7 +65,12 @@ def _html_sector_section_body_line(line: str) -> str:
 
 
 def _html_collapsible_sector_sections(body_lines: list[str]) -> str:
-    """Group sector digest body lines into Gmail-friendly <details> sections."""
+    """Group sector digest body lines into <details> sections.
+
+    All sections render with ``open`` so content stays visible when the client
+    shows a static disclosure affordance but does not support toggling (Gmail,
+    Outlook desktop). Apple Mail and browser/Glass preview can still collapse.
+    """
     parts: list[str] = []
     preamble: list[str] = []
     current_title: str | None = None
@@ -76,13 +80,13 @@ def _html_collapsible_sector_sections(body_lines: list[str]) -> str:
         nonlocal current_title, current_lines
         if current_title is None:
             return
-        open_attr = " open" if _sector_section_default_open(current_title) else ""
+        label = _html_sector_section_title(current_title)
         inner = "".join(_html_sector_section_body_line(ln) for ln in current_lines)
         parts.append(
-            f'<details{open_attr} style="margin-top:8px;border:1px solid #e8eaed;border-radius:6px;'
+            '<details open style="margin-top:8px;border:1px solid #e8eaed;border-radius:6px;'
             f'background:#fff;">'
             f'<summary style="cursor:pointer;padding:8px 10px;font-weight:600;font-size:12px;'
-            f'color:#5f6368;line-height:1.4;">{escape(current_title)}</summary>'
+            f'color:#5f6368;line-height:1.4;">{escape(label)}</summary>'
             f'<div style="padding:0 10px 8px;">{inner}</div>'
             f"</details>"
         )

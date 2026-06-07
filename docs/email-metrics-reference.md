@@ -664,6 +664,25 @@ flowchart TD
 
 ---
 
+## Collapsible HTML sections (email clients)
+
+Per-symbol digest sections (`▸ Trend Regime`, `▸ Model outlook`, etc.) render as HTML `<details>` / `<summary>` in `_html_collapsible_sector_sections` (`src/email_notify.py`). Plain-text email keeps the `▸` prefix; HTML strips it because the native disclosure marker is the toggle affordance.
+
+All `<details>` blocks include **`open` by default** so section body lines stay visible when a client draws a static triangle but does not support toggling (common in Gmail and Outlook desktop).
+
+| Client | Toggle works? | Notes |
+|--------|---------------|-------|
+| Apple Mail (macOS/iOS) | Yes | Full `<details>` support |
+| Thunderbird | Yes | Full support |
+| Gmail (web/mobile) | No / partial | Content visible because sections start open |
+| Outlook desktop (Word engine) | No | Renders as static blocks; content visible |
+| Outlook.com / new Outlook | Partial | Improving; sections still default open for safety |
+| Browser / Glass HTML preview | Yes | Same HTML as multipart alternative |
+
+Interactive collapse is a progressive enhancement; the digest remains readable in all clients.
+
+---
+
 ## Related documentation
 
 - [`docs/options-context.md`](options-context.md) — Options fetch phases, fields, and error handling.

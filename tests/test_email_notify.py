@@ -155,8 +155,8 @@ def test_success_html_sector_per_symbol_metrics_use_cards():
     assert "MTARTECH (NSE)" in html and "IDEAFORGE (NSE)" in html
     assert "Trend regime (14D)" in html
     assert "<details" in html and "<summary" in html
-    assert "▸ Trend Regime (14D)" in html
-    assert "▸ Model outlook" in html
+    assert "Trend Regime (14D)" in html
+    assert "Model outlook" in html
     assert "#ea4335" in html
     assert "#fbbc05" in html or "#fef7e0" in html
 
@@ -178,13 +178,14 @@ def test_success_html_sector_collapsible_sections_use_details():
     html = _render_success_html(body, subject="Titan sector")
     assert html.count("<details") >= 4
     assert html.count("<summary") >= 4
-    assert '▸ Model outlook</summary>' in html
-    assert html.count(" open") >= 1
+    assert "Model outlook</summary>" in html
+    assert html.count('<details open style=') >= 4
     assert "CMF bands:" in html
     assert "font-size:11px" in html and "#80868b" in html
 
 
-def test_success_html_sector_model_outlook_section_open_by_default():
+def test_success_html_sector_details_open_for_email_client_compat():
+    """All <details> start open so Gmail/Outlook show body even when toggle is static."""
     body = (
         "--- Per-symbol metrics ---\n"
         "TCS (NSE) — HOLD\n"
@@ -194,10 +195,9 @@ def test_success_html_sector_model_outlook_section_open_by_default():
         "  1W outlook: 60.0 / 100\n"
     )
     html = _render_success_html(body, subject="Titan sector")
-    assert '<details open style=' in html
-    assert html.index('<details open') < html.index("▸ Model outlook")
-    trend_chunk = html.split("▸ Trend Regime (14D)")[0].rsplit("<details", 1)[-1]
-    assert " open" not in trend_chunk
+    assert html.count('<details open style=') == 2
+    assert "Trend regime (14D): Buy trend" in html
+    assert "1W outlook: 60.0 / 100" in html
 
 
 def test_success_html_sector_buy_card_is_green():
