@@ -45,7 +45,9 @@ Icons are **display helpers** in `_metric_icon`, `_ema200_distance_icon`, etc. (
 | 1W outlook percentile | Next-week score vs sector peers | 🟢 leader / 🔴 laggard / 🟡 average |
 | 1D move (EOD) | Last complete close-to-close return | 🟢 ≥+1% / 🔴 ≤−1% / 🟡 muted |
 | Session move (live) | Intraday vs previous close (quote) | same bands; display only |
-| 1D z-score | Blended rolling z-score of close | 🟢 ≥+1 / 🔴 ≤−1 / 🟡 near mean |
+| 1D z-score (20D window) | Fast rolling z-score of close (20 sessions) | 🟢 ≥+1 / 🔴 ≤−1 / 🟡 near mean |
+| 1D z-score (60D window) | Slow rolling z-score (~60 sessions; when history ≥45 bars) | same bands |
+| 1D z-score (blend, scoring) | 55% fast + 45% slow (or fast-only when &lt;45 bars); drives intent / Layer C | same bands |
 | ATR14 % | Typical daily swing as % of price | 🟢 calm / 🔴 elevated / 🟡 moderate |
 | ATR14 / ATR63 | Volatility vs ~3-month baseline | 🟢 low / 🔴 high / 🟡 normal |
 | Technical intent | Equity technical composite (0–100) | 🟢 ≥55 / 🔴 ≤45 / 🟡 neutral |
@@ -176,6 +178,8 @@ CMF = sum(MFV, 20) / sum(volume, 20)
 
 **Lookback:** 20 sessions.
 
+**Dual-row display (open session, incomplete bar):** When the cash session is open and today’s bar is incomplete, the digest shows an **EOD** row from `cmf_20` on `metrics_df` (last complete bar) and a **live** row from `session_cmf_20` (CMF on `sorted_df` including today’s partial bar, with last-bar close patched from the live quote). Live rows require `price_snapshot_ts`. Band legend appears once after both rows. Scoring and signal v2 still use EOD `cmf_20` only.
+
 **Email threshold bands** (`_cmf_band`)
 
 | CMF | Band | Icon |
@@ -209,9 +213,9 @@ avg = mean(volume[-6:-1])   # prior 5 sessions, excluding today
 ratio = current / avg
 ```
 
-**Scoring input (used in intent):** `_calibrate_volume_participation_v2` caps raw ratio (default cap 2.5), then `_normalize_participation_for_scoring` log-compresses to ~0–3.
+**Scoring input (used in intent):** `_calibrate_volume_participation_v2` caps raw ratio (default cap 2.5), then `_normalize_participation_for_scoring` log-compresses to ~0–3. Intent and signal v2 use the calibrated EOD path only.
 
-**Email display note:** The digest prefers `volume_participation_for_scoring` (calibrated) via `_volume_participation_for_digest_label`, but labels it with “x” and the same ratio-style bands. Values are on the **scoring scale (~0–3)**, not always the raw volume ratio.
+**Dual-row display (open session, incomplete bar):** **EOD** row shows raw `volume_participation_ratio` from `metrics_df`. **Live** row shows `session_volume_participation_ratio` (partial today volume from `sorted_df` ÷ mean of the last 5 complete sessions on `metrics_df`). Live rows require `price_snapshot_ts`. Band legend appears once after both rows.
 
 **Lookback:** 5 prior sessions for denominator; stress proxies use **raw** `volume_participation_ratio`.
 
@@ -320,22 +324,32 @@ The digest shows **two distinct price-change metrics** when the cash session is 
 
 ### 9. 1D z-score
 
-**What it measures:** How many standard deviations today’s close is from its recent mean — blended short/long window for equities.
+**What it measures:** How many standard deviations today’s close is from its recent mean — shown as three digest rows (20D window, optional 60D window, blend for scoring).
 
 **Calculation**
 
 1. Base: `calculate_z_score(close, window)` — population std, `src/titan_engine.py`.
 2. Blend: `_blend_equity_z_score` — `src/sector_audit.py`
-   - Always compute 20d (or max available) z_fast.
-   - If &lt; 45 sessions: use z_fast only (`z_score_blend = "20d_only"`).
-   - Else: `z = 0.55 * z_fast + 0.45 * z_slow` with slow window ≈ 60 sessions.
+   - Always compute 20d (or max available) `z_score_fast_20`.
+   - If &lt; 45 sessions: use z_fast only (`z_score_blend = "20d_only"`); `z_score_slow` is NaN and the 60D email row is omitted.
+   - Else: `z_score = 0.55 * z_fast + 0.45 * z_slow` with slow window ≈ 60 sessions (`z_score_slow`).
 
 **Lookback:** 20d fast; up to ~60d slow when history allows.
+
+**Email format** (`_format_symbol_metrics_line_simple`, `▸ 1D / Tape`):
+
+```
+🟢⬆ 1D z-score (20D window): +2.10 (strong bullish deviation) · as of 2026-06-06
+🟢⬆ 1D z-score (60D window): +1.40 (bullish deviation) · as of 2026-06-06   # omitted when history <45 bars
+   Z bands: >=+2 strong bullish, +1 to +2 bullish, -1 to +1 near mean, -2 to -1 bearish, <=-2 strong bearish
+🟢⬆ 1D z-score (blend, scoring): +1.80 (bullish deviation) · as of 2026-06-06
+```
 
 **Email labels** (`_z_label`): ≥+2 strong bullish; +1 to +2 bullish; −1 to +1 near mean; −2 to −1 bearish; ≤−2 strong bearish.
 
 **Role in analysis**
 
+- **Scoring uses blend only:** `z_score` (not the individual window rows).
 - **Technical intent:** 52% weight after tanh normalization.
 - **Layer C:** Downside-only z ramp (−1 → −2 adds up to 2 risk points).
 
@@ -626,8 +640,9 @@ flowchart TD
 |-------|------|
 | Hysteresis | Defined in Layer E but **inactive in production** — `prev_action_signal` is not populated outside backtests. |
 | Session move | Live quote metric; **not** used in signal scoring (v1). |
+| CMF / VPR live rows | Display-only (`session_cmf_20`, `session_volume_participation_ratio`); scoring uses EOD fields. |
 | EOD as-of | Email subject/footer may include earliest `ohlc_bar_as_of_date` across symbols. |
-| Volume participation in email | May show **scoring-scale** value while label says “x” (ratio wording). |
+| Volume participation in email | Digest shows **raw** `volume_participation_ratio` (EOD) and `session_volume_participation_ratio` (live); scoring still uses calibrated EOD input. |
 | 20D range / ATR ratio | Display-only; not in v2 CORE_METRICS. |
 | ADX smoothing | Simple rolling sums/means, not classic Wilder EMA. |
 | Accumulate label | Collapses to HOLD unless `TITAN_SIGV2_ENABLE_ACCUMULATE` is set. |

@@ -187,9 +187,10 @@ def test_symbol_digest_default_shows_neutral_na_for_missing_new_metrics(monkeypa
     assert "20D Range Position: n/a% to 20D high \u00b7 n/a% above 20D low (near-high (within ~1% of 20D high); thresholds: near-high >=-1%, near-low <=1%)" in text
     assert "Volatility vs 3M baseline: n/ax (n/a; bands: <0.90 low, 0.90-1.10 normal, >1.10 high)" in text
     assert (
-        "Money flow trend (20D): n/a "
-        "(n/a; bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution)" in text
+        "Money flow trend (20D) (EOD): n/a (n/a) · as of n/a" in text
     )
+    assert "   CMF bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution" in text
+    assert "Volume participation (EOD): 1.10x (above-avg) · as of n/a" in text
     assert "News correlation unavailable: correlation metadata missing" in text
 
 
@@ -1607,6 +1608,114 @@ def test_format_symbol_metrics_dual_move_lines(monkeypatch):
     assert "🔴⬇ Session move (live): -2.10% · as of 14:32 IST" in text
 
 
+def test_format_symbol_metrics_triple_z_score_lines_both_windows(monkeypatch):
+    monkeypatch.delenv("TITAN_DIGEST_VERBOSE_SYMBOLS", raising=False)
+    from sector_audit import _format_symbol_metrics_line
+
+    audit = {
+        "effective_intent_score": 50.0,
+        "z_score": 1.8,
+        "z_score_fast_20": 2.1,
+        "z_score_slow": 1.4,
+        "z_score_blend": "55%_20d_45%_60d",
+        "volume_participation_ratio": 1.0,
+        "return_1d_pct": 1.0,
+        "ohlc_bar_as_of_date": "2026-06-06",
+        "atr_14_pct": 2.0,
+        "next_week_score": 55.0,
+        "sell_signal": "hold",
+        "sell_signal_reasons": [],
+        "prediction_breakdown": {"week": {}, "day": {}, "penalties": []},
+    }
+    text = _format_symbol_metrics_line(
+        {"symbol": "TAPE", "exchange": "NSE", "audit": audit}
+    )
+    assert (
+        "🟢⬆ 1D z-score (20D window): +2.10 (strong bullish deviation) · as of 2026-06-06"
+        in text
+    )
+    assert (
+        "🟢⬆ 1D z-score (60D window): +1.40 (bullish deviation) · as of 2026-06-06"
+        in text
+    )
+    assert (
+        "   Z bands: >=+2 strong bullish, +1 to +2 bullish, -1 to +1 near mean, "
+        "-2 to -1 bearish, <=-2 strong bearish"
+    ) in text
+    assert (
+        "🟢⬆ 1D z-score (blend, scoring): +1.80 (bullish deviation) · as of 2026-06-06"
+        in text
+    )
+    assert "1D z-score: " not in text
+
+
+def test_format_symbol_metrics_triple_z_score_short_history_no_60d(monkeypatch):
+    monkeypatch.delenv("TITAN_DIGEST_VERBOSE_SYMBOLS", raising=False)
+    from sector_audit import _format_symbol_metrics_line
+
+    audit = {
+        "effective_intent_score": 50.0,
+        "z_score": 0.9,
+        "z_score_fast_20": 0.9,
+        "z_score_slow": float("nan"),
+        "z_score_blend": "20d_only",
+        "volume_participation_ratio": 1.0,
+        "return_1d_pct": 0.5,
+        "ohlc_bar_as_of_date": "2026-06-06",
+        "atr_14_pct": 2.0,
+        "next_week_score": 55.0,
+        "sell_signal": "hold",
+        "sell_signal_reasons": [],
+        "prediction_breakdown": {"week": {}, "day": {}, "penalties": []},
+    }
+    text = _format_symbol_metrics_line(
+        {"symbol": "TAPE", "exchange": "NSE", "audit": audit}
+    )
+    assert "1D z-score (20D window):" in text
+    assert "1D z-score (60D window):" not in text
+    assert "1D z-score (blend, scoring):" in text
+    assert (
+        "   Z bands: >=+2 strong bullish, +1 to +2 bullish, -1 to +1 near mean, "
+        "-2 to -1 bearish, <=-2 strong bearish"
+    ) in text
+    z_section = text.split("▸ 1D / Tape")[1].split("▸ Model outlook")[0]
+    assert z_section.index("(20D window)") < z_section.index("Z bands:")
+    assert z_section.index("Z bands:") < z_section.index("(blend, scoring)")
+
+
+def test_format_symbol_metrics_dual_cmf_vpr_lines(monkeypatch):
+    monkeypatch.delenv("TITAN_DIGEST_VERBOSE_SYMBOLS", raising=False)
+    from sector_audit import _format_symbol_metrics_line
+
+    audit = {
+        "effective_intent_score": 50.0,
+        "z_score": 0.5,
+        "cmf_20": -0.254,
+        "session_cmf_20": -0.03,
+        "volume_participation_ratio": 1.42,
+        "volume_participation_for_scoring": 2.1,
+        "session_volume_participation_ratio": 0.85,
+        "ohlc_bar_as_of_date": "2026-06-06",
+        "price_snapshot_ts": "06-Jun-2026 14:32:00",
+        "return_1d_pct": 1.0,
+        "atr_14_pct": 2.0,
+        "next_week_score": 55.0,
+        "sell_signal": "hold",
+        "sell_signal_reasons": [],
+        "prediction_breakdown": {"week": {}, "day": {}, "penalties": []},
+    }
+    text = _format_symbol_metrics_line(
+        {"symbol": "TAPE", "exchange": "NSE", "audit": audit}
+    )
+    assert "🔴⬇ Money flow trend (20D) (EOD): -0.254 (distribution) · as of 2026-06-06" in text
+    assert "🟡➡ Money flow trend (live): -0.030 (neutral) · as of 14:32 IST" in text
+    assert "   CMF bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution" in text
+    assert "🟡➡ Volume participation (EOD): 1.42x (above-avg) · as of 2026-06-06" in text
+    assert "🟡➡ Volume participation (live): 0.85x (below-avg) · as of 14:32 IST" in text
+    assert "   VPR bands: >=1.5 high, 1.0-1.49 above-avg, 0.7-0.99 below-avg, <0.7 thin" in text
+    assert "2.10x" not in text
+
+
 def test_build_equity_live_audit_uses_prior_bar_when_session_incomplete(monkeypatch):
     from sector_audit import build_equity_live_audit
 
@@ -1638,14 +1747,17 @@ def test_build_equity_live_audit_uses_prior_bar_when_session_incomplete(monkeypa
         "brain.generate_titan_narrative",
         lambda audit, api_key=None, api_keys=None: "",
     )
+    metrics_df = df.iloc[:-1].reset_index(drop=True)
     monkeypatch.setattr(
         "sector_audit._prepare_ohlc_for_metrics",
         lambda raw_df, now_ist=None: (
-            raw_df.iloc[:-1].reset_index(drop=True),
+            metrics_df,
             {
                 "ohlc_bar_as_of_date": "2026-06-05",
                 "ohlc_bar_incomplete": True,
                 "session_open": True,
+                "sorted_df": raw_df,
+                "metrics_df": metrics_df,
             },
         ),
     )
@@ -1663,3 +1775,6 @@ def test_build_equity_live_audit_uses_prior_bar_when_session_incomplete(monkeypa
     assert abs(audit["return_1d_pct"] - ((105.0 / 100.0) - 1.0) * 100.0) < 0.01
     assert abs(audit["session_move_vs_prev_close_pct"] + 2.0) < 0.5
     assert audit["price_snapshot_ts"] == "06-Jun-2026 14:32:00"
+    assert not math.isnan(audit["session_cmf_20"])
+    assert not math.isnan(audit["session_volume_participation_ratio"])
+    assert audit["session_volume_participation_ratio"] == pytest.approx(0.5, rel=0.01)

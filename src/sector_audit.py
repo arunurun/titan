@@ -174,6 +174,72 @@ def _session_move_from_quote(quote: dict[str, Any]) -> tuple[float, str | None]:
     return pct, ts
 
 
+def _session_cmf_20_from_ohlc(sorted_df: Any, quote: dict[str, Any] | None) -> float:
+    """Display-only CMF on frame including today's partial bar; patches close from quote."""
+    from titan_engine import calculate_cmf
+
+    if sorted_df is None or getattr(sorted_df, "empty", True):
+        return float("nan")
+    df = sorted_df
+    if quote:
+        ltp = _safe_float(quote.get("ltp"))
+        if not math.isnan(ltp):
+            df = sorted_df.copy()
+            last_idx = df.index[-1]
+            df.at[last_idx, "close"] = ltp
+            for col, qkey in (("high", "high"), ("low", "low")):
+                if col in df.columns:
+                    qv = _safe_float(quote.get(qkey))
+                    if not math.isnan(qv):
+                        df.at[last_idx, col] = qv
+            if "high" in df.columns:
+                h = _safe_float(df.at[last_idx, "high"])
+                if not math.isnan(h):
+                    df.at[last_idx, "high"] = max(h, ltp)
+            if "low" in df.columns:
+                lo = _safe_float(df.at[last_idx, "low"])
+                if not math.isnan(lo):
+                    df.at[last_idx, "low"] = min(lo, ltp)
+    return calculate_cmf(df, window=20)
+
+
+def _session_volume_participation_ratio(sorted_df: Any, metrics_df: Any) -> float:
+    """Display-only VPR: partial today volume vs mean of prior 5 complete sessions."""
+    import pandas as pd
+
+    for frame in (sorted_df, metrics_df):
+        if frame is None or getattr(frame, "empty", True) or "volume" not in frame.columns:
+            return float("nan")
+    live_vol = pd.to_numeric(sorted_df["volume"], errors="coerce").dropna()
+    prior_vol = pd.to_numeric(metrics_df["volume"], errors="coerce").dropna()
+    if live_vol.empty or prior_vol.empty:
+        return float("nan")
+    current = float(live_vol.iloc[-1])
+    tail = prior_vol.tail(5)
+    avg = float(tail.mean()) if not tail.empty else float(prior_vol.mean())
+    if avg == 0.0:
+        return float("inf") if current > 0 else 0.0
+    return current / avg
+
+
+def _volume_participation_label_short(vpr: Any) -> str:
+    try:
+        v = float(vpr)
+    except (TypeError, ValueError):
+        return "unknown"
+    if math.isnan(v):
+        return "unknown"
+    if math.isinf(v) and v > 0:
+        return "extreme"
+    if v >= 1.5:
+        return "high"
+    if v >= 1.0:
+        return "above-avg"
+    if v >= 0.7:
+        return "below-avg"
+    return "thin"
+
+
 def _z_label(z: Any) -> str:
     try:
         v = float(z)
@@ -913,7 +979,6 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     audit = result["audit"]
     z = audit.get("z_score")
     intent = audit.get("effective_intent_score", audit.get("intent_score"))
-    vpr_label_src = _volume_participation_for_digest_label(audit)
     ret1d = audit.get("return_1d_pct")
     atr_pct = audit.get("atr_14_pct")
     adx_14 = audit.get("adx_14")
@@ -978,16 +1043,48 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     )
 
     lines_out.append("▸ 20D Money Flow")
+    ohlc_as_of_mf = str(audit.get("ohlc_bar_as_of_date") or "").strip()
+    mf_eod_as_of = ohlc_as_of_mf if ohlc_as_of_mf else "n/a"
+    cmf_proxy_suffix = f" [{cmf_label} proxy]" if cmf_label != "CMF20" else ""
     lines_out.append(
         f"{_metric_icon(cmf_val, bullish_above=0.05, bearish_below=-0.05)} "
-        f"Money flow trend (20D): {_fmt_metric(cmf_val, 3)} "
-        f"({_cmf_band(cmf_val)}; bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution)"
-        + (f" [{cmf_label} proxy]" if cmf_label != "CMF20" else "")
+        f"Money flow trend (20D) (EOD): {_fmt_metric(cmf_val, 3)} "
+        f"({_cmf_band(cmf_val)}){cmf_proxy_suffix} · as of {mf_eod_as_of}"
     )
+    session_cmf = audit.get("session_cmf_20")
+    if (
+        cmf_label == "CMF20"
+        and audit.get("price_snapshot_ts")
+        and not math.isnan(_safe_float(session_cmf))
+    ):
+        snap_cmf = _format_price_snapshot_ist(audit.get("price_snapshot_ts"))
+        session_cmf_f = _safe_float(session_cmf)
+        lines_out.append(
+            f"{_metric_icon(session_cmf_f, bullish_above=0.05, bearish_below=-0.05)} "
+            f"Money flow trend (live): {_fmt_metric(session_cmf_f, 3)} "
+            f"({_cmf_band(session_cmf_f)}) · as of {snap_cmf}"
+        )
     lines_out.append(
-        f"{_metric_icon(vpr_label_src, bullish_above=1.5, bearish_below=0.7)} "
-        f"Volume participation: {_fmt_metric(vpr_label_src)}x "
-        f"({_volume_participation_label(vpr_label_src)}; bands: >=1.5 high, 1.0-1.49 above-avg, 0.7-0.99 below-avg, <0.7 thin)"
+        "   CMF bands: >0.05 accumulation, -0.05 to 0.05 neutral, < -0.05 distribution"
+    )
+    vpr_eod = audit.get("volume_participation_ratio", audit.get("absorption_ratio"))
+    vpr_eod_f = _safe_float(vpr_eod)
+    lines_out.append(
+        f"{_metric_icon(vpr_eod_f, bullish_above=1.5, bearish_below=0.7)} "
+        f"Volume participation (EOD): {_fmt_metric(vpr_eod)}x "
+        f"({_volume_participation_label_short(vpr_eod)}) · as of {mf_eod_as_of}"
+    )
+    session_vpr = audit.get("session_volume_participation_ratio")
+    if audit.get("price_snapshot_ts") and not math.isnan(_safe_float(session_vpr)):
+        snap_vpr = _format_price_snapshot_ist(audit.get("price_snapshot_ts"))
+        session_vpr_f = _safe_float(session_vpr)
+        lines_out.append(
+            f"{_metric_icon(session_vpr_f, bullish_above=1.5, bearish_below=0.7)} "
+            f"Volume participation (live): {_fmt_metric(session_vpr)}x "
+            f"({_volume_participation_label_short(session_vpr)}) · as of {snap_vpr}"
+        )
+    lines_out.append(
+        "   VPR bands: >=1.5 high, 1.0-1.49 above-avg, 0.7-0.99 below-avg, <0.7 thin"
     )
     sp_int = audit.get("sector_pctile_effective_intent")
     lines_out.append(
@@ -1016,10 +1113,28 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
             f"{_metric_icon(session_move, bullish_above=1.0, bearish_below=-1.0)} "
             f"Session move (live): {_fmt_signed_pct(session_move)}% · as of {snap}"
         )
+    z_fast = audit.get("z_score_fast_20", z)
+    z_slow = audit.get("z_score_slow")
+    z_bands = (
+        "   Z bands: >=+2 strong bullish, +1 to +2 bullish, -1 to +1 near mean, "
+        "-2 to -1 bearish, <=-2 strong bearish"
+    )
+    lines_out.append(
+        f"{_metric_icon(z_fast, bullish_above=1.0, bearish_below=-1.0)} "
+        f"1D z-score (20D window): {_fmt_signed_pct(z_fast)} "
+        f"({_z_label(z_fast)}) · as of {eod_as_of}"
+    )
+    if math.isfinite(_safe_float(z_slow)):
+        lines_out.append(
+            f"{_metric_icon(z_slow, bullish_above=1.0, bearish_below=-1.0)} "
+            f"1D z-score (60D window): {_fmt_signed_pct(z_slow)} "
+            f"({_z_label(z_slow)}) · as of {eod_as_of}"
+        )
+    lines_out.append(z_bands)
     lines_out.append(
         f"{_metric_icon(z, bullish_above=1.0, bearish_below=-1.0)} "
-        f"1D z-score: {_fmt_metric(z)} "
-        f"({_z_label(z)}; bands: >=+2 / +1 to +2 / -1 to +1 / -2 to -1 / <=-2)"
+        f"1D z-score (blend, scoring): {_fmt_signed_pct(z)} "
+        f"({_z_label(z)}) · as of {eod_as_of}"
     )
     atr_icon = "🟡➡"
     atr_v = _safe_float(atr_pct)
@@ -2566,7 +2681,10 @@ def build_equity_live_audit(
             gap_down_proxy = bool(((open_last / close_prev) - 1.0) * 100.0 <= -1.5)
     event_info = _event_flags_for_symbol(inst.symbol, event_snapshot)
     session_move_pct = float("nan")
+    session_cmf_20 = float("nan")
+    session_volume_participation_ratio = float("nan")
     price_snapshot_ts: str | None = None
+    sorted_df = ohlc_meta.get("sorted_df")
     if ohlc_meta.get("session_open"):
         try:
             quote = fetch_equity_quote(
@@ -2577,6 +2695,12 @@ def build_equity_live_audit(
             )
             if quote:
                 session_move_pct, price_snapshot_ts = _session_move_from_quote(quote)
+                if ohlc_meta.get("ohlc_bar_incomplete") and sorted_df is not None:
+                    session_cmf_20 = _session_cmf_20_from_ohlc(sorted_df, quote)
+                    session_volume_participation_ratio = _session_volume_participation_ratio(
+                        sorted_df,
+                        ohlc_meta.get("metrics_df", df),
+                    )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Live quote unavailable for %s (%s): %s",
@@ -2596,6 +2720,8 @@ def build_equity_live_audit(
         "ohlc_bar_as_of_date": ohlc_meta.get("ohlc_bar_as_of_date"),
         "ohlc_bar_incomplete": bool(ohlc_meta.get("ohlc_bar_incomplete")),
         "session_move_vs_prev_close_pct": session_move_pct,
+        "session_cmf_20": session_cmf_20,
+        "session_volume_participation_ratio": session_volume_participation_ratio,
         "price_snapshot_ts": price_snapshot_ts,
         "z_score": z,
         "z_score_fast_20": z_fast,
