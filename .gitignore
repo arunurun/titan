@@ -40,3 +40,6 @@ Thumbs.db
 
 node_modules/
 
+
+# Local reference (not in repo)
+Fixes.pdf
