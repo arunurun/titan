@@ -187,6 +187,25 @@ def test_render_success_html_sector_options_section():
     assert "Index spot 23366.70" in html
 
 
+def test_success_html_per_symbol_options_context_preserved_in_card():
+    body = (
+        "--- Per-symbol metrics ---\n"
+        "INDUSTOWER (NSE) — Hold\n"
+        "▸ Options context\n"
+        "  PCR 0.76 | put wall 22500 | call wall 24000 | expiry 2026-06-09T06:00:00.000Z\n"
+        "  Spot 435.50 | vs put wall +3.57% | vs call wall -1.14%\n"
+        "  options: low put/call OI (call-heavy positioning)\n"
+        "▸ Model outlook\n"
+        "1W outlook: 54.0 / 100 (neutral band)\n"
+    )
+    html = _render_success_html(body, subject="Titan sector")
+    assert "PCR 0.76" in html
+    assert "put wall 22500" in html
+    assert "Spot 435.50" in html
+    assert "call-heavy positioning" in html
+    assert "INDUSTOWER (NSE)" in html
+
+
 def test_render_success_html_verbose_gate_preserves_sector_options():
     body = (
         "--- Prediction quality gate ---\n"

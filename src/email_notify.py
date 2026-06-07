@@ -254,15 +254,23 @@ def _render_success_html(
             blocks.append(card(name, "".join(parts) if parts else "<p>No data.</p>", color=color))
             continue
         if name.lower() == "per-symbol metrics":
+            filtered_items = [
+                item
+                for item in items
+                if not (item.startswith("--- ") and item.endswith(" ---"))
+            ]
+            # Pipe tables (portfolio digest) live in the preamble before symbol headlines.
+            # Per-symbol card lines also use "|" (options PCR/wall rows) and must stay in cards.
+            preamble, sym_blocks = _split_sector_per_symbol_digest_blocks(filtered_items)
             pipe_rows: list[list[str]] = []
             other_lines: list[str] = []
-            for item in items:
-                if item.startswith("--- ") and item.endswith(" ---"):
-                    continue
+            for item in preamble:
                 if "|" in item:
                     pipe_rows.append([x.strip() for x in item.split("|")])
                 else:
                     other_lines.append(item)
+            for block in sym_blocks:
+                other_lines.extend(block)
             parts: list[str] = []
             if pipe_rows and len({len(r) for r in pipe_rows}) == 1:
                 ncol = len(pipe_rows[0])
