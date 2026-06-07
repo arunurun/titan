@@ -58,9 +58,35 @@ Workflow runs **weekdays** during **09:15–15:30 IST** (crons are **UTC**; see 
 
 If ICICI ever documents an unattended session API, you could wire a small job to update `session_config`—until then, keep the human-in-the-loop step.
 
-## Optional: email after each successful `--live`
+## Optional: sector digest / audit email (SMTP)
 
-Set `SMTP_HOST`, `SMTP_PORT` (default 587), `SMTP_USER`, `SMTP_PASSWORD`, `EMAIL_FROM`, `EMAIL_TO` (comma-separated). Same post text as Supabase. In GitHub, add matching **repository secrets** (see `market_audit.yml` `Live market audit` env).
+Sector digests (`--sector-digest`, `--all-sectors`, custom/portfolio modes) call `send_success_post_email` in `src/email_notify.py`. Same SMTP env as `--live` and failure/action alerts.
+
+**GitHub → Settings → Secrets and variables → Actions** — set these repository secrets (no code change required):
+
+| Secret | Example (Gmail) |
+|--------|-----------------|
+| `SMTP_HOST` | `smtp.gmail.com` |
+| `SMTP_PORT` | `587` |
+| `SMTP_USER` | `arunjain.real@gmail.com` |
+| `SMTP_PASSWORD` | 16-character Google **App Password** (not your login password) |
+| `EMAIL_FROM` | `arunjain.real@gmail.com` (must match `SMTP_USER` for Gmail) |
+| `EMAIL_TO` | `mindpixel111@gmail.com` (comma-separated for multiple recipients) |
+| `SMTP_USE_TLS` | `true` (optional; default in code is true) |
+
+**Gmail setup:** enable 2-Step Verification on the sender account, then create an App Password at [Google Account → Security → App passwords](https://myaccount.google.com/apppasswords). Paste the app password into `SMTP_PASSWORD` (spaces are stripped automatically).
+
+Workflows that pass these secrets: `run_titan_now.yml`, `market_audit.yml`, `daily_post_market_reconcile.yml`, `validate_breeze_token_manual.yml`.
+
+**Local test:** copy values into project-root `.env` (never commit), then:
+
+```powershell
+python -m pytest tests/test_email_notify.py -q
+# Optional live send (requires real SMTP_* / EMAIL_* in .env):
+python -c "import sys; sys.path.insert(0,'src'); from email_notify import send_success_post_email; print(send_success_post_email('Titan SMTP test'))"
+```
+
+**CI test:** Actions → **Run Titan Now** → mode `sector`, sector e.g. `defence`, small `max_symbols` if desired. Check job log for `Sent audit email to` or `Email notify skipped` / `SMTP send failed`.
 
 ## Optional: all-sector consolidated email
 
