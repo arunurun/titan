@@ -15,6 +15,19 @@ SECTORS_DIR = ROOT / "data" / "sectors"
 
 _EXCHANGES = frozenset({"NSE", "BSE"})
 
+# Legacy Supabase sector_catalog keys that are stock symbols or renamed sectors.
+_SECTOR_ALIASES: dict[str, str] = {
+    "tejasnet": "telecom",
+}
+
+
+def resolve_sector_key(sector_id: str) -> str:
+    """Return canonical sector_key (lowercase), applying known aliases."""
+    sid = sector_id.strip().lower()
+    if not sid:
+        raise ValueError("sector_id must be non-empty")
+    return _SECTOR_ALIASES.get(sid, sid)
+
 
 @dataclass(frozen=True)
 class SectorInstrument:
@@ -38,9 +51,7 @@ def load_sector_instruments(
     if cap is not None and cap < 0:
         raise ValueError("max_symbols must be >= 0")
 
-    sid = sector_id.strip().lower()
-    if not sid:
-        raise ValueError("sector_id must be non-empty")
+    sid = resolve_sector_key(sector_id)
 
     supabase_error: str | None = None
     try:
@@ -204,4 +215,16 @@ def list_active_sector_ids(*, include_unknown: bool = True) -> list[str]:
         sectors = sorted(p.stem.strip().lower() for p in SECTORS_DIR.glob("*.csv") if p.stem.strip())
     if not include_unknown:
         sectors = [s for s in sectors if s != "unknown"]
-    return sectors
+    return _dedupe_canonical_sector_keys(sectors)
+
+
+def _dedupe_canonical_sector_keys(sectors: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for sector in sectors:
+        canonical = resolve_sector_key(sector)
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        out.append(canonical)
+    return out

@@ -2232,6 +2232,9 @@ def load_priority_instruments(
     Tries today's IST ``as_of_date`` first, then the latest date with priority rows
     (weekend refresh may not have run yet on a new calendar day).
     """
+    from sector_registry import resolve_sector_key
+
+    sector_key = resolve_sector_key(sector_key)
     client = create_client(cfg.supabase_url, cfg.supabase_key)
     as_of_today = datetime.now(IST).date().isoformat()
     try:

@@ -2955,6 +2955,12 @@ def run_sector_live(
 ) -> str:
     from email_notify import send_success_post_email
     from breeze_client import create_breeze_session
+    from sector_registry import resolve_sector_key
+
+    raw_sector_id = sector_id
+    sector_id = resolve_sector_key(sector_id)
+    if sector_id != raw_sector_id.strip().lower():
+        logger.info("Resolved sector alias %r -> %r", raw_sector_id, sector_id)
 
     cfg = load_config()
     # Preflight Breeze auth once to fail fast on expired tokens.

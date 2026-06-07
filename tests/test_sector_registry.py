@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from sector_registry import SectorInstrument, list_active_sector_ids, load_sector_instruments, load_sector_symbols
+from sector_registry import SectorInstrument, list_active_sector_ids, load_sector_instruments, load_sector_symbols, resolve_sector_key
 
 
 class _FakeQuery:
@@ -163,3 +163,32 @@ def test_list_active_sector_ids_from_csv_fallback(monkeypatch, tmp_path: Path):
     monkeypatch.delenv("SUPABASE_KEY", raising=False)
     out = list_active_sector_ids(include_unknown=True)
     assert out == ["auto", "defence"]
+
+
+def test_resolve_sector_key_maps_tejasnet_to_telecom():
+    assert resolve_sector_key("tejasnet") == "telecom"
+    assert resolve_sector_key("TEJASNET") == "telecom"
+    assert resolve_sector_key("telecom") == "telecom"
+
+
+def test_list_active_sector_ids_dedupes_aliases(monkeypatch):
+    _mock_supabase(
+        monkeypatch,
+        [{"sector_key": "tejasnet"}, {"sector_key": "telecom"}, {"sector_key": "defence"}],
+    )
+    out = list_active_sector_ids(include_unknown=False)
+    assert out == ["defence", "telecom"]
+
+
+def test_load_sector_instruments_resolves_alias(monkeypatch, tmp_path: Path):
+    sectors_dir = tmp_path / "sectors"
+    sectors_dir.mkdir(parents=True, exist_ok=True)
+    (sectors_dir / "telecom.csv").write_text(
+        "symbol,exchange\nTEJASNET,NSE\nBHARTIARTL,NSE\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("sector_registry.SECTORS_DIR", sectors_dir)
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_KEY", raising=False)
+    out = load_sector_symbols("tejasnet")
+    assert out == ["TEJASNET", "BHARTIARTL"]
