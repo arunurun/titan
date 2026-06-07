@@ -542,6 +542,10 @@ def build_symbol_daily_feature(
         "reconcile_signal_transition": audit.get("reconcile_signal_transition"),
         "reconcile_news_summary": audit.get("reconcile_news_summary"),
         "news_correlation": audit.get("news_correlation"),
+        "ohlc_bar_as_of_date": audit.get("ohlc_bar_as_of_date"),
+        "ohlc_bar_incomplete": audit.get("ohlc_bar_incomplete"),
+        "session_move_vs_prev_close_pct": audit.get("session_move_vs_prev_close_pct"),
+        "price_snapshot_ts": audit.get("price_snapshot_ts"),
     }
 
     vpr = audit.get("volume_participation_ratio", audit.get("absorption_ratio"))

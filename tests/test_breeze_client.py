@@ -9,6 +9,7 @@ from breeze_client import (
     _rate_limited_historical_call,
     create_breeze_session,
     fetch_equity_data,
+    fetch_equity_quote,
     fetch_nifty_data,
     fetch_nifty_option_metrics,
     fetch_nifty_option_metrics_with_expiry_fallback,
@@ -320,6 +321,94 @@ def test_fetch_nifty_option_metrics_with_fallback_degrades_gracefully():
     m = fetch_nifty_option_metrics_with_expiry_fallback(breeze, max_expiry_tries=2)
     assert m.get("option_chain_unavailable") is True
     assert m["put_oi"] == 0.0 and m["call_oi"] == 0.0
+
+
+@patch("breeze_client.BreezeConnect")
+def test_fetch_equity_quote_normalizes_fields(mock_breeze_cls, monkeypatch):
+    monkeypatch.setattr(
+        "breeze_client.resolve_breeze_stock_code",
+        lambda sym, ex: sym.strip().upper(),
+    )
+    api = MagicMock()
+    api.get_quotes.return_value = {
+        "Success": [
+            {
+                "exchange_code": "NSE",
+                "ltp": 101.5,
+                "previous_close": 100.0,
+                "ltp_percent_change": 1.5,
+                "ltt": "06-Jun-2026 14:32:00",
+                "open": 99.0,
+                "high": 102.0,
+                "low": 98.5,
+            },
+            {"exchange_code": "NA", "ltp": 0.0},
+        ],
+    }
+    mock_breeze_cls.return_value = api
+
+    quote = fetch_equity_quote(make_cfg(), "RELIANCE", "NSE", breeze=api, max_retries=0)
+
+    assert quote["ltp"] == 101.5
+    assert quote["previous_close"] == 100.0
+    assert quote["ltp_percent_change"] == 1.5
+    assert quote["ltt"] == "06-Jun-2026 14:32:00"
+    assert quote["open"] == 99.0
+    call_kw = api.get_quotes.call_args[1]
+    assert call_kw["product_type"] == "cash"
+    assert call_kw["stock_code"] == "RELIANCE"
+
+
+@patch("breeze_client.BreezeConnect")
+def test_fetch_equity_quote_no_data_returns_empty(mock_breeze_cls, monkeypatch):
+    monkeypatch.setattr(
+        "breeze_client.resolve_breeze_stock_code",
+        lambda sym, ex: sym.strip().upper(),
+    )
+    api = MagicMock()
+    api.get_quotes.return_value = {
+        "Success": None,
+        "Status": 200,
+        "Error": "No Data Found",
+    }
+    mock_breeze_cls.return_value = api
+
+    quote = fetch_equity_quote(make_cfg(), "MISSING", "NSE", breeze=api, max_retries=0)
+
+    assert quote == {}
+
+
+@patch("breeze_client.BreezeConnect")
+def test_fetch_equity_quote_rate_limited_then_success(mock_breeze_cls, monkeypatch):
+    monkeypatch.setattr(
+        "breeze_client.resolve_breeze_stock_code",
+        lambda sym, ex: sym.strip().upper(),
+    )
+    monkeypatch.setattr("breeze_client.time.sleep", lambda _s: None)
+    api = MagicMock()
+    api.get_quotes.side_effect = [
+        {"Success": None, "Status": 5, "Error": "Limit exceed: API call per minute:Try after some time"},
+        {
+            "Success": [
+                {
+                    "exchange_code": "NSE",
+                    "ltp": 50.0,
+                    "previous_close": 49.0,
+                    "ltp_percent_change": 2.04,
+                    "ltt": "06-Jun-2026 10:00:00",
+                    "open": 49.5,
+                    "high": 50.5,
+                    "low": 49.0,
+                }
+            ],
+        },
+    ]
+    mock_breeze_cls.return_value = api
+
+    quote = fetch_equity_quote(make_cfg(), "FOO", "NSE", breeze=api, max_retries=2)
+
+    assert quote["ltp"] == 50.0
+    assert api.get_quotes.call_count == 2
 
 
 def test_fetch_nifty_option_metrics_with_fallback_skips_zero_oi_chain(monkeypatch):

@@ -56,6 +56,37 @@ def test_build_symbol_daily_feature_basic():
     assert row["action_signal"] == "exit-risk"
 
 
+def test_build_symbol_daily_feature_persists_ohlc_session_fields():
+    audit = {
+        "symbol": "HAL",
+        "exchange": "NSE",
+        "intent_score": 61.2,
+        "effective_intent_score": 55.0,
+        "z_score": 2.3,
+        "absorption_ratio": 1.4,
+        "return_1d_pct": 1.2,
+        "ema_200_distance_pct": 4.5,
+        "atr_14_pct": 3.2,
+        "rows": 38,
+        "ohlc_bar_as_of_date": "2026-06-05",
+        "ohlc_bar_incomplete": True,
+        "session_move_vs_prev_close_pct": -1.5,
+        "price_snapshot_ts": "06-Jun-2026 14:32:00",
+    }
+    row = build_symbol_daily_feature(
+        audit,
+        trade_date="2026-06-06",
+        sector="defence",
+        run_id="defence-20260606-100000",
+        run_ts_iso="2026-06-06T10:00:00+05:30",
+    )
+    assert row["trade_date"] == "2026-06-06"
+    assert row["tape_extras"]["ohlc_bar_as_of_date"] == "2026-06-05"
+    assert row["tape_extras"]["ohlc_bar_incomplete"] is True
+    assert row["tape_extras"]["session_move_vs_prev_close_pct"] == -1.5
+    assert row["tape_extras"]["price_snapshot_ts"] == "06-Jun-2026 14:32:00"
+
+
 def test_build_symbol_daily_feature_includes_news_columns():
     audit = {
         "symbol": "HAL",

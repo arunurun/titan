@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from datetime import date
 from typing import Any
 
 import pandas as pd
@@ -63,6 +64,28 @@ def _standardize_dates(df: pd.DataFrame) -> pd.Series | None:
         if col in df.columns:
             return pd.to_datetime(df[col], errors="coerce").dt.normalize()
     return None
+
+
+def sort_ohlc_by_datetime(df: pd.DataFrame) -> pd.DataFrame:
+    """Return OHLC rows sorted ascending by parsed date/datetime column."""
+    dates = _standardize_dates(df)
+    if dates is None:
+        return df
+    out = df.copy()
+    out["_sort_dt"] = dates
+    return out.sort_values("_sort_dt").drop(columns=["_sort_dt"]).reset_index(drop=True)
+
+
+def ohlc_last_bar_as_of_date(df: pd.DataFrame) -> date | None:
+    """Calendar date of the last OHLC row, or None when dates are unavailable."""
+    dates = _standardize_dates(df)
+    if dates is None or dates.empty:
+        return None
+    last = dates.iloc[-1]
+    if pd.isna(last):
+        return None
+    ts = pd.Timestamp(last)
+    return ts.date()
 
 
 def benchmark_relative_returns(

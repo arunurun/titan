@@ -121,6 +121,18 @@ def test_success_html_portfolio_per_symbol_uses_full_width_columns():
     assert "rollup footnote" in html
 
 
+def test_send_success_email_includes_eod_as_of_in_subject(monkeypatch):
+    monkeypatch.setenv("SMTP_HOST", "smtp.example.com")
+    monkeypatch.setenv("EMAIL_FROM", "from@example.com")
+    monkeypatch.setenv("EMAIL_TO", "to@example.com")
+    with patch("email_notify._send_message", return_value=True) as mock_send:
+        assert send_success_post_email("digest", eod_as_of_date="2026-06-06") is True
+    sent = mock_send.call_args[0][0]
+    assert "EOD 2026-06-06" in sent["Subject"]
+    plain = sent.get_body(preferencelist=("plain",)).get_content()
+    assert "EOD tape metrics as of 2026-06-06." in plain
+
+
 def test_success_html_sector_per_symbol_metrics_use_cards():
     body = (
         "--- Per-symbol metrics ---\n"
@@ -129,7 +141,7 @@ def test_success_html_sector_per_symbol_metrics_use_cards():
         "🟡➡ Trend regime (14D): Sideways (ADX 18.0; strength weak (<20); strength bands: <20 sideways, 20-24 weak trend, >=25 strong trend; direction rule: +DI 17.0 > -DI 16.0 => buy trend)\n"
         "🟡➡ 20D Range Position: -1.2% to 20D high \u00b7 6.5% above 20D low (near-high (within ~1% of 20D high); thresholds: near-high >=-1%, near-low <=1%)\n"
         "▸ 1D / Tape\n"
-        "1D move: -1.0% (bands: >=+1 strong up, -1 to +1 muted, <=-1 weak)\n"
+        "1D move (EOD): -1.0% · as of 2026-06-05\n"
         "▸ Model outlook\n"
         "1W outlook: 54.0 / 100 (neutral band)\n"
         "Technical intent: 50.0 / 100 (balanced / neutral)\n"

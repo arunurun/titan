@@ -9,7 +9,7 @@ import threading
 import time
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import date, datetime
 from statistics import median
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -19,11 +19,14 @@ from supabase import create_client
 
 from config_loader import TitanConfig, load_config
 from sector_registry import SectorInstrument, load_sector_instruments
+from market_calendar import is_cash_market_session_open_ist
 from tape_metrics import (
     benchmark_relative_returns,
     median_notional_inr_20d,
+    ohlc_last_bar_as_of_date,
     percentile_rank_0_100,
     pct_return_n_sessions_back,
+    sort_ohlc_by_datetime,
 )
 
 logger = logging.getLogger(__name__)
@@ -64,6 +67,111 @@ def _fmt_metric(x: Any, digits: int = 2) -> str:
     if math.isinf(v):
         return "inf" if v > 0 else "-inf"
     return f"{v:.{digits}f}"
+
+
+def _fmt_signed_pct(x: Any, digits: int = 2) -> str:
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return "n/a"
+    if math.isnan(v):
+        return "n/a"
+    if math.isinf(v):
+        return "inf" if v > 0 else "-inf"
+    sign = "+" if v > 0 else ""
+    return f"{sign}{v:.{digits}f}"
+
+
+def _format_price_snapshot_ist(ts: Any) -> str:
+    """Render quote LTT as HH:MM IST for digest display."""
+    if ts is None:
+        return "n/a"
+    text = str(ts).strip()
+    if not text or text.upper() == "NA":
+        return "n/a"
+    for fmt in (
+        "%d-%b-%Y %H:%M:%S",
+        "%d-%b-%Y %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S%z",
+    ):
+        try:
+            dt = datetime.strptime(text, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=IST)
+            else:
+                dt = dt.astimezone(IST)
+            return dt.strftime("%H:%M IST")
+        except ValueError:
+            continue
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=IST)
+        else:
+            dt = dt.astimezone(IST)
+        return dt.strftime("%H:%M IST")
+    except ValueError:
+        return "n/a"
+
+
+def _prepare_ohlc_for_metrics(
+    df: Any,
+    *,
+    now_ist: datetime | None = None,
+) -> tuple[Any, dict[str, Any]]:
+    """
+    Sort OHLC rows and, during an open session, drop today's incomplete bar from EOD metrics.
+    """
+    import pandas as pd
+
+    sorted_df = sort_ohlc_by_datetime(df)
+    now = now_ist or datetime.now(IST)
+    today = now.date()
+    last_bar_date = ohlc_last_bar_as_of_date(sorted_df)
+    session_open = is_cash_market_session_open_ist(now)
+    ohlc_bar_incomplete = False
+    metrics_df = sorted_df
+
+    if session_open and last_bar_date == today and len(sorted_df) >= 2:
+        ohlc_bar_incomplete = True
+        metrics_df = sorted_df.iloc[:-1].reset_index(drop=True)
+        complete_date = ohlc_last_bar_as_of_date(metrics_df)
+        ohlc_bar_as_of_date = complete_date.isoformat() if complete_date else None
+    else:
+        ohlc_bar_as_of_date = last_bar_date.isoformat() if last_bar_date else None
+
+    meta = {
+        "ohlc_bar_as_of_date": ohlc_bar_as_of_date,
+        "ohlc_bar_incomplete": ohlc_bar_incomplete,
+        "session_open": session_open,
+        "sorted_df": sorted_df,
+        "metrics_df": metrics_df if isinstance(metrics_df, pd.DataFrame) else sorted_df,
+    }
+    return metrics_df, meta
+
+
+def _session_move_from_quote(quote: dict[str, Any]) -> tuple[float, str | None]:
+    """Display-only session move vs previous close; returns (pct, price_snapshot_ts)."""
+    ltp = _safe_float(quote.get("ltp"))
+    prev = _safe_float(quote.get("previous_close"))
+    ltt = quote.get("ltt")
+    pct_raw = _safe_float(quote.get("ltp_percent_change"))
+    implied = (
+        ((ltp / prev) - 1.0) * 100.0
+        if (not math.isnan(ltp) and not math.isnan(prev) and prev > 0)
+        else float("nan")
+    )
+    if not math.isnan(pct_raw) and not math.isnan(implied):
+        drift = max(0.25, abs(implied) * 0.05)
+        pct = pct_raw if abs(pct_raw - implied) <= drift else implied
+    elif not math.isnan(pct_raw):
+        pct = pct_raw
+    else:
+        pct = implied
+    ts = str(ltt).strip() if ltt is not None else None
+    return pct, ts
 
 
 def _z_label(z: Any) -> str:
@@ -415,6 +523,27 @@ def _sell_signal_plain_english(signal: str) -> str:
     from action_signals import action_signal_plain_english
 
     return action_signal_plain_english(signal)
+
+
+def _digest_eod_as_of_date(results: list[dict[str, Any]]) -> str | None:
+    """Earliest OHLC EOD as-of date across successful symbol audits (digest subject/footer)."""
+    dates: list[date] = []
+    for row in results:
+        if not row.get("ok"):
+            continue
+        audit = row.get("audit")
+        if not isinstance(audit, dict):
+            continue
+        raw = str(audit.get("ohlc_bar_as_of_date") or "").strip()
+        if not raw:
+            continue
+        try:
+            dates.append(date.fromisoformat(raw))
+        except ValueError:
+            continue
+    if not dates:
+        return None
+    return min(dates).isoformat()
 
 
 def _digest_flags_simple(audit: dict[str, Any]) -> list[str]:
@@ -874,11 +1003,19 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     )
 
     lines_out.append("▸ 1D / Tape")
+    ohlc_as_of = str(audit.get("ohlc_bar_as_of_date") or "").strip()
+    eod_as_of = ohlc_as_of if ohlc_as_of else "n/a"
     lines_out.append(
         f"{_metric_icon(ret1d, bullish_above=1.0, bearish_below=-1.0)} "
-        f"1D move: {_fmt_metric(ret1d)}% "
-        f"(bands: >=+1 strong up, -1 to +1 muted, <=-1 weak)"
+        f"1D move (EOD): {_fmt_signed_pct(ret1d)}% · as of {eod_as_of}"
     )
+    session_move = audit.get("session_move_vs_prev_close_pct")
+    if audit.get("price_snapshot_ts") and not math.isnan(_safe_float(session_move)):
+        snap = _format_price_snapshot_ist(audit.get("price_snapshot_ts"))
+        lines_out.append(
+            f"{_metric_icon(session_move, bullish_above=1.0, bearish_below=-1.0)} "
+            f"Session move (live): {_fmt_signed_pct(session_move)}% · as of {snap}"
+        )
     lines_out.append(
         f"{_metric_icon(z, bullish_above=1.0, bearish_below=-1.0)} "
         f"1D z-score: {_fmt_metric(z)} "
@@ -2263,7 +2400,7 @@ def build_equity_live_audit(
     """
     import pandas as pd
 
-    from breeze_client import fetch_equity_data, volume_participation_ratio
+    from breeze_client import fetch_equity_data, fetch_equity_quote, volume_participation_ratio
     from titan_engine import (
         calculate_adx,
         calculate_atr,
@@ -2336,6 +2473,8 @@ def build_equity_live_audit(
             "obv_slope_20": float("nan"),
         }
         return skip, ""
+    metrics_df, ohlc_meta = _prepare_ohlc_for_metrics(df)
+    df = metrics_df
     close_col = "close" if "close" in df.columns else df.columns[-1]
     series = pd.to_numeric(df[close_col], errors="coerce")
     series_non_na = series.dropna()
@@ -2426,6 +2565,26 @@ def build_equity_live_audit(
         if not math.isnan(open_last):
             gap_down_proxy = bool(((open_last / close_prev) - 1.0) * 100.0 <= -1.5)
     event_info = _event_flags_for_symbol(inst.symbol, event_snapshot)
+    session_move_pct = float("nan")
+    price_snapshot_ts: str | None = None
+    if ohlc_meta.get("session_open"):
+        try:
+            quote = fetch_equity_quote(
+                cfg,
+                inst.symbol,
+                exchange_used or inst.exchange,
+                breeze=breeze,
+            )
+            if quote:
+                session_move_pct, price_snapshot_ts = _session_move_from_quote(quote)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Live quote unavailable for %s (%s): %s",
+                inst.symbol,
+                inst.exchange,
+                exc,
+            )
+
     audit: dict[str, Any] = {
         "benchmark": "equity",
         "sector_mode": True,
@@ -2434,6 +2593,10 @@ def build_equity_live_audit(
         "exchange": inst.exchange,
         "exchange_used": exchange_used or inst.exchange,
         "exchange_fallback_used": fallback_used,
+        "ohlc_bar_as_of_date": ohlc_meta.get("ohlc_bar_as_of_date"),
+        "ohlc_bar_incomplete": bool(ohlc_meta.get("ohlc_bar_incomplete")),
+        "session_move_vs_prev_close_pct": session_move_pct,
+        "price_snapshot_ts": price_snapshot_ts,
         "z_score": z,
         "z_score_fast_20": z_fast,
         "z_score_slow": float("nan") if z_slow is None else z_slow,
@@ -3128,7 +3291,11 @@ def run_sector_live(
                     mem_meta,
                 )
         if send_email:
-            send_success_post_email(digest_text, subject_prefix=f"Titan V12.0 sector {sector_id}")
+            send_success_post_email(
+                digest_text,
+                subject_prefix=f"Titan V12.0 sector {sector_id}",
+                eod_as_of_date=_digest_eod_as_of_date(results),
+            )
         print(digest_text)
         return digest_text
 
@@ -3144,7 +3311,11 @@ def run_sector_live(
 
     digest_out = "\n".join(lines).strip()
     if send_email:
-        send_success_post_email(digest_out, subject_prefix=f"Titan V12.0 sector {sector_id}")
+        send_success_post_email(
+            digest_out,
+            subject_prefix=f"Titan V12.0 sector {sector_id}",
+            eod_as_of_date=_digest_eod_as_of_date(results),
+        )
     try:
         from analysis_store import persist_sector_run_analytics, update_sector_period_rollups
 

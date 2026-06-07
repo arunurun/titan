@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import date, datetime
+from datetime import date, datetime, time
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 IST = ZoneInfo("Asia/Kolkata")
+_CASH_SESSION_OPEN_IST = time(9, 15)
+_CASH_SESSION_CLOSE_IST = time(15, 30)
 
 
 def parse_ist_holidays_env(raw: str) -> set[date]:
@@ -75,3 +77,12 @@ def market_closed_reason_ist(now_ist: datetime | None = None) -> str | None:
     if today_ist in all_holidays:
         return "Indian market is closed (NSE trading holiday)."
     return None
+
+
+def is_cash_market_session_open_ist(now_ist: datetime | None = None) -> bool:
+    """True on NSE cash weekdays during regular session hours (09:15–15:30 IST)."""
+    now = now_ist or datetime.now(IST)
+    if market_closed_reason_ist(now) is not None:
+        return False
+    t = now.time()
+    return _CASH_SESSION_OPEN_IST <= t <= _CASH_SESSION_CLOSE_IST

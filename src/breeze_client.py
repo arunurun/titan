@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 import time
@@ -107,25 +108,32 @@ def _call_historical_with_timeout(
     return result.get("value")
 
 
-def _rate_limited_historical_call(breeze: BreezeConnect, **kwargs: Any) -> Any:
+def _reserve_breeze_call_slot() -> None:
     global _LAST_HIST_CALL_AT
     interval = _min_hist_call_interval_seconds()
-    timeout_seconds = _historical_call_timeout_seconds()
     wait = 0.0
     with _HIST_CALL_LOCK:
         now = time.monotonic()
         earliest = _LAST_HIST_CALL_AT + interval
         scheduled = max(now, earliest)
         wait = max(0.0, scheduled - now)
-        # Reserve this call slot before releasing lock so network call is never under lock.
         _LAST_HIST_CALL_AT = scheduled
     if wait > 0:
         time.sleep(wait)
+
+
+def _rate_limited_historical_call(breeze: BreezeConnect, **kwargs: Any) -> Any:
+    _reserve_breeze_call_slot()
     return _call_historical_with_timeout(
         breeze,
-        timeout_seconds=timeout_seconds,
+        timeout_seconds=_historical_call_timeout_seconds(),
         kwargs=kwargs,
     )
+
+
+def _rate_limited_quote_call(breeze: BreezeConnect, **kwargs: Any) -> Any:
+    _reserve_breeze_call_slot()
+    return breeze.get_quotes(**kwargs)
 
 
 def create_breeze_session(config: _BreezeCredentials) -> BreezeConnect:
@@ -422,6 +430,107 @@ def fetch_equity_data(
     fallback_df.attrs["exchange_used"] = alt
     fallback_df.attrs["exchange_fallback_used"] = True
     return fallback_df
+
+
+def _normalize_quote_number(val: Any) -> float:
+    if val is None or val == "":
+        return float("nan")
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return float("nan")
+    return v if not math.isnan(v) else float("nan")
+
+
+def _pick_quote_row(rows: list[Any]) -> dict[str, Any] | None:
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        ex = str(row.get("exchange_code", "")).strip().upper()
+        if ex in ("", "NA"):
+            continue
+        ltp = _normalize_quote_number(row.get("ltp"))
+        if not math.isnan(ltp) and ltp > 0.0:
+            return row
+    if rows and isinstance(rows[0], dict):
+        return rows[0]
+    return None
+
+
+def fetch_equity_quote(
+    config: _BreezeCredentials,
+    stock_code: str,
+    exchange_code: str,
+    *,
+    breeze: BreezeConnect | None = None,
+    max_retries: int = 3,
+    backoff_base_seconds: float = 2.0,
+) -> dict[str, Any]:
+    """
+    Live cash quote for an equity symbol. Returns normalized floats where possible.
+    """
+    _ensure_breeze_allowed("fetch_equity_quote")
+    breeze = breeze or create_breeze_session(config)
+    sc_raw = stock_code.strip().upper()
+    ex = exchange_code.strip().upper()
+    if ex not in ("NSE", "BSE"):
+        raise ValueError(f"exchange_code must be NSE or BSE, got {exchange_code!r}")
+
+    sc = resolve_breeze_stock_code(sc_raw, ex)
+    if sc != sc_raw:
+        logger.info("Breeze quote stock_code resolved %s (%s) -> %s", sc_raw, ex, sc)
+
+    label = f"{sc_raw}->{sc} ({ex})" if sc != sc_raw else f"{sc} ({ex})"
+    last_err: Exception | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            raw = _rate_limited_quote_call(
+                breeze,
+                stock_code=sc,
+                exchange_code=ex,
+                expiry_date="",
+                product_type="cash",
+                right="",
+                strike_price="",
+            )
+            if not isinstance(raw, dict):
+                raise RuntimeError(f"[Breeze] Unexpected quote response: {raw!r}")
+            if raw.get("Success") is None:
+                if _is_breeze_rate_limit_response(raw):
+                    raise RuntimeError(f"[Breeze] Rate limited: {raw.get('Error')}")
+                if _is_breeze_no_data_response(raw):
+                    logger.info("Breeze quote no data for %s: %s", label, raw.get("Error"))
+                    return {}
+                raise RuntimeError(f"[Breeze] Unexpected quote response: {raw!r}")
+            rows = raw["Success"]
+            if not isinstance(rows, list) or not rows:
+                return {}
+            row = _pick_quote_row(rows)
+            if not row:
+                return {}
+            ltp = _normalize_quote_number(row.get("ltp"))
+            previous_close = _normalize_quote_number(row.get("previous_close"))
+            ltp_pct = _normalize_quote_number(row.get("ltp_percent_change"))
+            return {
+                "ltp": ltp,
+                "previous_close": previous_close,
+                "ltp_percent_change": ltp_pct,
+                "ltt": row.get("ltt"),
+                "open": _normalize_quote_number(row.get("open")),
+                "high": _normalize_quote_number(row.get("high")),
+                "low": _normalize_quote_number(row.get("low")),
+            }
+        except Exception as e:
+            last_err = e
+            logger.warning("Breeze quote attempt %s for %s failed: %s", attempt + 1, label, e)
+            if attempt < max_retries:
+                msg = str(e).lower()
+                if "rate limited" in msg or "limit exceed" in msg:
+                    sleep_seconds = max(20.0, 20.0 * (attempt + 1))
+                else:
+                    sleep_seconds = backoff_base_seconds * (2**attempt)
+                time.sleep(sleep_seconds)
+    raise RuntimeError(f"[Breeze] {label} quote fetch failed after retries") from last_err
 
 
 def fetch_nifty_data(

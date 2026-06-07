@@ -120,7 +120,7 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
     assert "🔴⬇ Distance above long-term trend (EMA200): 47.29%" in text
     assert "typical daily swing (atr14)" in text.lower()
     assert "bands: <2.0 calm, 2.0-4.0 moderate, >4.0 elevated" in text
-    assert "bands: >=+1 strong up, -1 to +1 muted, <=-1 weak" in text
+    assert "1D move (EOD):" in text
     assert "bands: >=1.5 high, 1.0-1.49 above-avg, 0.7-0.99 below-avg, <0.7 thin" in text
     assert "bands: >=70 strong, 55-69 constructive, 45-54 neutral, 35-44 caution, <35 defensive" in text
     assert "bands: >=70 high-long, 55-69 moderate-long, 45-54 neutral, 30-44 defensive, <30 high-defensive" in text
@@ -129,7 +129,7 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
     assert "model read confidence" in text.lower()
     assert "bands: >=70 high, 55-69 medium, <55 low" in text
     assert "🟢⬆ Trend regime (14D): Buy trend" in text
-    assert "🔴⬇ 1D move: -4.28%" in text
+    assert "🔴⬇ 1D move (EOD): -4.28%" in text
     assert any(
         f"{icon} Intent score — percentile among sector peers: 62.00" in text
         for icon in ("🟢⬆", "🟡➡", "🔴⬇")
@@ -1580,3 +1580,86 @@ def test_enrich_audit_with_symbol_news_sets_news_error_without_raising(monkeypat
     _enrich_audit_with_symbol_news(cfg, inst, audit)
     assert "news_error" in audit
     assert "news_feed unavailable" in str(audit["news_error"])
+
+
+def test_format_symbol_metrics_dual_move_lines(monkeypatch):
+    monkeypatch.delenv("TITAN_DIGEST_VERBOSE_SYMBOLS", raising=False)
+    from sector_audit import _format_symbol_metrics_line
+
+    audit = {
+        "effective_intent_score": 50.0,
+        "z_score": 0.5,
+        "volume_participation_for_scoring": 1.0,
+        "return_1d_pct": 5.74,
+        "ohlc_bar_as_of_date": "2026-06-06",
+        "session_move_vs_prev_close_pct": -2.1,
+        "price_snapshot_ts": "06-Jun-2026 14:32:00",
+        "atr_14_pct": 2.0,
+        "next_week_score": 55.0,
+        "sell_signal": "hold",
+        "sell_signal_reasons": [],
+        "prediction_breakdown": {"week": {}, "day": {}, "penalties": []},
+    }
+    text = _format_symbol_metrics_line(
+        {"symbol": "TAPE", "exchange": "NSE", "audit": audit}
+    )
+    assert "🟢⬆ 1D move (EOD): +5.74% · as of 2026-06-06" in text
+    assert "🔴⬇ Session move (live): -2.10% · as of 14:32 IST" in text
+
+
+def test_build_equity_live_audit_uses_prior_bar_when_session_incomplete(monkeypatch):
+    from sector_audit import build_equity_live_audit
+
+    df = pd.DataFrame(
+        {
+            "datetime": ["2026-06-04", "2026-06-05", "2026-06-06"],
+            "close": [100.0, 105.0, 110.0],
+            "volume": [1_000_000, 1_000_000, 500_000],
+            "open": [100.0, 105.0, 108.0],
+            "high": [101.0, 106.0, 111.0],
+            "low": [99.0, 104.0, 107.0],
+        }
+    )
+    monkeypatch.setattr("breeze_client.fetch_equity_data", lambda *a, **k: df)
+    monkeypatch.setattr("market_calendar.is_cash_market_session_open_ist", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        "breeze_client.fetch_equity_quote",
+        lambda *a, **k: {
+            "ltp": 107.8,
+            "previous_close": 110.0,
+            "ltp_percent_change": -2.0,
+            "ltt": "06-Jun-2026 14:32:00",
+            "open": 108.0,
+            "high": 111.0,
+            "low": 107.0,
+        },
+    )
+    monkeypatch.setattr(
+        "brain.generate_titan_narrative",
+        lambda audit, api_key=None, api_keys=None: "",
+    )
+    monkeypatch.setattr(
+        "sector_audit._prepare_ohlc_for_metrics",
+        lambda raw_df, now_ist=None: (
+            raw_df.iloc[:-1].reset_index(drop=True),
+            {
+                "ohlc_bar_as_of_date": "2026-06-05",
+                "ohlc_bar_incomplete": True,
+                "session_open": True,
+            },
+        ),
+    )
+
+    inst = SectorInstrument("HAL", "NSE")
+    audit, _ = build_equity_live_audit(
+        make_cfg(),
+        MagicMock(),
+        inst,
+        sector_id="defence",
+        with_narrative=False,
+    )
+    assert audit["ohlc_bar_as_of_date"] == "2026-06-05"
+    assert audit["ohlc_bar_incomplete"] is True
+    assert abs(audit["return_1d_pct"] - ((105.0 / 100.0) - 1.0) * 100.0) < 0.01
+    assert abs(audit["session_move_vs_prev_close_pct"] + 2.0) < 0.5
+    assert audit["price_snapshot_ts"] == "06-Jun-2026 14:32:00"

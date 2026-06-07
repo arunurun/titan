@@ -7,8 +7,10 @@ import pandas as pd
 from tape_metrics import (
     benchmark_relative_returns,
     median_notional_inr_20d,
+    ohlc_last_bar_as_of_date,
     pct_return_n_sessions_back,
     percentile_rank_0_100,
+    sort_ohlc_by_datetime,
 )
 
 
@@ -42,3 +44,15 @@ def test_benchmark_relative_returns_stock_outperforms_flat_bench():
 def test_median_notional_inr_20d():
     df = pd.DataFrame({"close": [10.0, 12.0], "volume": [100.0, 100.0]})
     assert median_notional_inr_20d(df, "close") == 1100.0
+
+
+def test_sort_ohlc_by_datetime_and_last_bar_date():
+    df = pd.DataFrame(
+        {
+            "datetime": ["2026-06-06", "2026-06-04", "2026-06-05"],
+            "close": [110.0, 100.0, 105.0],
+        }
+    )
+    sorted_df = sort_ohlc_by_datetime(df)
+    assert list(sorted_df["close"]) == [100.0, 105.0, 110.0]
+    assert ohlc_last_bar_as_of_date(sorted_df).isoformat() == "2026-06-06"
