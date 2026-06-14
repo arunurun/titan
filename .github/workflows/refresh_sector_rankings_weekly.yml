@@ -31,11 +31,12 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # Do not pass secrets.BREEZE_SESSION_TOKEN here — inject reads session_config(id=1)
+      # (same as Run Titan Now). A stale repo secret would override a fresh Supabase token.
       - name: Load Breeze token from Supabase
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          BREEZE_SESSION_TOKEN: ${{ secrets.BREEZE_SESSION_TOKEN }}
         run: python scripts/inject_breeze_session_from_supabase.py
 
       - name: Show Breeze token source (safe)

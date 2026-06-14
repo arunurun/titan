@@ -52,15 +52,42 @@ def test_inject_writes_github_env(inject_mod, tmp_path, monkeypatch):
             del os.environ["GITHUB_ENV"]
 
 
-def test_inject_prefers_repository_secret_skips_supabase(inject_mod, tmp_path, monkeypatch):
+def test_inject_prefers_supabase_over_env_secret(inject_mod, tmp_path, monkeypatch):
     monkeypatch.setenv("BREEZE_SESSION_TOKEN", "secret-token-xyz")
+    monkeypatch.setenv("SUPABASE_URL", "https://x.supabase.co")
+    monkeypatch.setenv("SUPABASE_KEY", _fake_supabase_jwt("service_role"))
     gh = tmp_path / "ghenv"
     monkeypatch.setenv("GITHUB_ENV", str(gh))
 
-    mock_create = MagicMock()
-    with patch.object(inject_mod, "create_client", mock_create):
+    mock_client = MagicMock()
+    mock_table = MagicMock()
+    mock_client.table.return_value = mock_table
+    mock_table.select.return_value.eq.return_value.limit.return_value.execute.return_value = MagicMock(
+        data=[{"breeze_session_token": "fresh-from-supabase"}]
+    )
+    with patch.object(inject_mod, "create_client", return_value=mock_client):
         assert inject_mod.main() == 0
-    mock_create.assert_not_called()
+    text = gh.read_text(encoding="utf-8")
+    assert "fresh-from-supabase" in text
+    assert "supabase:session_config(id=1)" in text
+    assert "secret-token-xyz" not in text
+
+
+def test_inject_falls_back_to_env_when_supabase_empty(inject_mod, tmp_path, monkeypatch):
+    monkeypatch.setenv("BREEZE_SESSION_TOKEN", "secret-token-xyz")
+    monkeypatch.setenv("SUPABASE_URL", "https://x.supabase.co")
+    monkeypatch.setenv("SUPABASE_KEY", _fake_supabase_jwt("service_role"))
+    gh = tmp_path / "ghenv"
+    monkeypatch.setenv("GITHUB_ENV", str(gh))
+
+    mock_client = MagicMock()
+    mock_table = MagicMock()
+    mock_client.table.return_value = mock_table
+    mock_table.select.return_value.eq.return_value.limit.return_value.execute.return_value = MagicMock(
+        data=[{"breeze_session_token": ""}]
+    )
+    with patch.object(inject_mod, "create_client", return_value=mock_client):
+        assert inject_mod.main() == 0
     text = gh.read_text(encoding="utf-8")
     assert "secret-token-xyz" in text
     assert "environment:BREEZE_SESSION_TOKEN" in text

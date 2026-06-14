@@ -71,11 +71,23 @@ def _preflight_breeze_session() -> None:
         breeze.generate_session(api_secret=api_secret, session_token=token)
     except Exception as exc:  # noqa: BLE001
         reason = type(exc).__name__
+        detail = str(exc).strip()
+        hint = (
+            "Run GitHub workflow 'Persist Breeze Token (Manual)' with a fresh API_Session, "
+            "then rerun this job."
+        )
+        if token_source.startswith("environment:"):
+            hint = (
+                "Token came from env/secret, not Supabase. Remove stale repository secret "
+                "BREEZE_SESSION_TOKEN or run 'Persist Breeze Token (Manual)' and ensure "
+                "the inject step reads session_config(id=1). " + hint
+            )
         raise RuntimeError(
             "Breeze session preflight failed before sector fan-out: token invalid/expired. "
-            "Update session_config(id=1) with a fresh API_Session and rerun. "
+            f"{hint} "
             f"diagnostics={{source:{token_source},len:{token_len},fp:{token_fp}}} "
             f"reason_type={reason}"
+            + (f" detail={detail!r}" if detail else "")
         ) from exc
 
     print(

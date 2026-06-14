@@ -1,8 +1,9 @@
 """
 Load BREEZE_SESSION_TOKEN into GITHUB_ENV for GitHub Actions (used by main.py --live).
 
-Used when the workflow does not already inject from repository secret BREEZE_SESSION_TOKEN
-(see market_audit.yml: bash writes GITHUB_ENV first; this script handles Supabase-only path).
+Prefers Supabase session_config(id=1) when SUPABASE_URL + SUPABASE_KEY are set.
+Falls back to env BREEZE_SESSION_TOKEN (e.g. repository secret) only when Supabase
+is unavailable or returns an empty token.
 
 Requires: SUPABASE_URL + SUPABASE_KEY (must be service_role JWT if RLS is on), table session_config.
 """
@@ -87,63 +88,76 @@ def _ensure_session_row(client) -> None:
     client.table("session_config").upsert({"id": 1, "breeze_session_token": ""}).execute()
 
 
+def _load_token_from_supabase(url: str, key: str) -> tuple[str | None, str | None]:
+    """Return (token, error_message). token is non-empty on success; error_message on hard failure."""
+    role = jwt_role_from_supabase_key(key)
+    if role == "anon":
+        return None, (
+            "SUPABASE_KEY is the anon key; PostgREST returns no rows under RLS.\n"
+            "Use the service_role key from Supabase → Project Settings → API,\n"
+            "or add repository secret BREEZE_SESSION_TOKEN (daily Breeze token)."
+        )
+    if role is None and key.startswith("sb_"):
+        return None, (
+            "SUPABASE_KEY appears to be a publishable key (sb_*), not service_role.\n"
+            "Use the service_role key from Supabase -> Project Settings -> API."
+        )
+
+    client = create_client(url, key)
+    token, has_row = _read_session_token(client)
+    if not has_row:
+        _ensure_session_row(client)
+        token, has_row = _read_session_token(client)
+    if not has_row:
+        return None, (
+            "session_config row id=1 not readable even after bootstrap.\n"
+            "Verify SUPABASE_KEY is service_role and table public.session_config exists."
+        )
+    if not token:
+        return "", None
+    return token, None
+
+
 def main() -> int:
     gh_env = os.environ.get("GITHUB_ENV")
     if not gh_env:
         print("GITHUB_ENV not set; this script is intended for GitHub Actions.", file=sys.stderr)
         return 1
 
-    override = (os.environ.get("BREEZE_SESSION_TOKEN") or "").strip()
-    if override:
-        return _write_token_to_github_env(override, "environment:BREEZE_SESSION_TOKEN")
-
+    env_fallback = (os.environ.get("BREEZE_SESSION_TOKEN") or "").strip()
     url = os.environ.get("SUPABASE_URL", "").strip()
     key = os.environ.get("SUPABASE_KEY", "").strip()
+
+    if url and key:
+        token, err = _load_token_from_supabase(url, key)
+        if err:
+            print(err, file=sys.stderr)
+            return 1
+        if token:
+            return _write_token_to_github_env(token, "supabase:session_config(id=1)")
+        print(
+            "breeze_session_token is empty in Supabase session_config (id=1); "
+            "falling back to env BREEZE_SESSION_TOKEN if set.",
+            file=sys.stderr,
+        )
+
+    if env_fallback:
+        return _write_token_to_github_env(env_fallback, "environment:BREEZE_SESSION_TOKEN")
+
     if not url or not key:
         print(
-            "Add repository secret BREEZE_SESSION_TOKEN, or set SUPABASE_URL + SUPABASE_KEY for session_config.",
+            "Set SUPABASE_URL + SUPABASE_KEY for session_config, "
+            "or add repository secret BREEZE_SESSION_TOKEN.",
             file=sys.stderr,
         )
         return 1
 
-    role = jwt_role_from_supabase_key(key)
-    if role == "anon":
-        print(
-            "SUPABASE_KEY is the anon key; PostgREST returns no rows under RLS.\n"
-            "Use the service_role key from Supabase → Project Settings → API,\n"
-            "or add repository secret BREEZE_SESSION_TOKEN (daily Breeze token).",
-            file=sys.stderr,
-        )
-        return 1
-    if role is None and key.startswith("sb_"):
-        print(
-            "SUPABASE_KEY appears to be a publishable key (sb_*), not service_role.\n"
-            "Use the service_role key from Supabase -> Project Settings -> API.",
-            file=sys.stderr,
-        )
-        return 1
-
-    client = create_client(url, key)
-    token, has_row = _read_session_token(client)
-    if not has_row:
-        # Auto-bootstrap missing row id=1, then re-read.
-        _ensure_session_row(client)
-        token, has_row = _read_session_token(client)
-    if not has_row:
-        print(
-            "session_config row id=1 not readable even after bootstrap.\n"
-            "Verify SUPABASE_KEY is service_role and table public.session_config exists.",
-            file=sys.stderr,
-        )
-        return 1
-    if not token:
-        print(
-            "breeze_session_token is empty in Supabase session_config (id=1); update it with a fresh token.",
-            file=sys.stderr,
-        )
-        return 1
-
-    return _write_token_to_github_env(token, "supabase:session_config(id=1)")
+    print(
+        "breeze_session_token is empty in Supabase session_config (id=1); "
+        "run workflow 'Persist Breeze Token (Manual)' with a fresh API_Session.",
+        file=sys.stderr,
+    )
+    return 1
 
 
 if __name__ == "__main__":
