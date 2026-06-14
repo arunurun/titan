@@ -108,3 +108,27 @@ def test_reconcile_runner_passes_without_breeze_or_gemini(monkeypatch, tmp_path)
     assert out["scope"] == "all-stocks"
     assert out["summary"] == {}
     assert out["digest_text"] == ""
+
+
+def test_reconcile_runner_persists_forward_outcomes_when_enabled(monkeypatch):
+    import reconcile_runner as rr
+
+    monkeypatch.setenv("TITAN_FORWARD_OUTCOMES_PERSIST", "1")
+
+    def _fake_load_config(*, require_breeze=True, require_gemini=True):
+        return SimpleNamespace(supabase_url="https://example.supabase.co", supabase_key="service-key")
+
+    monkeypatch.setattr(rr, "load_config", _fake_load_config)
+    monkeypatch.setattr(
+        rr,
+        "enrich_audits_with_stock_reconcile",
+        lambda cfg, sector, all_stocks, audits: {"scope": "defence", "symbol_count": 0},
+    )
+    monkeypatch.setattr(rr, "build_reconcile_digest_lines", lambda summary: [])
+    monkeypatch.setattr(rr, "send_success_post_email", lambda body, subject_prefix=None: True)
+    mock_persist = MagicMock(return_value={"enabled": True, "updated": 3, "candidates": 5, "scope": "defence"})
+    monkeypatch.setattr(rr, "persist_forward_outcomes", mock_persist)
+
+    out = rr.run_reconcile_report(sector="defence", all_stocks=False, backfill_days=0, generate_report=True)
+    mock_persist.assert_called_once()
+    assert out["forward_outcomes"]["updated"] == 3

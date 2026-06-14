@@ -752,6 +752,310 @@ def _digest_flags_simple(audit: dict[str, Any]) -> list[str]:
     return out
 
 
+_SHADOW_GATE_LABELS: dict[str, str] = {
+    "sector_regime": "regime gate",
+    "delivery_churn": "delivery/churn gate",
+    "v2_risk_label": "v2 risk gate",
+    "futures_oi": "futures OI gate",
+    "fno_ban": "ban gate",
+    "absorption": "absorption gate",
+    "institutional": "institutional gate",
+    "signal_overext_ceiling": "overext ceiling gate",
+}
+
+
+def _shadow_gate_display_name(gate_key: str) -> str:
+    key = str(gate_key or "").strip().lower()
+    return _SHADOW_GATE_LABELS.get(key, key.replace("_", " ") + " gate" if key else "gate")
+
+
+def _shadow_gate_would_action(record: dict[str, Any]) -> str:
+    if bool(record.get("withhold")):
+        return "withhold"
+    would = str(record.get("would") or "").strip().lower()
+    if "cap" in would:
+        return "cap"
+    try:
+        mult = float(record.get("score_multiplier", 1.0) or 1.0)
+    except (TypeError, ValueError):
+        mult = 1.0
+    if "withhold" in would and "damp" in would:
+        return "damp"
+    if mult < 1.0 and "damp" in would:
+        return "damp"
+    if "withhold" in would or "skip" in would:
+        return "withhold"
+    if "damp" in would or "down-rank" in would:
+        return "damp"
+    if mult < 1.0:
+        return "damp"
+    return "damp"
+
+
+def _shadow_gate_reason_brief(record: dict[str, Any], audit: dict[str, Any]) -> str:
+    reasons = record.get("reasons")
+    if isinstance(reasons, list) and reasons:
+        return "; ".join(str(r) for r in reasons[:2])
+
+    gate = str(record.get("gate") or "").strip().lower()
+    if gate == "sector_regime":
+        sector = str(audit.get("sector_key") or audit.get("sector_id") or "").strip()
+        breadth = record.get("breadth_now")
+        if sector and breadth is not None:
+            return f"{sector} breadth {float(breadth):.0f}%"
+        if breadth is not None:
+            return f"breadth {float(breadth):.0f}%"
+    if gate == "v2_risk_label":
+        label = str(record.get("v2_label") or "").strip()
+        if label:
+            return f"signal_v2 label {label}"
+    if gate == "delivery_churn":
+        avg = record.get("delivery_avg")
+        latest = record.get("delivery_latest")
+        if avg is not None and latest is not None:
+            return f"avg delivery {float(avg):.0f}%->{float(latest):.0f}%"
+    if gate == "futures_oi":
+        structure = str(record.get("structure") or "").strip()
+        oi_chg = record.get("change_in_oi")
+        if structure and structure != "unknown":
+            suffix = f" (ΔOI {oi_chg})" if oi_chg is not None else ""
+            return f"{structure.replace('_', ' ')}{suffix}"
+    if gate == "fno_ban":
+        ban_date = record.get("ban_date")
+        return f"F&O ban list as of {ban_date}" if ban_date else "on F&O ban list"
+    if gate == "signal_overext_ceiling":
+        hot = record.get("hot")
+        if isinstance(hot, list) and hot:
+            return ", ".join(str(x) for x in hot[:3])
+        ceiling = record.get("would_ceiling")
+        if ceiling:
+            return f"would cap to {ceiling}"
+    would = str(record.get("would") or "").strip()
+    return would if would and would.lower() != "allow" else "shadow trigger"
+
+
+def _format_shadow_gate_note(record: dict[str, Any], audit: dict[str, Any]) -> str:
+    gate_name = _shadow_gate_display_name(str(record.get("gate") or ""))
+    action = _shadow_gate_would_action(record)
+    reason = _shadow_gate_reason_brief(record, audit)
+    return f"Shadow (not enforced): {gate_name} would {action} — {reason}"
+
+
+def _overext_ceiling_shadow_triggered(oe: dict[str, Any]) -> bool:
+    would = oe.get("would_ceiling")
+    if not would:
+        return False
+    mode = str(oe.get("mode") or "shadow").strip().lower()
+    if mode in ("shadow", "off"):
+        return True
+    applied = oe.get("applied_ceiling")
+    return applied != would
+
+
+def _absorption_shadow_triggered(abs_term: dict[str, Any]) -> bool:
+    mode = str(abs_term.get("mode") or "shadow").strip().lower()
+    if mode not in ("shadow", "off", "damp"):
+        return False
+    legacy = _safe_float(abs_term.get("legacy"))
+    gated = _safe_float(abs_term.get("gated"))
+    if bool(abs_term.get("down_day")) and legacy > 0.0:
+        return True
+    if bool(abs_term.get("capped")) and not math.isclose(legacy, gated, rel_tol=0.0, abs_tol=0.05):
+        return True
+    return False
+
+
+def _absorption_shadow_record(abs_term: dict[str, Any]) -> dict[str, Any]:
+    legacy = _safe_float(abs_term.get("legacy"))
+    gated = _safe_float(abs_term.get("gated"))
+    reasons: list[str] = []
+    if bool(abs_term.get("down_day")) and legacy > 0.0:
+        reasons.append(f"down-day distribution bonus {legacy:+.1f} pts would zero")
+    elif bool(abs_term.get("capped")):
+        reasons.append(f"uncapped bonus {legacy:+.1f} pts would cap to {gated:+.1f}")
+    mode = str(abs_term.get("mode") or "shadow").strip().lower()
+    would = "damp (sign-gated absorption)" if mode == "damp" else "cap (sign-gated absorption)"
+    return {
+        "gate": "absorption",
+        "triggered": True,
+        "would": would,
+        "reasons": reasons,
+        "score_multiplier": 0.5 if mode == "damp" else 1.0,
+        "withhold": False,
+    }
+
+
+def _institutional_shadow_triggered(ctx: dict[str, Any]) -> bool:
+    return bool(ctx.get("risk_off"))
+
+
+def _institutional_shadow_record(ctx: dict[str, Any]) -> dict[str, Any]:
+    fii = ctx.get("fii_net_crs")
+    dii = ctx.get("dii_net_crs")
+    parts: list[str] = []
+    if fii is not None:
+        parts.append(f"FII net {float(fii):+.0f} Cr")
+    if dii is not None:
+        parts.append(f"DII net {float(dii):+.0f} Cr")
+    reason = ", ".join(parts) if parts else "risk-off institutional backdrop"
+    return {
+        "gate": "institutional",
+        "triggered": True,
+        "would": "damp (institutional backdrop)",
+        "reasons": [reason],
+        "score_multiplier": 1.0,
+        "withhold": False,
+    }
+
+
+def _digest_shadow_gate_notes(audit: dict[str, Any]) -> list[str]:
+    """Per-stock shadow gate lines for digest Context (not enforced; informational only)."""
+    notes: list[str] = []
+    seen: set[str] = set()
+
+    def _append(record: dict[str, Any]) -> None:
+        gate = str(record.get("gate") or "").strip().lower()
+        if not gate or gate in seen:
+            return
+        if not bool(record.get("triggered")):
+            return
+        seen.add(gate)
+        notes.append(_format_shadow_gate_note(record, audit))
+
+    for record in audit.get("shadow_gates") or []:
+        if isinstance(record, dict):
+            _append(record)
+
+    oe = audit.get("signal_overext_ceiling")
+    if isinstance(oe, dict) and _overext_ceiling_shadow_triggered(oe):
+        _append(
+            {
+                "gate": "signal_overext_ceiling",
+                "triggered": True,
+                "would": f"cap to {oe.get('would_ceiling')}",
+                "would_ceiling": oe.get("would_ceiling"),
+                "hot": oe.get("hot"),
+                "withhold": oe.get("would_ceiling") == "hold",
+            }
+        )
+
+    abs_term = audit.get("absorption_term_shadow")
+    if isinstance(abs_term, dict) and _absorption_shadow_triggered(abs_term):
+        _append(_absorption_shadow_record(abs_term))
+
+    inst_ctx = audit.get("institutional_context")
+    if isinstance(inst_ctx, dict) and _institutional_shadow_triggered(inst_ctx):
+        _append(_institutional_shadow_record(inst_ctx))
+
+    return notes
+
+
+def _load_priority_ranking_meta(
+    cfg: TitanConfig,
+    *,
+    sector_key: str,
+    symbol_keys: list[tuple[str, str]],
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Best-effort lookup of ranking meta (shadow_gates, absorption, institutional)."""
+    syms = sorted({sym for sym, _ex in symbol_keys if sym})
+    if not syms or not sector_key:
+        return {}
+    client = create_client(cfg.supabase_url, cfg.supabase_key)
+    as_of_today = datetime.now(IST).date().isoformat()
+    for as_of in (as_of_today,):
+        try:
+            res = (
+                client.table("sector_priority_rankings")
+                .select("symbol,exchange,meta")
+                .eq("sector_key", sector_key.strip().lower())
+                .eq("as_of_date", as_of)
+                .in_("symbol", syms)
+                .execute()
+            )
+        except APIError as exc:
+            payload = exc.args[0] if exc.args else {}
+            msg = payload.get("message", str(exc)) if isinstance(payload, dict) else str(exc)
+            code = payload.get("code", "") if isinstance(payload, dict) else ""
+            if code == "PGRST205" or "could not find the table" in msg.lower():
+                return {}
+            logger.info("priority ranking meta read failed sector=%s: %s", sector_key, exc)
+            return {}
+        except Exception as exc:  # noqa: BLE001
+            logger.info("priority ranking meta read failed sector=%s: %s", sector_key, exc)
+            return {}
+        rows = list(getattr(res, "data", None) or [])
+        if not rows:
+            continue
+        out: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            sym = str(row.get("symbol") or "").strip().upper()
+            ex = str(row.get("exchange") or "NSE").strip().upper()
+            meta = row.get("meta")
+            if sym and isinstance(meta, dict):
+                out[(sym, ex)] = meta
+        if out:
+            return out
+    try:
+        res = (
+            client.table("sector_priority_rankings")
+            .select("symbol,exchange,meta,as_of_date")
+            .eq("sector_key", sector_key.strip().lower())
+            .in_("symbol", syms)
+            .order("as_of_date", desc=True)
+            .limit(max(50, len(syms) * 3))
+            .execute()
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.info("priority ranking meta fallback read failed sector=%s: %s", sector_key, exc)
+        return {}
+    rows = list(getattr(res, "data", None) or [])
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        sym = str(row.get("symbol") or "").strip().upper()
+        ex = str(row.get("exchange") or "NSE").strip().upper()
+        key = (sym, ex)
+        if key in out or not sym:
+            continue
+        meta = row.get("meta")
+        if isinstance(meta, dict):
+            out[key] = meta
+    return out
+
+
+def _bridge_priority_shadow_context(
+    cfg: TitanConfig,
+    sector_key: str,
+    ok_results: list[dict[str, Any]],
+) -> None:
+    """Attach persisted ranking shadow-gate meta onto audits for digest rendering."""
+    if not ok_results:
+        return
+    symbol_keys = [
+        (str(r.get("symbol") or "").strip().upper(), str(r.get("exchange") or "NSE").strip().upper())
+        for r in ok_results
+    ]
+    meta_by_key = _load_priority_ranking_meta(cfg, sector_key=sector_key, symbol_keys=symbol_keys)
+    for r in ok_results:
+        audit = r.get("audit")
+        if not isinstance(audit, dict):
+            continue
+        sym = str(r.get("symbol") or "").strip().upper()
+        ex = str(r.get("exchange") or "NSE").strip().upper()
+        if sector_key and not audit.get("sector_key"):
+            audit["sector_key"] = sector_key
+        meta = meta_by_key.get((sym, ex)) or {}
+        if isinstance(meta.get("shadow_gates"), list) and not audit.get("shadow_gates"):
+            audit["shadow_gates"] = meta["shadow_gates"]
+        if isinstance(meta.get("absorption_term"), dict) and not audit.get("absorption_term_shadow"):
+            audit["absorption_term_shadow"] = meta["absorption_term"]
+        if isinstance(meta.get("institutional_context"), dict) and not audit.get("institutional_context"):
+            audit["institutional_context"] = meta["institutional_context"]
+
+
 def _format_sector_options_context_block(ctx: dict[str, Any]) -> list[str]:
     """Sector-level options header for digest email (Phase 1)."""
     if not isinstance(ctx, dict) or not ctx:
@@ -1464,6 +1768,9 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     for flag in flag_simple:
         context_tail.append(f"• {flag}")
 
+    for shadow_note in _digest_shadow_gate_notes(audit):
+        context_tail.append(f"• {shadow_note}")
+
     if support_tag != "technical_only":
         context_tail.append(f"• Evidence mix: {support_tag.replace('_', ' ')}")
 
@@ -1796,6 +2103,92 @@ def _ema_history_confidence(rows: Any) -> float:
     return min(1.0, max(0.35, n / 200.0))
 
 
+# ---------------------------------------------------------------------------
+# Fix C: contemporaneous-score de-bias
+# A large same-day move (session_move_vs_prev_close_pct, or return_1d_pct on a
+# complete EOD bar) transiently inflates effective_intent_score / next_week_score /
+# z_score. These helpers softly discount the portion of those scores attributable to
+# today's pop so a one-day spike cannot masquerade as durable strength. Tunable via
+# TITAN_CONTEMP_* env knobs; the discount is a bounded soft shave, never a hard zero.
+# ---------------------------------------------------------------------------
+
+_CONTEMP_MOVE_THRESHOLD_PCT = 3.0   # same-day move where the discount starts
+_CONTEMP_DISCOUNT_SLOPE = 0.08      # discount fraction added per +1% above threshold
+_CONTEMP_MAX_DISCOUNT_FRAC = 0.5    # hard ceiling on the discount fraction
+
+
+def _contemp_env_float(name: str, default: float) -> float:
+    raw = (str(os.environ.get(name, "")) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _contemporaneous_dampener_enabled() -> bool:
+    raw = (str(os.environ.get("TITAN_CONTEMP_DAMPENER_ENABLED", "")) or "").strip().lower()
+    if not raw:
+        return True
+    return raw not in ("0", "false", "no", "off")
+
+
+def _contemporaneous_move_pct(audit: dict[str, Any]) -> float:
+    """Same-day move: prefer the live intraday snapshot, fall back to the EOD 1d move."""
+    move = _safe_float(audit.get("session_move_vs_prev_close_pct"))
+    if math.isnan(move):
+        move = _safe_float(audit.get("return_1d_pct"))
+    return move
+
+
+def _contemporaneous_discount_factor(audit: dict[str, Any]) -> tuple[float, float]:
+    """Return (same_day_move_pct, discount_fraction in [0, max]) for an upside pop."""
+    if not _contemporaneous_dampener_enabled():
+        return float("nan"), 0.0
+    move = _contemporaneous_move_pct(audit)
+    if math.isnan(move) or move <= 0.0:
+        return move, 0.0
+    threshold = _contemp_env_float("TITAN_CONTEMP_MOVE_THRESHOLD_PCT", _CONTEMP_MOVE_THRESHOLD_PCT)
+    slope = _contemp_env_float("TITAN_CONTEMP_DISCOUNT_SLOPE", _CONTEMP_DISCOUNT_SLOPE)
+    max_frac = _contemp_env_float("TITAN_CONTEMP_MAX_DISCOUNT_FRAC", _CONTEMP_MAX_DISCOUNT_FRAC)
+    if move <= threshold:
+        return move, 0.0
+    frac = (move - threshold) * slope
+    frac = max(0.0, min(max_frac, frac))
+    return move, frac
+
+
+def _apply_contemporaneous_dampener(audit: dict[str, Any]) -> None:
+    """Shave the same-day-pop contribution from effective_intent_score and z_score.
+
+    Mutates the audit in place (these fields are persisted) and records a
+    ``contemporaneous_discount`` breakdown. ``next_day_score``/``next_week_score`` are
+    de-biased downstream: they read the now-discounted effective_intent_score and the
+    matching ret1d discount inside ``_predictive_scores``.
+    """
+    move, frac = _contemporaneous_discount_factor(audit)
+    if frac <= 0.0:
+        return
+    eff = _safe_float(audit.get("effective_intent_score", audit.get("intent_score")))
+    z = _safe_float(audit.get("z_score"))
+    discount: dict[str, Any] = {"same_day_move_pct": round(move, 4), "discount_fraction": round(frac, 4)}
+    # Only the above-neutral (>50) portion of intent is treated as "earned" and thus
+    # partially attributable to today's pop; the baseline is left intact.
+    if not math.isnan(eff) and eff > 50.0:
+        new_eff = 50.0 + (eff - 50.0) * (1.0 - frac)
+        discount["effective_intent_score_before"] = round(eff, 2)
+        discount["effective_intent_score_after"] = round(new_eff, 2)
+        audit["effective_intent_score"] = round(new_eff, 2)
+    # Only a positive (upside) z is shaved; downside-z risk is never softened.
+    if not math.isnan(z) and z > 0.0:
+        new_z = z * (1.0 - frac)
+        discount["z_score_before"] = round(z, 4)
+        discount["z_score_after"] = round(new_z, 4)
+        audit["z_score"] = new_z
+    audit["contemporaneous_discount"] = discount
+
+
 def _predictive_scores(audit: dict[str, Any]) -> tuple[float, float, dict[str, Any]]:
     """
     Heuristic lead scores (0-100).
@@ -1821,6 +2214,11 @@ def _predictive_scores(audit: dict[str, Any]) -> tuple[float, float, dict[str, A
     tech_week = 0.0 if math.isnan(tech) else ((tech - 50.0) * 0.62)
     ret1_w = 0.18 if audit.get("extreme_price_move_proxy") else 0.42
     ret_term = 0.0 if math.isnan(ret1d) else (ret1d * ret1_w)
+    # Fix C: shave the same-day-pop slice of the 1d momentum term (upside only) so a
+    # single big green session cannot inflate the forward-looking scores.
+    _contemp_move, _contemp_frac = _contemporaneous_discount_factor(audit)
+    if _contemp_frac > 0.0 and ret_term > 0.0:
+        ret_term *= (1.0 - _contemp_frac)
     ret5_term = 0.0 if math.isnan(ret5d) else (ret5d * 0.28)
     ret10_term = 0.0 if math.isnan(ret10d) else (ret10d * 0.15)
     rel5_term = 0.0 if math.isnan(rel5) else (rel5 * 0.2)
@@ -1892,6 +2290,8 @@ def _predictive_scores(audit: dict[str, Any]) -> tuple[float, float, dict[str, A
             "atr_penalty": round(atr_penalty * 0.35, 2),
         },
         "penalties": penalties,
+        "contemporaneous_discount_fraction": round(_contemp_frac, 4),
+        "contemporaneous_move_pct": (None if math.isnan(_contemp_move) else round(_contemp_move, 4)),
     }
     return _clamp_score(day_score), _clamp_score(week_score), breakdown
 
@@ -1986,6 +2386,7 @@ def _derive_sell_signal(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
 
 
 def _refresh_symbol_scoring_outputs(audit: dict[str, Any]) -> None:
+    _apply_contemporaneous_dampener(audit)  # Fix C: de-bias same-day pop before scoring
     next_day_score, next_week_score, prediction_breakdown = _predictive_scores(audit)
     audit["next_day_score"] = next_day_score
     audit["next_week_score"] = next_week_score
@@ -2038,10 +2439,29 @@ def _enrich_audit_with_symbol_news(
                 audit["news_price_contradiction"] = corr["contradiction_strength"]
                 audit["news_price_contradiction_reason"] = corr["possible_reason"]
         else:
-            audit["recent_news"] = []
-            audit["news_count"] = 0
-            audit["news_sentiment_aggregate"] = "neutral"
-            audit["news_sentiment_score"] = 0.0
+            # Fallback: news_feed is often empty at feature-run time (per-symbol snapshots
+            # are refreshed by a separate job that runs AFTER the sector run). Reuse the
+            # latest persisted symbol_news_snapshot so news_count / sentiment are not 0.
+            snap = None
+            try:
+                from news_store import _load_latest_symbol_snapshot
+
+                snap = _load_latest_symbol_snapshot(cfg, inst.symbol)
+            except Exception:  # noqa: BLE001 - snapshot fallback is best-effort
+                snap = None
+            if isinstance(snap, dict) and int(snap.get("news_count") or 0) > 0:
+                audit["recent_news"] = snap.get("recent_news_items") or []
+                audit["news_count"] = int(snap.get("news_count") or 0)
+                audit["news_sentiment_aggregate"] = str(snap.get("aggregate_sentiment") or "neutral")
+                audit["news_sentiment_score"] = float(snap.get("aggregate_score") or 0.0)
+                trend_val = snap.get("sentiment_trend")
+                audit["news_sentiment_trend"] = trend_val if trend_val is not None else "n/a"
+                audit["news_source"] = "symbol_news_snapshot_fallback"
+            else:
+                audit["recent_news"] = []
+                audit["news_count"] = 0
+                audit["news_sentiment_aggregate"] = "neutral"
+                audit["news_sentiment_score"] = 0.0
     except Exception as exc:
         logger.warning("News enrichment failed for %s: %s", inst.symbol, exc)
         audit["news_error"] = str(exc)
@@ -2655,8 +3075,11 @@ def _apply_sector_cross_section(
         assign_percentile("return_1d_pct", "sector_pctile_return_1d_pct")
         assign_percentile("return_5d_pct", "sector_pctile_return_5d_pct")
         assign_percentile("median_notional_inr_20d", "sector_pctile_median_notional_20d")
-        # Corroborating-only sector percentile of ATR-normalized EMA200 stretch.
+        # Corroborating-only sector percentiles for the v2 money-flow / over-extension
+        # gates (persisted into tape_extras so backtests can reproduce the C/C-8 layers).
         assign_percentile("ema200_stretch_atr", "sector_pctile_ema200_stretch")
+        assign_percentile("cmf_20", "sector_pctile_cmf_20")
+        assign_percentile("adx_14", "sector_pctile_adx_14")
 
         atrs = [v for v in series("atr_14_pct") if not math.isnan(v)]
         med_atr = float(median(atrs)) if atrs else float("nan")
@@ -3451,6 +3874,7 @@ def run_sector_live(
         from supabase_log import save_audit_log
 
         ok_results = [r for r in results if r.get("ok")]
+        _bridge_priority_shadow_context(cfg, sector_id, ok_results)
         red_ratio, cluster_downgrades = _apply_cluster_guardrails(ok_results)
         event_adjustments = _apply_event_guardrails(ok_results)
         macro_applied, macro_reason = _apply_macro_guardrails(ok_results, macro_snapshot)

@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 from analysis_store import (
     _evaluate_transition_horizon_outcome,
+    _forward_outcomes_need_update,
     _safe_tape_extras,
     build_reconcile_digest_lines,
     build_comparison_payload,
@@ -11,7 +12,10 @@ from analysis_store import (
     build_stock_reconcile_snapshot,
     build_stock_signal_transition_analytics_row,
     build_symbol_daily_feature,
+    compute_forward_outcome_patches,
     enrich_audits_with_stock_reconcile,
+    forward_outcomes_persist_enabled,
+    persist_forward_outcomes,
     quality_checks_for_run,
     update_sector_period_rollups,
 )
@@ -768,3 +772,119 @@ def test_build_stock_reconcile_snapshot_marks_not_evaluable_for_non_matured_rows
     assert row["transition_evaluable"] is False
     assert row["transition_beneficial"] is None
     assert row["transition_outcome_label"] == "not_evaluable"
+
+
+def test_forward_outcomes_persist_enabled_env(monkeypatch):
+    monkeypatch.delenv("TITAN_FORWARD_OUTCOMES_PERSIST", raising=False)
+    assert forward_outcomes_persist_enabled() is False
+    monkeypatch.setenv("TITAN_FORWARD_OUTCOMES_PERSIST", "1")
+    assert forward_outcomes_persist_enabled() is True
+
+
+def test_compute_forward_outcome_patches_uses_forward_sessions():
+    rows = [
+        {
+            "trade_date": "2026-06-01",
+            "symbol": "HAL",
+            "sector": "defence",
+            "exchange": "NSE",
+            "action_signal": "buy",
+            "return_1d_pct": 1.0,
+        },
+        {
+            "trade_date": "2026-06-02",
+            "symbol": "HAL",
+            "sector": "defence",
+            "exchange": "NSE",
+            "action_signal": "hold",
+            "return_1d_pct": 2.0,
+        },
+        {
+            "trade_date": "2026-06-03",
+            "symbol": "HAL",
+            "sector": "defence",
+            "exchange": "NSE",
+            "action_signal": "hold",
+            "return_1d_pct": -1.0,
+        },
+    ]
+    patches = compute_forward_outcome_patches(
+        rows,
+        start_iso="2026-06-01",
+        end_iso="2026-06-01",
+    )
+    patch = patches[("defence", "HAL", "2026-06-01")]
+    assert patch["sessions_available"] == 2
+    assert patch["forward_1d_pct"] == 2.0
+    assert patch["forward_5d_pct"] is None
+    assert patch["max_drawdown_5d_pct"] is not None
+
+
+def test_forward_outcomes_need_update_when_sessions_mature():
+    existing = {"sessions_available": 1, "forward_1d_pct": 1.2, "forward_5d_pct": None}
+    patch = {"sessions_available": 5, "forward_1d_pct": 1.2, "forward_5d_pct": 4.5}
+    assert _forward_outcomes_need_update(existing, patch) is True
+    complete = {
+        "sessions_available": 5,
+        "forward_1d_pct": 1.2,
+        "forward_5d_pct": 4.5,
+        "max_drawdown_5d_pct": -2.0,
+    }
+    assert _forward_outcomes_need_update(complete, patch) is False
+
+
+def test_persist_forward_outcomes_upserts_merged_tape_extras(monkeypatch):
+    monkeypatch.setenv("TITAN_FORWARD_OUTCOMES_PERSIST", "1")
+    rows = [
+        {
+            "trade_date": "2026-06-01",
+            "sector": "defence",
+            "symbol": "HAL",
+            "exchange": "NSE",
+            "action_signal": "buy",
+            "return_1d_pct": 0.5,
+            "tape_extras": {"return_5d_pct": 3.0},
+        },
+        {
+            "trade_date": "2026-06-02",
+            "sector": "defence",
+            "symbol": "HAL",
+            "exchange": "NSE",
+            "action_signal": "hold",
+            "return_1d_pct": 1.5,
+            "tape_extras": {},
+        },
+    ]
+    mock_table = MagicMock()
+    mock_client = MagicMock()
+    mock_client.table.return_value = mock_table
+    chain = MagicMock()
+    mock_table.select.return_value = chain
+    chain.gte.return_value = chain
+    chain.lte.return_value = chain
+    chain.order.return_value = chain
+    chain.eq.return_value = chain
+    chain.range.return_value.execute.return_value = MagicMock(data=rows)
+    mock_table.upsert.return_value.execute.return_value = MagicMock(data=[])
+
+    out = persist_forward_outcomes(
+        _Cfg(),
+        client=mock_client,
+        sector="defence",
+        as_of_date="2026-06-02",
+        lookback_days=30,
+    )
+    assert out["enabled"] is True
+    assert out["updated"] == 1
+    upsert_payload = mock_table.upsert.call_args[0][0]
+    assert len(upsert_payload) == 1
+    tape = upsert_payload[0]["tape_extras"]
+    assert tape["return_5d_pct"] == 3.0
+    assert tape["forward_outcomes"]["forward_1d_pct"] == 1.5
+    assert tape["forward_outcomes"]["sessions_available"] == 1
+
+
+def test_persist_forward_outcomes_disabled_without_env(monkeypatch):
+    monkeypatch.delenv("TITAN_FORWARD_OUTCOMES_PERSIST", raising=False)
+    out = persist_forward_outcomes(_Cfg(), client=MagicMock(), sector="defence")
+    assert out == {"enabled": False, "updated": 0}

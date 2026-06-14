@@ -296,12 +296,21 @@ def layer_c(audit: dict[str, Any]) -> dict[str, Any]:
     obv = _sf(audit.get("obv_slope_20"))
     stretch = _sf(audit.get("ema200_stretch_atr"))
     stretch_pctile = _sf(audit.get("sector_pctile_ema200_stretch"))
+    z = _sf(audit.get("z_score"))
 
     k_cmf = _env_float("TITAN_SIGV2_C_CMF_K", 10.0)
     cap_cmf = _env_float("TITAN_SIGV2_C_CMF_CAP", 2.0)
-    stretch_deadband = _env_float("TITAN_SIGV2_C_STRETCH_DEADBAND_ATR", 4.0)
+    # Fix A (mirror): C-8 over-extension is now more sensitive. Default deadband
+    # lowered 4.0 -> 3.0 ATR (tunable down to ~2.0-2.5 via env).
+    stretch_deadband = _env_float("TITAN_SIGV2_C_STRETCH_DEADBAND_ATR", 3.0)
     stretch_ramp = _env_float("TITAN_SIGV2_C_STRETCH_RAMP_ATR", 8.0)
     stretch_cap = _env_float("TITAN_SIGV2_C_STRETCH_CAP", 2.0)
+    # Fix A (mirror): symmetric upside-z over-extension. A statistically stretched
+    # *up* move (high positive z) adds mean-reversion risk, paralleling the existing
+    # downside-z bear term. Conservative default deadband keeps clean buys intact.
+    upside_z_deadband = _env_float("TITAN_SIGV2_C_UPSIDE_Z_DEADBAND", 2.5)
+    upside_z_ramp = _env_float("TITAN_SIGV2_C_UPSIDE_Z_RAMP", 4.0)
+    upside_z_cap = _env_float("TITAN_SIGV2_C_UPSIDE_Z_CAP", 1.5)
 
     # C-7 money flow with +/-0.05 dead-band, scaled by magnitude.
     money_flow_bear = 0.0
@@ -345,6 +354,16 @@ def layer_c(audit: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
+    # C-8b upside-z over-extension (symmetric to the downside-z bear term).
+    upside_z = _ramp(z, zero_at=upside_z_deadband, full_at=upside_z_ramp, full_points=upside_z_cap)
+    if upside_z > 0.05:
+        trace.append(
+            {
+                "layer": "C", "group": "over_extension", "metric": "z_score",
+                "value": _round(z), "points": _round(upside_z), "side": "bear",
+            }
+        )
+
     # Fundamentals (kept from legacy as a graded adjustment to bear risk).
     f_status = str(audit.get("fundamental_status") or "unavailable")
     fundamental = 0.0
@@ -369,6 +388,7 @@ def layer_c(audit: dict[str, Any]) -> dict[str, Any]:
         "money_flow_bull": money_flow_bull,
         "over_extension": over_ext,
         "over_extension_hot": over_extension_hot,
+        "upside_z": upside_z,
         "fundamental": fundamental,
         "bull_terms": money_flow_bull,
         "trace": trace,
@@ -570,6 +590,7 @@ def _aggregate(c: dict[str, Any], d: dict[str, Any]) -> dict[str, float]:
     risk_c += float(fam.get("volatility", 0.0))
     risk_c += float(c.get("money_flow_bear", 0.0)) * mult_mf
     risk_c += float(c.get("over_extension", 0.0)) * mult_oe
+    risk_c += float(c.get("upside_z", 0.0)) * mult_oe
     risk_c += float(c.get("fundamental", 0.0))  # may be negative (strong fundamentals)
     risk_c += float(d.get("divergence_bump", 0.0))
     risk_c = _clamp(risk_c, 0.0, 10.0)
@@ -627,10 +648,212 @@ def _map_label(risk_net: float, gate: dict[str, bool], a: dict[str, Any]) -> str
 
 
 def _apply_ceiling(label: str, ceiling: str | None) -> str:
-    """Layer-A ceiling caps the *constructive* side only (never blocks downgrades)."""
+    """Layer-A / over-extension ceiling caps the *constructive* side only (never blocks
+    downgrades). ``hold`` caps buy/accumulate -> hold; ``accumulate`` caps buy -> accumulate.
+    """
     if ceiling == "hold" and label in ("buy", "accumulate"):
         return "hold"
+    if ceiling == "accumulate" and label == "buy":
+        return "accumulate"
     return label
+
+
+# STEP 2b: over-extension ceilings on the literal buy/accumulate labels. A statistically
+# stretched name (high ATR-normalized EMA200 stretch, high z, far above EMA200, pinned to
+# its 20d high) should not earn a *fresh* buy even when the risk score is low; cap the
+# constructive label. Shadow-first: default mode records the would-be ceiling without
+# changing the label. NaN inputs simply don't contribute (degrades to no ceiling).
+_SIGV2_CEIL_STRETCH_ACCUM = 4.0    # ATR stretch -> at least accumulate ceiling
+_SIGV2_CEIL_STRETCH_HOLD = 6.0     # ATR stretch -> hold ceiling
+_SIGV2_CEIL_Z_HOT = 2.5            # upside z that corroborates over-extension
+_SIGV2_CEIL_EMA_DIST_HOT = 18.0    # % above EMA200 that corroborates
+_SIGV2_CEIL_NEAR_HIGH_PCT = 1.0    # within this % of the 20d high = pinned to high
+
+
+def _overextension_ceiling_mode() -> str:
+    raw = os.environ.get("TITAN_SIGV2_OVEREXT_CEILING_MODE", "").strip().lower()
+    return raw if raw in ("off", "shadow", "damp", "enforce") else "shadow"
+
+
+def _overextension_ceiling(audit: dict[str, Any]) -> dict[str, Any]:
+    """Return {ceiling, hot, reasons, components} for the over-extension label cap."""
+    stretch = _sf(audit.get("ema200_stretch_atr"))
+    z = _sf(audit.get("z_score"))
+    ema_dist = _sf(audit.get("ema_200_distance_pct"))
+    to_high = _sf(audit.get("breakout_20d_distance_pct_to_high"))
+
+    s_accum = _env_float("TITAN_SIGV2_CEIL_STRETCH_ACCUM", _SIGV2_CEIL_STRETCH_ACCUM)
+    s_hold = _env_float("TITAN_SIGV2_CEIL_STRETCH_HOLD", _SIGV2_CEIL_STRETCH_HOLD)
+    z_hot = _env_float("TITAN_SIGV2_CEIL_Z_HOT", _SIGV2_CEIL_Z_HOT)
+    ema_hot = _env_float("TITAN_SIGV2_CEIL_EMA_DIST_HOT", _SIGV2_CEIL_EMA_DIST_HOT)
+    near_high_pct = _env_float("TITAN_SIGV2_CEIL_NEAR_HIGH_PCT", _SIGV2_CEIL_NEAR_HIGH_PCT)
+
+    hot: list[str] = []
+    if not math.isnan(stretch) and stretch >= s_accum:
+        hot.append(f"stretch {stretch:.2f}")
+    if not math.isnan(z) and z >= z_hot:
+        hot.append(f"z {z:.2f}")
+    if not math.isnan(ema_dist) and ema_dist >= ema_hot:
+        hot.append(f"ema_dist {ema_dist:.1f}%")
+    if not math.isnan(to_high) and to_high >= -abs(near_high_pct):
+        hot.append("pinned to 20d-high")
+
+    ceiling: str | None = None
+    extreme_stretch = (not math.isnan(stretch)) and stretch >= s_hold
+    if extreme_stretch or len(hot) >= 3:
+        ceiling = "hold"
+    elif (not math.isnan(stretch) and stretch >= s_accum) or len(hot) >= 2:
+        ceiling = "accumulate"
+    return {
+        "ceiling": ceiling,
+        "hot": hot,
+        "components": {
+            "ema200_stretch_atr": _round(stretch),
+            "z_score": _round(z),
+            "ema_200_distance_pct": _round(ema_dist),
+            "breakout_20d_distance_pct_to_high": _round(to_high),
+        },
+    }
+
+
+def _combine_ceilings(*ceilings: str | None) -> str | None:
+    """Most restrictive of several ceilings (hold > accumulate > none)."""
+    rank = {None: 0, "accumulate": 1, "hold": 2}
+    best = None
+    for c in ceilings:
+        if rank.get(c, 0) > rank.get(best, 0):
+            best = c
+    return best
+
+
+# Phase 2: next-open gap entry guard (shadow-first). Until live opening prints exist,
+# derive gap from explicit stored fields, return-series OHLC, or next-session session_move.
+_SIGV2_GAP_UP_PCT = 2.5
+_SIGV2_GAP_UP_HOLD_PCT = 5.0
+_SIGV2_GAP_DOWN_PCT = -1.5
+_SIGV2_GAP_DOWN_TRIM_PCT = -3.0
+
+
+def _gap_guard_mode() -> str:
+    raw = os.environ.get("TITAN_GAP_GUARD_MODE", "").strip().lower()
+    return raw if raw in ("shadow", "damp", "skip") else "shadow"
+
+
+def _gap_from_return_series(audit: dict[str, Any]) -> tuple[float, str]:
+    """Gap from the last two OHLC sessions: next open vs prior close."""
+    for key in ("return_series", "ohlc_sessions", "ohlc_return_series"):
+        raw = audit.get(key)
+        if not isinstance(raw, list) or len(raw) < 2:
+            continue
+        prev = raw[-2]
+        nxt = raw[-1]
+        if not isinstance(prev, dict) or not isinstance(nxt, dict):
+            continue
+        prev_close = _sf(
+            prev.get("close")
+            if prev.get("close") is not None
+            else prev.get("close_last")
+        )
+        next_open = _sf(
+            nxt.get("open") if nxt.get("open") is not None else nxt.get("open_last")
+        )
+        if (
+            not math.isnan(prev_close)
+            and prev_close != 0.0
+            and not math.isnan(next_open)
+        ):
+            return ((next_open / prev_close) - 1.0) * 100.0, key
+    return float("nan"), "none"
+
+
+def _derive_next_open_gap_pct(audit: dict[str, Any]) -> tuple[float, str]:
+    """Return (gap_pct, source). NaN gap => guard is a no-op."""
+    for key in (
+        "next_open_gap_pct",
+        "next_session_gap_pct",
+        "next_open_vs_signal_close_pct",
+        "open_gap_pct",
+    ):
+        v = _sf(audit.get(key))
+        if not math.isnan(v):
+            return v, key
+
+    signal_close = _sf(audit.get("signal_close_last"))
+    if math.isnan(signal_close):
+        signal_close = _sf(audit.get("close_last"))
+    for open_key in ("next_session_open", "next_open", "open_next"):
+        nxt_open = _sf(audit.get(open_key))
+        if (
+            not math.isnan(signal_close)
+            and signal_close != 0.0
+            and not math.isnan(nxt_open)
+        ):
+            return ((nxt_open / signal_close) - 1.0) * 100.0, open_key
+
+    gap_pct, src = _gap_from_return_series(audit)
+    if not math.isnan(gap_pct):
+        return gap_pct, src
+
+    for key in ("next_session_move_vs_prev_close_pct",):
+        v = _sf(audit.get(key))
+        if not math.isnan(v):
+            return v, key
+
+    if bool(audit.get("gap_guard_next_open_proxy")):
+        v = _sf(audit.get("session_move_vs_prev_close_pct"))
+        if not math.isnan(v):
+            return v, "session_move_vs_prev_close_pct"
+
+    return float("nan"), "none"
+
+
+def _gap_guard(audit: dict[str, Any], label: str) -> dict[str, Any]:
+    """Shadow-first next-open gap guard for constructive entry labels."""
+    gap_pct, source = _derive_next_open_gap_pct(audit)
+    up_pct = _env_float("TITAN_GAP_GUARD_UP_PCT", _SIGV2_GAP_UP_PCT)
+    up_hold = _env_float("TITAN_GAP_GUARD_UP_HOLD_PCT", _SIGV2_GAP_UP_HOLD_PCT)
+    down_pct = _env_float("TITAN_GAP_GUARD_DOWN_PCT", _SIGV2_GAP_DOWN_PCT)
+    down_trim = _env_float("TITAN_GAP_GUARD_DOWN_TRIM_PCT", _SIGV2_GAP_DOWN_TRIM_PCT)
+
+    out: dict[str, Any] = {
+        "gap_pct": None if math.isnan(gap_pct) else _round(gap_pct),
+        "source": source,
+        "would_action": None,
+        "would_ceiling": None,
+        "would_forced_label": None,
+        "reason": "no_gap_data",
+    }
+
+    if math.isnan(gap_pct):
+        return out
+    if label not in ("buy", "accumulate"):
+        out["reason"] = "not_constructive"
+        return out
+
+    if gap_pct >= up_pct:
+        ceiling = "hold" if gap_pct >= up_hold else "accumulate"
+        out.update(
+            {
+                "would_action": "damp",
+                "would_ceiling": ceiling,
+                "reason": f"gap_up {gap_pct:.2f}% >= {up_pct}%",
+            }
+        )
+        return out
+
+    if gap_pct <= down_pct:
+        forced = "trim" if gap_pct <= down_trim else "hold"
+        out.update(
+            {
+                "would_action": "skip",
+                "would_forced_label": forced,
+                "reason": f"gap_down {gap_pct:.2f}% <= {down_pct}%",
+            }
+        )
+        return out
+
+    out["reason"] = f"gap {gap_pct:.2f}% within band"
+    return out
 
 
 def _escalate(label: str, forced: str | None) -> str:
@@ -720,7 +943,53 @@ def evaluate_signal_v2(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
 
     gate = _buy_gate(audit, a, c)
     label = _map_label(risk_net, gate, a)
-    label = _apply_ceiling(label, a.get("label_ceiling"))
+    # STEP 2b: over-extension ceiling (shadow-first). Compute the would-be cap always;
+    # apply it only when enforced (damp applies the milder accumulate cap, never hold).
+    oe_mode = _overextension_ceiling_mode()
+    oe = _overextension_ceiling(audit)
+    oe_ceiling = oe.get("ceiling")
+    applied_oe_ceiling: str | None = None
+    if oe_mode == "enforce":
+        applied_oe_ceiling = oe_ceiling
+    elif oe_mode == "damp" and oe_ceiling is not None:
+        applied_oe_ceiling = "accumulate"
+    label_before_oe = label
+    label = _apply_ceiling(label, _combine_ceilings(a.get("label_ceiling"), applied_oe_ceiling))
+    audit["signal_overext_ceiling"] = {
+        "mode": oe_mode,
+        "would_ceiling": oe_ceiling,
+        "applied_ceiling": applied_oe_ceiling,
+        "label_before": label_before_oe,
+        "label_after": label,
+        "hot": oe.get("hot", []),
+        "components": oe.get("components", {}),
+    }
+    # Phase 2: next-open gap guard (shadow-first). Logs would_action always; applies ceiling /
+    # escalation only in damp / skip enforcement modes.
+    gg_mode = _gap_guard_mode()
+    gg = _gap_guard(audit, label)
+    applied_gg_ceiling: str | None = None
+    applied_gg_forced: str | None = None
+    if gg_mode == "damp" and gg.get("would_action") == "damp":
+        applied_gg_ceiling = gg.get("would_ceiling")
+    elif gg_mode == "skip" and gg.get("would_action") == "skip":
+        applied_gg_forced = gg.get("would_forced_label")
+    label_before_gg = label
+    label = _apply_ceiling(label, applied_gg_ceiling)
+    label = _escalate(label, applied_gg_forced)
+    audit["gap_guard"] = {
+        "mode": gg_mode,
+        "gap_pct": gg.get("gap_pct"),
+        "source": gg.get("source"),
+        "would_action": gg.get("would_action"),
+        "would_ceiling": gg.get("would_ceiling"),
+        "would_forced_label": gg.get("would_forced_label"),
+        "applied_ceiling": applied_gg_ceiling,
+        "applied_forced_label": applied_gg_forced,
+        "label_before": label_before_gg,
+        "label_after": label,
+        "reason": gg.get("reason"),
+    }
     label = _escalate(label, b.get("forced_label"))
 
     bypass = bool(b.get("bypass_hysteresis"))

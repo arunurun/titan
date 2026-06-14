@@ -2041,3 +2041,57 @@ def test_compact_digest_section_headers_preserved(monkeypatch):
     text = _format_symbol_metrics_line({"symbol": "HDR", "exchange": "NSE", "audit": audit})
     for header in ("▸ Trend Regime (14D)", "▸ 20D Money Flow", "▸ 1D / Tape", "▸ Model outlook"):
         assert header in text
+
+
+def test_digest_shadow_gate_notes_in_context(monkeypatch):
+    monkeypatch.delenv("TITAN_DIGEST_VERBOSE_SYMBOLS", raising=False)
+    from sector_audit import _digest_shadow_gate_notes, _format_symbol_metrics_line
+
+    audit = {
+        "sector_key": "banks_psu",
+        "effective_intent_score": 58.0,
+        "z_score": 1.2,
+        "volume_participation_ratio": 1.4,
+        "return_1d_pct": 0.8,
+        "atr_14_pct": 2.1,
+        "next_week_score": 59.5,
+        "sell_signal": "hold",
+        "sell_signal_reasons": ["monitor trend"],
+        "prediction_breakdown": {"week": {}, "day": {}, "penalties": []},
+        "shadow_gates": [
+            {
+                "gate": "sector_regime",
+                "mode": "shadow",
+                "triggered": True,
+                "would": "withhold/damp new buys",
+                "reasons": ["breadth 33% < floor 40%"],
+                "breadth_now": 33.0,
+                "score_multiplier": 1.0,
+                "withhold": False,
+            },
+            {
+                "gate": "v2_risk_label",
+                "mode": "shadow",
+                "triggered": False,
+                "would": "allow",
+                "v2_label": "hold",
+                "score_multiplier": 1.0,
+                "withhold": False,
+            },
+        ],
+        "signal_overext_ceiling": {
+            "mode": "shadow",
+            "would_ceiling": "accumulate",
+            "applied_ceiling": None,
+            "hot": ["stretch 3.8", "z 2.4"],
+        },
+    }
+    notes = _digest_shadow_gate_notes(audit)
+    assert any("regime gate would damp" in n for n in notes)
+    assert any("overext ceiling gate would cap" in n for n in notes)
+
+    text = _format_symbol_metrics_line({"symbol": "HAL", "exchange": "NSE", "audit": audit})
+    assert "▸ Context" in text
+    assert "• Shadow (not enforced): regime gate would damp — breadth 33% < floor 40%" in text
+    assert "• Shadow (not enforced): overext ceiling gate would cap — stretch 3.8, z 2.4" in text
+    assert "hold" in text.splitlines()[0].lower()

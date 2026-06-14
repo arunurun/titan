@@ -1043,3 +1043,121 @@ def test_resolve_global_news_snapshot_stale_refresh_failure_falls_back(monkeypat
     assert out["fresh"] is False
     assert "feed timeout" in (out.get("refresh_error") or "")
 
+
+def test_calendar_event_gate_triggers_on_dividend():
+    from sector_priority import _calendar_event_gate, _calendar_purpose_is_event
+
+    assert _calendar_purpose_is_event("Interim Dividend - Rs 5")
+    assert _calendar_purpose_is_event("Financial Results")
+    assert not _calendar_purpose_is_event("Annual General Meeting")
+    ctx = {
+        "calendar": {
+            "RELIANCE": [
+                {"ex_date": "2026-06-15", "purpose": "Interim Dividend - Rs 5"},
+                {"ex_date": "2026-06-20", "purpose": "Annual General Meeting"},
+            ]
+        },
+        "calendar_window_end": "2026-06-19",
+    }
+    gate = _calendar_event_gate("RELIANCE", ctx)
+    assert gate["gate"] == "calendar_event"
+    assert gate["triggered"] is True
+    assert gate["n_events"] == 1
+    assert gate["withhold"] is False  # default shadow mode
+
+
+def test_calendar_event_gate_noop_when_empty():
+    from sector_priority import _calendar_event_gate
+
+    gate = _calendar_event_gate("ZZZ", {"calendar": {}})
+    assert gate["triggered"] is False
+    assert gate["n_events"] == 0
+
+
+def test_pledge_slb_gate_off_by_default(monkeypatch):
+    from sector_priority import _pledge_slb_gate
+
+    monkeypatch.delenv("TITAN_PLEDGE_SLB_GATE_MODE", raising=False)
+    assert _pledge_slb_gate("RELIANCE", {}) is None
+
+
+def test_pledge_slb_gate_shadow_logs_not_implemented(monkeypatch):
+    from sector_priority import _pledge_slb_gate
+
+    monkeypatch.setenv("TITAN_PLEDGE_SLB_GATE_MODE", "shadow")
+    gate = _pledge_slb_gate("RELIANCE", {})
+    assert gate is not None
+    assert gate["status"] == "not_implemented"
+    assert gate["triggered"] is False
+
+
+def test_breeze_data_freshness_gate_shadow_when_stale(monkeypatch):
+    from sector_priority import _breeze_data_freshness_gate
+
+    monkeypatch.setattr("breeze_client.is_breeze_data_stale", lambda: True)
+    monkeypatch.setattr("breeze_client.breeze_data_stale_reason", lambda: "token missing")
+    monkeypatch.setattr("breeze_client.breeze_stale_hard_stop_enabled", lambda: False)
+    monkeypatch.setenv("TITAN_BREEZE_FRESHNESS_GATE_MODE", "shadow")
+    gate = _breeze_data_freshness_gate()
+    assert gate["triggered"] is True
+    assert gate["withhold"] is False
+    assert gate["would"] == "withhold (stale Breeze data)"
+
+
+def test_breeze_data_freshness_gate_hard_stop_skip(monkeypatch):
+    from sector_priority import _breeze_data_freshness_gate
+
+    monkeypatch.setattr("breeze_client.is_breeze_data_stale", lambda: True)
+    monkeypatch.setattr("breeze_client.breeze_data_stale_reason", lambda: "expired")
+    monkeypatch.setattr("breeze_client.breeze_stale_hard_stop_enabled", lambda: True)
+    monkeypatch.setenv("TITAN_BREEZE_FRESHNESS_GATE_MODE", "skip")
+    gate = _breeze_data_freshness_gate()
+    assert gate["triggered"] is True
+    assert gate["withhold"] is True
+
+
+def test_live_regime_read_off_by_default(monkeypatch):
+    from sector_priority import _live_regime_read_enabled
+
+    monkeypatch.delenv("TITAN_LIVE_REGIME_READ", raising=False)
+    assert _live_regime_read_enabled() is False
+
+
+def test_merge_regime_with_live_snapshot_shadow_only():
+    from sector_priority import _merge_regime_with_live_snapshot, _regime_gate_decision
+
+    eod = _regime_gate_decision([])
+    live = {
+        "index_code": "NIFTY BANK",
+        "snapshot_ts": "2026-06-14T10:00:00+05:30",
+        "regime_state": "risk_off",
+        "pct_vs_prev_close": -0.5,
+        "pct_vs_open": -0.2,
+    }
+    merged = _merge_regime_with_live_snapshot(eod, live, sector_key="banks_psu")
+    assert merged["triggered"] is False
+    assert merged["withhold"] is False
+    assert merged["live_would_trigger"] is True
+    assert merged["live_regime_state"] == "risk_off"
+    assert any("shadow" in r for r in merged.get("reasons", []))
+
+
+def test_merge_regime_with_live_snapshot_fallback_to_eod():
+    from sector_priority import _merge_regime_with_live_snapshot, _regime_gate_decision
+
+    eod = _regime_gate_decision(
+        [
+            {"trade_date": "2026-06-01", "breadth_above_ema200_pct": 30.0, "avg_effective_intent_score": 50.0},
+            {"trade_date": "2026-06-02", "breadth_above_ema200_pct": 25.0, "avg_effective_intent_score": 45.0},
+        ]
+    )
+    merged = _merge_regime_with_live_snapshot(eod, None, sector_key="defence")
+    assert merged == eod
+
+
+def test_sector_benchmark_index_code_maps_psu_banks():
+    from sector_priority import _sector_benchmark_index_code
+
+    assert _sector_benchmark_index_code("banks_psu") == "NIFTY BANK"
+    assert _sector_benchmark_index_code("defence") == "NIFTY"
+

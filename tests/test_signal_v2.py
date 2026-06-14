@@ -313,3 +313,100 @@ def test_hysteresis_danger_is_fast():
         "exit-risk", 8.0, prior_label="hold", bypass=True, buffer=0.5
     )
     assert label == "exit-risk" and applied is False
+
+
+# --------------------------------------------------------------------------- #
+# Phase 2 — next-open gap entry guard (shadow-first)
+# --------------------------------------------------------------------------- #
+
+
+def _gap_buy_audit(**extra) -> dict:
+    base = _clean_buy_audit()
+    base.update(extra)
+    return base
+
+
+def test_gap_guard_shadow_logs_without_changing_label(monkeypatch):
+    monkeypatch.setenv("TITAN_GAP_GUARD_MODE", "shadow")
+    audit = _gap_buy_audit(next_open_gap_pct=4.0)
+    label, _, _ = v2.evaluate_signal_v2(audit)
+    gg = audit["gap_guard"]
+    assert label == "buy"
+    assert gg["mode"] == "shadow"
+    assert gg["would_action"] == "damp"
+    assert gg["gap_pct"] == pytest.approx(4.0)
+    assert gg["applied_ceiling"] is None
+    assert gg["applied_forced_label"] is None
+
+
+def test_gap_guard_damp_caps_gap_up_buy(monkeypatch):
+    monkeypatch.setenv("TITAN_GAP_GUARD_MODE", "damp")
+    audit = _gap_buy_audit(next_open_gap_pct=3.0)
+    label, _, _ = v2.evaluate_signal_v2(audit)
+    gg = audit["gap_guard"]
+    assert gg["would_action"] == "damp"
+    assert label == "accumulate"
+    assert gg["applied_ceiling"] == "accumulate"
+
+
+def test_gap_guard_damp_extreme_gap_up_holds(monkeypatch):
+    monkeypatch.setenv("TITAN_GAP_GUARD_MODE", "damp")
+    audit = _gap_buy_audit(next_open_gap_pct=6.0)
+    label, _, _ = v2.evaluate_signal_v2(audit)
+    assert audit["gap_guard"]["would_ceiling"] == "hold"
+    assert label == "hold"
+
+
+def test_gap_guard_skip_escalates_gap_down_buy(monkeypatch):
+    monkeypatch.setenv("TITAN_GAP_GUARD_MODE", "skip")
+    audit = _gap_buy_audit(next_open_gap_pct=-2.0)
+    label, _, _ = v2.evaluate_signal_v2(audit)
+    gg = audit["gap_guard"]
+    assert gg["would_action"] == "skip"
+    assert label == "hold"
+    assert gg["applied_forced_label"] == "hold"
+
+
+def test_gap_guard_skip_severe_gap_down_trims(monkeypatch):
+    monkeypatch.setenv("TITAN_GAP_GUARD_MODE", "skip")
+    audit = _gap_buy_audit(next_open_gap_pct=-4.0)
+    label, _, _ = v2.evaluate_signal_v2(audit)
+    gg = audit["gap_guard"]
+    assert gg["would_forced_label"] == "trim"
+    assert label == "trim"
+
+
+def test_gap_guard_nan_is_noop(monkeypatch):
+    monkeypatch.setenv("TITAN_GAP_GUARD_MODE", "skip")
+    audit = _gap_buy_audit()
+    label, _, _ = v2.evaluate_signal_v2(audit)
+    gg = audit["gap_guard"]
+    assert label == "buy"
+    assert gg["would_action"] is None
+    assert gg["reason"] == "no_gap_data"
+
+
+def test_gap_guard_derives_from_return_series(monkeypatch):
+    monkeypatch.setenv("TITAN_GAP_GUARD_MODE", "shadow")
+    audit = _gap_buy_audit(
+        return_series=[
+            {"close": 100.0},
+            {"open": 104.0},
+        ]
+    )
+    gap_pct, source = v2._derive_next_open_gap_pct(audit)
+    assert gap_pct == pytest.approx(4.0)
+    assert source == "return_series"
+    label, _, _ = v2.evaluate_signal_v2(audit)
+    assert audit["gap_guard"]["would_action"] == "damp"
+
+
+def test_gap_guard_session_move_proxy_when_flagged(monkeypatch):
+    monkeypatch.setenv("TITAN_GAP_GUARD_MODE", "shadow")
+    audit = _gap_buy_audit(
+        gap_guard_next_open_proxy=True,
+        session_move_vs_prev_close_pct=3.2,
+    )
+    gap_pct, source = v2._derive_next_open_gap_pct(audit)
+    assert gap_pct == pytest.approx(3.2)
+    assert source == "session_move_vs_prev_close_pct"

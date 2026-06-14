@@ -83,6 +83,27 @@ def _safe_float(v: Any) -> float:
     return x if not math.isnan(x) else float("nan")
 
 
+def forward_return_eval_enabled() -> bool:
+    """When set, metrics score FORWARD (+1 session) returns instead of same-day."""
+    return os.environ.get("TITAN_FORWARD_RETURN_EVAL", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _metric_return(row: dict[str, Any]) -> Any:
+    """Return used for hit-rate / drawdown metrics.
+
+    Default is the stored same-day ``return_1d_pct`` (trailing). When
+    ``TITAN_FORWARD_RETURN_EVAL`` is on and a forward field is present on the row,
+    the forward (+1 session) return is used instead so the scoreboard is non-circular.
+    """
+    if forward_return_eval_enabled():
+        fwd = row.get("forward_return_1d_pct")
+        if not math.isnan(_safe_float(fwd)):
+            return fwd
+    return row.get("return_1d_pct")
+
+
 def return_direction(ret_pct: Any) -> str:
     """Mirror analysis_store._return_direction (0.3% dead band)."""
     v = _safe_float(ret_pct)
@@ -201,6 +222,14 @@ def feature_row_to_audit(row: dict[str, Any]) -> dict[str, Any] | None:
             audit[key] = tape[key]
     if audit.get("next_week_score") is None and tape.get("next_week_score") is not None:
         audit["next_week_score"] = tape["next_week_score"]
+    # Derive ATR-normalized EMA200 stretch from stored columns when it was not persisted
+    # in tape_extras, so the over-extension (C-8) / ADX-regime (D) layers do not silently
+    # run at zero on historical rows that predate the tape_extras risk-gate persistence.
+    if _safe_float(audit.get("ema200_stretch_atr")) != _safe_float(audit.get("ema200_stretch_atr")):
+        ema_dist = _safe_float(audit.get("ema_200_distance_pct"))
+        atr_pct = _safe_float(audit.get("atr_14_pct"))
+        if not math.isnan(ema_dist) and not math.isnan(atr_pct) and atr_pct != 0.0:
+            audit["ema200_stretch_atr"] = round(ema_dist / atr_pct, 4)
     return audit
 
 
@@ -355,7 +384,7 @@ def accumulate_pair_metrics(
     cand = normalize_action_signal(candidate_label)
     metrics.label_counts[cand] = metrics.label_counts.get(cand, 0) + 1
 
-    ret = row.get("return_1d_pct")
+    ret = _metric_return(row)
     if is_defensive_escalation(ref, cand):
         metrics.defensive_escalation_events += 1
         saved = drawdown_saved_pct(ret)
@@ -697,7 +726,25 @@ def fetch_supabase_rows(
         .order("trade_date")
         .execute()
     )
-    return list(getattr(res, "data", None) or [])
+    rows = list(getattr(res, "data", None) or [])
+    if forward_return_eval_enabled():
+        _attach_forward_returns(rows)
+    return rows
+
+
+def _attach_forward_returns(rows: Sequence[dict[str, Any]]) -> None:
+    """Annotate each row in-place with ``forward_return_1d_pct`` (next session's return).
+
+    Forward is derived from the per-symbol ``return_1d_pct`` series (the move realized
+    on the FOLLOWING session); rows without a next session keep NaN and fall back to
+    the same-day metric. Mutates rows; safe no-op when the series has gaps.
+    """
+    for sym_rows in group_rows_by_symbol(rows).values():
+        for i, row in enumerate(sym_rows):
+            nxt = sym_rows[i + 1] if i + 1 < len(sym_rows) else None
+            row["forward_return_1d_pct"] = (
+                nxt.get("return_1d_pct") if nxt is not None else float("nan")
+            )
 
 
 def format_report(report: dict[str, Any]) -> str:

@@ -10,6 +10,8 @@ from zoneinfo import ZoneInfo
 from analysis_store import (
     build_reconcile_digest_lines,
     enrich_audits_with_stock_reconcile,
+    forward_outcomes_persist_enabled,
+    persist_forward_outcomes,
     persist_reconcile_backfill,
 )
 from config_loader import load_config
@@ -103,6 +105,20 @@ def run_reconcile_report(
                 f"scope={scope_label}"
             )
 
+        forward_outcomes_meta: dict[str, Any] = {"enabled": False, "updated": 0}
+        if forward_outcomes_persist_enabled():
+            forward_outcomes_meta = persist_forward_outcomes(
+                cfg,
+                sector=None if all_stocks else scope_label,
+                all_stocks=all_stocks,
+            )
+            print(
+                "[reconcile] forward_outcomes updated="
+                f"{forward_outcomes_meta.get('updated', 0)} "
+                f"scope={forward_outcomes_meta.get('scope', scope_label)} "
+                f"candidates={forward_outcomes_meta.get('candidates', 0)}"
+            )
+
         return {
             "scope": scope_label,
             "summary": summary,
@@ -110,4 +126,5 @@ def run_reconcile_report(
             "email_configured": bool((os.environ.get("SMTP_HOST") or "").strip())
             and bool((os.environ.get("EMAIL_TO") or "").strip()),
             "backfill": backfill_meta,
+            "forward_outcomes": forward_outcomes_meta,
         }

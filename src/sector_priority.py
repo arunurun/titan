@@ -10,7 +10,7 @@ import re
 import urllib.parse
 import urllib.error
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urlparse
@@ -1981,12 +1981,868 @@ def _return_pct(series: pd.Series, periods_back: int) -> float:
     return ((last / prev) - 1.0) * 100.0
 
 
-def _score_from_features(*, bucket: str, ret_1w: float, ret_1m: float, absorption: float) -> float:
+def _env_float(name: str, default: float) -> float:
+    raw = (str(os.environ.get(name, "")) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _overextension_enabled() -> bool:
+    raw = (str(os.environ.get("TITAN_OVEREXT_ENABLED", "")) or "").strip().lower()
+    if not raw:
+        return True
+    return raw not in ("0", "false", "no", "off")
+
+
+# Overextension penalty defaults (Fix A). Smooth ramps, not hard cliffs. Tunable via
+# TITAN_OVEREXT_* env knobs. Defaults are calibrated so volatility-stretched and/or
+# climactically-run winners (e.g. ABB, GREAVESCOT, EICHERMOT) are materially demoted
+# while orderly risers (e.g. GARFIBRES, MAHABANK) are left almost untouched.
+_OVEREXT_STRETCH_DEADBAND = 3.0  # ATR-normalized EMA200 stretch where penalty starts
+_OVEREXT_STRETCH_FULL = 7.0      # stretch at which the stretch channel is maxed
+_OVEREXT_STRETCH_WEIGHT = 9.0    # max points removed by the stretch channel
+_OVEREXT_RUN_DEADBAND_PCT = 6.0  # 1-week return where the run channel starts
+_OVEREXT_RUN_FULL_PCT = 12.0     # 1-week return at which the run channel is maxed
+_OVEREXT_RUN_WEIGHT = 6.0        # max points removed by the run channel (pre-amp)
+_OVEREXT_ABSORPTION_AMP = 0.25   # volume-confirmation amplifier on the run channel
+_OVEREXT_PENALTY_CAP = 18.0      # absolute cap on total penalty
+# Run-gate on the stretch channel: a name that is ATR-stretched but has not actually
+# run up recently (flat/falling 1w & 1m) is a high-beta name far from a distant EMA200,
+# not a fresh blow-off, so the stretch penalty is scaled down by recent run context.
+_OVEREXT_RUN_GATE_ZERO_PCT = 0.0  # recent run (max of 1w/1m) at which the gate is fully off
+_OVEREXT_RUN_GATE_FULL_PCT = 4.0  # recent run at which the gate is fully on
+
+
+def _ramp(value: float, zero_at: float, full_at: float, full_points: float) -> float:
+    """Linear 0->full_points ramp between zero_at and full_at (clamped); NaN -> 0."""
+    if math.isnan(value) or zero_at == full_at:
+        return 0.0
+    frac = (value - zero_at) / (full_at - zero_at)
+    return _clamp(frac, 0.0, 1.0) * full_points
+
+
+# Fix A refinement (STEP 2a): gate the penalty behind momentum/regime confirmation so it
+# stops demoting genuine continuing winners (sustained strong monthly trend + positive
+# week, e.g. E2E/IDEAFORGE) while still biting stretched names that have stalled (flat/
+# weak monthly trend, e.g. ABB/HINDPETRO/EICHERMOT) or sit in a hostile regime.
+_OVEREXT_CONFIRM_TREND_WEAK_PCT = 6.0    # 1m return where continuation credit starts
+_OVEREXT_CONFIRM_TREND_FULL_PCT = 18.0   # 1m return where continuation credit is maxed
+_OVEREXT_CONFIRM_FLOOR = 0.2             # min penalty multiplier for a confirmed winner
+
+
+def _overextension_confirm_mode() -> str:
+    raw = (str(os.environ.get("TITAN_OVEREXT_CONFIRM_MODE", "")) or "").strip().lower()
+    return raw if raw in ("off", "momentum", "both") else "momentum"
+
+
+def _overextension_confirmation(ret_1w: float, ret_1m: float, regime_hostile: bool) -> tuple[float, str]:
+    """Penalty multiplier in [floor, 1.0].
+
+    A name with a sustained monthly uptrend AND positive weekly follow-through is a
+    genuine continuing winner -> multiplier shrinks toward ``floor`` (penalty suppressed).
+    A hostile regime forces the full penalty. NaN momentum inputs -> 1.0 (today's blunt
+    behaviour), so missing data degrades to the pre-refinement penalty.
+    """
+    mode = _overextension_confirm_mode()
+    if mode == "off":
+        return 1.0, "off"
+    if regime_hostile and mode == "both":
+        return 1.0, "regime_hostile"
+    if math.isnan(ret_1m) or math.isnan(ret_1w):
+        return 1.0, "nan_inputs"
+    weak = _env_float("TITAN_OVEREXT_CONFIRM_TREND_WEAK_PCT", _OVEREXT_CONFIRM_TREND_WEAK_PCT)
+    full = _env_float("TITAN_OVEREXT_CONFIRM_TREND_FULL_PCT", _OVEREXT_CONFIRM_TREND_FULL_PCT)
+    floor = _env_float("TITAN_OVEREXT_CONFIRM_FLOOR", _OVEREXT_CONFIRM_FLOOR)
+    cont = _ramp(ret_1m, weak, full, 1.0)
+    if ret_1w <= 0.0:  # weekly rolling over -> not a continuing winner
+        cont = 0.0
+    mult = 1.0 - (1.0 - _clamp(floor, 0.0, 1.0)) * cont
+    return _clamp(mult, floor, 1.0), f"cont={round(cont, 3)}"
+
+
+def _overextension_penalty(
+    *,
+    ret_1w: float,
+    ret_1m: float,
+    absorption: float,
+    stretch: float = float("nan"),
+    ema_dist: float = float("nan"),
+    regime_hostile: bool = False,
+) -> dict[str, Any]:
+    """Smooth overextension penalty for the winner rank_score (Fix A).
+
+    Two ramped channels, summed and capped:
+      * ATR-normalized stretch (ema_200_distance_pct / atr_14_pct) above a deadband
+        -- a high distance that is *small* relative to volatility is not penalized.
+      * 1-week run, amplified when the run is backed by high volume participation /
+        absorption (a climactic, volume-confirmed blow-off mean-reverts more often).
+    ``ema_dist`` is accepted for explainability/future use; scoring uses ``stretch``.
+    Returns a positive penalty plus a component breakdown for score_breakdown.
+    """
+    if not _overextension_enabled():
+        return {"penalty": 0.0, "components": {}, "enabled": False}
+    s_dead = _env_float("TITAN_OVEREXT_STRETCH_DEADBAND", _OVEREXT_STRETCH_DEADBAND)
+    s_full = _env_float("TITAN_OVEREXT_STRETCH_FULL", _OVEREXT_STRETCH_FULL)
+    s_w = _env_float("TITAN_OVEREXT_STRETCH_WEIGHT", _OVEREXT_STRETCH_WEIGHT)
+    r_dead = _env_float("TITAN_OVEREXT_RUN_DEADBAND_PCT", _OVEREXT_RUN_DEADBAND_PCT)
+    r_full = _env_float("TITAN_OVEREXT_RUN_FULL_PCT", _OVEREXT_RUN_FULL_PCT)
+    r_w = _env_float("TITAN_OVEREXT_RUN_WEIGHT", _OVEREXT_RUN_WEIGHT)
+    abs_amp = _env_float("TITAN_OVEREXT_ABSORPTION_AMP", _OVEREXT_ABSORPTION_AMP)
+    cap = _env_float("TITAN_OVEREXT_PENALTY_CAP", _OVEREXT_PENALTY_CAP)
+    g_zero = _env_float("TITAN_OVEREXT_RUN_GATE_ZERO_PCT", _OVEREXT_RUN_GATE_ZERO_PCT)
+    g_full = _env_float("TITAN_OVEREXT_RUN_GATE_FULL_PCT", _OVEREXT_RUN_GATE_FULL_PCT)
+
+    # Gate the stretch channel by recent run so a stretched-but-not-running name (flat or
+    # falling 1w & 1m) is not treated as an overbought blow-off.
+    run_ctx = max(
+        -1e9 if math.isnan(ret_1w) else ret_1w,
+        -1e9 if math.isnan(ret_1m) else ret_1m,
+    )
+    run_gate = 1.0 if run_ctx <= -1e8 else _ramp(run_ctx, g_zero, g_full, 1.0)
+    stretch_pen = _ramp(stretch, s_dead, s_full, s_w) * run_gate
+    run_base = _ramp(ret_1w, r_dead, r_full, r_w)
+    amp = 1.0
+    if not math.isnan(absorption):
+        amp = 1.0 + abs_amp * _clamp(absorption - 1.0, 0.0, 2.0)
+    run_pen = run_base * amp
+    raw_penalty = stretch_pen + run_pen
+    # STEP 2a: gate the penalty behind momentum/regime confirmation.
+    confirm_mult, confirm_reason = _overextension_confirmation(ret_1w, ret_1m, regime_hostile)
+    penalty = _clamp(raw_penalty * confirm_mult, 0.0, cap)
+    return {
+        "penalty": round(penalty, 4),
+        "components": {
+            "stretch": _round_or_none(stretch),
+            "ema_200_distance_pct": _round_or_none(ema_dist),
+            "stretch_penalty": round(stretch_pen, 4),
+            "run_gate": round(run_gate, 4),
+            "run_1w_penalty": round(run_pen, 4),
+            "absorption_amp": round(amp, 4),
+            "raw_penalty": round(raw_penalty, 4),
+            "confirm_mult": round(confirm_mult, 4),
+            "confirm_reason": confirm_reason,
+        },
+        "enabled": True,
+    }
+
+
+def _stretch_inputs_from_df(df: pd.DataFrame, series: pd.Series) -> tuple[float, float]:
+    """Return (ema_200_distance_pct, ema200_stretch_atr) from a price frame.
+
+    NaN-safe: returns NaNs when history is too short for EMA200 or OHLC for ATR is
+    unavailable (the common case for the ranking module's short live fetch).
+    """
+    s = pd.to_numeric(series, errors="coerce").dropna()
+    if len(s) < 1:
+        return float("nan"), float("nan")
+    try:
+        from titan_engine import calculate_atr, calculate_ema
+    except Exception:  # noqa: BLE001
+        return float("nan"), float("nan")
+    close_last = float(s.iloc[-1])
+    ema_200 = calculate_ema(s, span=200)
+    if math.isnan(ema_200) or ema_200 == 0.0 or math.isnan(close_last):
+        return float("nan"), float("nan")
+    ema_dist = ((close_last / ema_200) - 1.0) * 100.0
+    atr_14 = calculate_atr(df, window=14)
+    if math.isnan(atr_14) or close_last == 0.0:
+        return ema_dist, float("nan")
+    atr_pct = (atr_14 / close_last) * 100.0
+    if math.isnan(atr_pct) or atr_pct == 0.0:
+        return ema_dist, float("nan")
+    return ema_dist, ema_dist / atr_pct
+
+
+# P0-2 (STEP 3a): the legacy absorption bonus ``(absorption-1)*8`` is uncapped and
+# sign-blind, so a high-volume DOWN day (distribution) produces a large POSITIVE score
+# (e.g. BDL crowned #1 off an 8.85x down day). This caps the contribution and zeroes the
+# bonus on a down session. Shadow-first: default mode keeps the legacy value in the
+# published score and only records the would-be gated value.
+_ABS_TERM_MULT = 8.0
+_ABS_TERM_CAP = 12.0
+_ABS_DOWN_DAY_MULT = 0.0   # multiplier applied to a POSITIVE absorption bonus on a down day
+
+
+def _absorption_term(absorption: float, session_move: float = float("nan")) -> dict[str, Any]:
+    """Return the absorption score contribution under the active mode.
+
+    mode (``TITAN_ABS_TERM_MODE``): off/shadow -> legacy uncapped value (default, no-op);
+    damp -> half-way to the gated value; enforce -> capped + down-day sign-gated value.
+    NaN absorption -> 0.0.
+    """
+    raw_mode = (str(os.environ.get("TITAN_ABS_TERM_MODE", "")) or "").strip().lower()
+    mode = raw_mode if raw_mode in ("off", "shadow", "damp", "enforce") else "shadow"
+    mult = _env_float("TITAN_ABS_TERM_MULT", _ABS_TERM_MULT)
+    cap = _env_float("TITAN_ABS_TERM_CAP", _ABS_TERM_CAP)
+    down_mult = _env_float("TITAN_ABS_DOWN_DAY_MULT", _ABS_DOWN_DAY_MULT)
+    if math.isnan(absorption):
+        return {"value": 0.0, "legacy": 0.0, "gated": 0.0, "mode": mode,
+                "down_day": False, "capped": False}
+    legacy = (absorption - 1.0) * mult
+    gated = legacy
+    down_day = (not math.isnan(session_move)) and session_move < 0.0
+    if down_day and gated > 0.0:
+        gated *= down_mult  # absorption on a down day is distribution, not accumulation
+    capped = False
+    if gated > cap:
+        gated, capped = cap, True
+    elif gated < -cap:
+        gated, capped = -cap, True
+    if mode in ("off", "shadow"):
+        applied = legacy
+    elif mode == "damp":
+        applied = 0.5 * legacy + 0.5 * gated
+    else:
+        applied = gated
+    return {"value": round(applied, 4), "legacy": round(legacy, 4), "gated": round(gated, 4),
+            "mode": mode, "down_day": down_day, "capped": capped}
+
+
+def _score_from_features(
+    *,
+    bucket: str,
+    ret_1w: float,
+    ret_1m: float,
+    absorption: float,
+    stretch: float = float("nan"),
+    ema_dist: float = float("nan"),
+    regime_hostile: bool = False,
+    session_move: float = float("nan"),
+) -> float:
     ret_1w_term = 0.0 if math.isnan(ret_1w) else (ret_1w * 1.1)
     ret_1m_term = 0.0 if math.isnan(ret_1m) else (ret_1m * 0.45)
-    absorption_term = 0.0 if math.isnan(absorption) else ((absorption - 1.0) * 8.0)
+    # P0-2 (STEP 3a): capped + sign-gated absorption term (down-day no longer a bonus).
+    absorption_term = _absorption_term(absorption, session_move)["value"]
     score = _cap_bias(bucket) + ret_1w_term + ret_1m_term + absorption_term
-    return round(score, 4)
+    # Fix A: down-rank statistically extended winners (smooth, env-tunable; STEP 2a
+    # gates the penalty behind momentum/regime confirmation).
+    penalty = _overextension_penalty(
+        ret_1w=ret_1w,
+        ret_1m=ret_1m,
+        absorption=absorption,
+        stretch=stretch,
+        ema_dist=ema_dist,
+        regime_hostile=regime_hostile,
+    )["penalty"]
+    return round(score - penalty, 4)
+
+
+# ---------------------------------------------------------------------------
+# Shadow-mode buy-suppression gates (rollout policy: shadow -> damp -> skip).
+# Every gate computes a would-be decision and a score multiplier / withhold flag.
+# In the default ``shadow`` mode the multiplier is 1.0 and withhold is False, so the
+# published rank_score / shortlist is unchanged; the decision is only recorded under
+# meta["shadow_gates"]. ``damp`` applies a half-size multiplier; ``skip`` withholds
+# the name from the priority shortlist. All inputs are NaN-safe: missing data -> no-op.
+# ---------------------------------------------------------------------------
+
+_GATE_MODES = ("off", "shadow", "damp", "skip")
+
+
+def _gate_mode(env_name: str, default: str = "shadow") -> str:
+    raw = (str(os.environ.get(env_name, "")) or "").strip().lower()
+    return raw if raw in _GATE_MODES else default
+
+
+def _gate_effect(mode: str, triggered: bool, damp_mult: float) -> tuple[float, bool]:
+    """Translate (mode, triggered) into a (score_multiplier, withhold) effect.
+
+    shadow/off never change the published value. damp halves (env-tunable). skip
+    withholds from the shortlist (and also damps the score so any downstream rank use
+    reflects the decision).
+    """
+    if not triggered or mode in ("off", "shadow"):
+        return 1.0, False
+    if mode == "damp":
+        return _clamp(damp_mult, 0.0, 1.0), False
+    if mode == "skip":
+        return _clamp(damp_mult, 0.0, 1.0), True
+    return 1.0, False
+
+
+# ---- STEP 1: sector-regime gate (keyed off sector_daily_rollup) ----
+_REGIME_BREADTH_FLOOR = 40.0       # breadth_above_ema200_pct below this is hostile
+_REGIME_BREADTH_FALL_PTS = 12.0    # breadth drop over the lookback that counts as falling
+_REGIME_INTENT_FALL_PTS = 6.0      # avg_effective_intent_score drop that counts as falling
+_REGIME_LOOKBACK = 3               # rollup sessions used for the slope read
+_REGIME_DAMP_MULT = 0.5
+
+
+def _regime_gate_decision(series: list[dict[str, Any]]) -> dict[str, Any]:
+    """Decide whether a sector regime is hostile from recent rollup rows.
+
+    ``series`` is a list of rollup dicts (any order) carrying ``trade_date``,
+    ``breadth_above_ema200_pct`` and ``avg_effective_intent_score``. Combines a breadth
+    floor with breadth/intent slope so a high-breadth-but-deteriorating-intent sector
+    (e.g. defence) is still caught (deep-scan P1-3). NaN-safe: empty/short -> not hostile.
+    """
+    mode = _gate_mode("TITAN_REGIME_GATE_MODE")
+    floor = _env_float("TITAN_REGIME_BREADTH_FLOOR", _REGIME_BREADTH_FLOOR)
+    breadth_fall = _env_float("TITAN_REGIME_BREADTH_FALL_PTS", _REGIME_BREADTH_FALL_PTS)
+    intent_fall = _env_float("TITAN_REGIME_INTENT_FALL_PTS", _REGIME_INTENT_FALL_PTS)
+    lookback = max(2, int(_env_float("TITAN_REGIME_LOOKBACK", float(_REGIME_LOOKBACK))))
+    damp = _env_float("TITAN_REGIME_GATE_DAMP_MULT", _REGIME_DAMP_MULT)
+
+    rows = [r for r in series if isinstance(r, dict)]
+    rows.sort(key=lambda r: str(r.get("trade_date") or ""))
+    window = rows[-lookback:]
+    breadth_vals = [_safe_float(r.get("breadth_above_ema200_pct")) for r in window]
+    intent_vals = [_safe_float(r.get("avg_effective_intent_score")) for r in window]
+    breadth_now = next((v for v in reversed(breadth_vals) if not math.isnan(v)), float("nan"))
+    breadth_first = next((v for v in breadth_vals if not math.isnan(v)), float("nan"))
+    intent_now = next((v for v in reversed(intent_vals) if not math.isnan(v)), float("nan"))
+    intent_first = next((v for v in intent_vals if not math.isnan(v)), float("nan"))
+
+    reasons: list[str] = []
+    below_floor = (not math.isnan(breadth_now)) and breadth_now < floor
+    breadth_drop = (
+        breadth_first - breadth_now
+        if not (math.isnan(breadth_now) or math.isnan(breadth_first))
+        else float("nan")
+    )
+    intent_drop = (
+        intent_first - intent_now
+        if not (math.isnan(intent_now) or math.isnan(intent_first))
+        else float("nan")
+    )
+    breadth_falling = (not math.isnan(breadth_drop)) and breadth_drop >= breadth_fall
+    intent_falling = (not math.isnan(intent_drop)) and intent_drop >= intent_fall
+    if below_floor:
+        reasons.append(f"breadth {breadth_now:.0f}% < floor {floor:.0f}%")
+    if breadth_falling:
+        reasons.append(f"breadth falling {breadth_first:.0f}->{breadth_now:.0f}%")
+    if intent_falling:
+        reasons.append(f"intent falling {intent_first:.1f}->{intent_now:.1f}")
+    triggered = below_floor or breadth_falling or intent_falling
+    mult, withhold = _gate_effect(mode, triggered, damp)
+    return {
+        "gate": "sector_regime",
+        "mode": mode,
+        "triggered": triggered,
+        "would": "withhold/damp new buys" if triggered else "allow",
+        "reasons": reasons,
+        "breadth_now": _round_or_none(breadth_now, 2),
+        "breadth_prev": _round_or_none(breadth_first, 2),
+        "intent_now": _round_or_none(intent_now, 2),
+        "intent_prev": _round_or_none(intent_first, 2),
+        "score_multiplier": round(mult, 4),
+        "withhold": withhold,
+    }
+
+
+_LIVE_REGIME_HOSTILE = frozenset({"risk_off", "rolling_over"})
+# Phase 1 subset: map Titan sectors to subscribed index codes (see live_stream_consumer).
+_SECTOR_LIVE_INDEX: dict[str, str] = {
+    "banks_psu": "NIFTY BANK",
+    "banks_private": "NIFTY BANK",
+}
+
+
+def _live_regime_read_enabled() -> bool:
+    raw = (str(os.environ.get("TITAN_LIVE_REGIME_READ", "")) or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _sector_benchmark_index_code(sector_key: str) -> str:
+    sec = str(sector_key or "").strip().lower()
+    return _SECTOR_LIVE_INDEX.get(sec, "NIFTY")
+
+
+def _fetch_latest_live_regime_snapshot(client: Any, *, index_code: str) -> dict[str, Any] | None:
+    """Best-effort read of the newest live_regime_snapshots row for an index."""
+    code = str(index_code or "").strip()
+    if not code:
+        return None
+    try:
+        res = (
+            client.table("live_regime_snapshots")
+            .select(
+                "snapshot_ts,index_code,last,pct_vs_prev_close,pct_vs_open,slope_proxy,regime_state,source"
+            )
+            .eq("index_code", code)
+            .order("snapshot_ts", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = list(getattr(res, "data", None) or [])
+        return rows[0] if rows else None
+    except Exception as exc:  # noqa: BLE001 - read-only shadow hook; degrade to EOD-only
+        logger.info("live_regime_snapshots read failed index=%s: %s", code, exc)
+        return None
+
+
+def _merge_regime_with_live_snapshot(
+    eod: dict[str, Any], live: dict[str, Any] | None, *, sector_key: str
+) -> dict[str, Any]:
+    """Attach live index regime to the EOD rollup gate record (shadow-only).
+
+    EOD ``triggered`` / multiplier / withhold are unchanged; live fields are for
+    logging and forward-return measurement (P1-d). NaN-safe: missing live -> EOD only.
+    """
+    _ = sector_key
+    if not live:
+        return eod
+    out = dict(eod)
+    regime_state = str(live.get("regime_state") or "").strip().lower()
+    live_hostile = regime_state in _LIVE_REGIME_HOSTILE
+    out.update(
+        {
+            "live_index_code": live.get("index_code"),
+            "live_snapshot_ts": live.get("snapshot_ts"),
+            "live_regime_state": regime_state or None,
+            "live_pct_vs_prev_close": _round_or_none(_safe_float(live.get("pct_vs_prev_close")), 3),
+            "live_pct_vs_open": _round_or_none(_safe_float(live.get("pct_vs_open")), 3),
+            "live_would_trigger": live_hostile,
+            "live_shadow_mode": True,
+        }
+    )
+    if live_hostile:
+        reasons = list(out.get("reasons") or [])
+        reasons.append(f"live index {live.get('index_code')} regime={regime_state} (shadow)")
+        out["reasons"] = reasons
+    return out
+
+
+def _fetch_sector_regime(client: Any, *, sector_key: str, as_of_date: str | None = None) -> dict[str, Any]:
+    """Read recent sector_daily_rollup rows and return the regime-gate decision.
+
+    Read-only and best-effort: any failure or missing table -> empty series -> not
+    hostile (NaN-safe no-op). When ``TITAN_LIVE_REGIME_READ=1``, also reads the
+    latest ``live_regime_snapshots`` row for the sector's benchmark index and merges
+    shadow fields without changing the EOD gate effect.
+    """
+    sec = str(sector_key or "").strip().lower()
+    lookback = max(2, int(_env_float("TITAN_REGIME_LOOKBACK", float(_REGIME_LOOKBACK))))
+    try:
+        q = (
+            client.table("sector_daily_rollup")
+            .select("trade_date,breadth_above_ema200_pct,avg_effective_intent_score")
+            .eq("sector", sec)
+        )
+        if as_of_date:
+            q = q.lte("trade_date", as_of_date)
+        res = q.order("trade_date", desc=True).limit(max(lookback, 4)).execute()
+        rows = list(getattr(res, "data", None) or [])
+    except Exception as exc:  # noqa: BLE001 - read-only context; degrade to no-op
+        logger.info("regime rollup read failed for sector=%s: %s", sec, exc)
+        rows = []
+    decision = _regime_gate_decision(rows)
+    if not _live_regime_read_enabled():
+        return decision
+    index_code = _sector_benchmark_index_code(sec)
+    live = _fetch_latest_live_regime_snapshot(client, index_code=index_code)
+    return _merge_regime_with_live_snapshot(decision, live, sector_key=sec)
+
+
+def _combine_gate_effects(records: list[dict[str, Any]]) -> tuple[float, bool]:
+    """Multiply the score multipliers and OR the withhold flags across gate records."""
+    mult = 1.0
+    withhold = False
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        try:
+            mult *= float(r.get("score_multiplier", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            pass
+        withhold = withhold or bool(r.get("withhold"))
+    return _clamp(mult, 0.0, 1.0), withhold
+
+
+def _fetch_eod_gate_context(
+    client: Any, *, symbols: list[str], as_of_date: str | None = None
+) -> dict[str, Any]:
+    """Bulk read the new EOD feed tables for the gate set (read-only, best-effort).
+
+    Returns a context consumed by the per-symbol gates. Any failure / missing table /
+    missing column degrades to an empty slice so the gates become NaN-safe no-ops.
+    Populated by STEP 4b (delivery) / 4c (ban) / 4d (futures + institutional).
+    """
+    syms = sorted({str(s).strip().upper() for s in symbols if s})
+    ctx: dict[str, Any] = {
+        "delivery": {}, "ban": set(), "futures": {}, "institutional": {},
+        "calendar": {}, "as_of_date": as_of_date,
+    }
+    if not syms:
+        return ctx
+    # --- 4b: trailing delivery% / volume (delivery_daily) ---
+    try:
+        q = client.table("delivery_daily").select(
+            "trade_date,symbol,deliv_per,deliv_qty,ttl_traded_qty"
+        ).in_("symbol", syms)
+        if as_of_date:
+            q = q.lte("trade_date", as_of_date)
+        res = q.order("trade_date", desc=True).limit(2000).execute()
+        for r in list(getattr(res, "data", None) or []):
+            ctx["delivery"].setdefault(str(r.get("symbol")).upper(), []).append(r)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("delivery_daily read failed: %s", exc)
+    # --- 4c: F&O ban list (fno_ban_daily) for the effective/as-of date ---
+    try:
+        q = client.table("fno_ban_daily").select("trade_date,symbol")
+        if as_of_date:
+            q = q.lte("trade_date", as_of_date)
+        res = q.order("trade_date", desc=True).limit(1000).execute()
+        ban_rows = list(getattr(res, "data", None) or [])
+        latest_ban = ban_rows[0]["trade_date"] if ban_rows else None
+        ctx["ban"] = {
+            str(r.get("symbol")).upper() for r in ban_rows if r.get("trade_date") == latest_ban
+        }
+        ctx["ban_date"] = latest_ban
+    except Exception as exc:  # noqa: BLE001
+        logger.info("fno_ban_daily read failed: %s", exc)
+    # --- 4d: futures OI / underlying close (futures_daily) ---
+    try:
+        q = client.table("futures_daily").select(
+            "trade_date,symbol,open_interest,change_in_oi,underlying_close"
+        ).in_("symbol", syms)
+        if as_of_date:
+            q = q.lte("trade_date", as_of_date)
+        res = q.order("trade_date", desc=True).limit(2000).execute()
+        for r in list(getattr(res, "data", None) or []):
+            ctx["futures"].setdefault(str(r.get("symbol")).upper(), []).append(r)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("futures_daily read failed: %s", exc)
+    # --- 4d: market-level institutional flow (institutional_flow) ---
+    try:
+        q = client.table("institutional_flow").select(
+            "as_of_date,segment,fii_net_crs,dii_net_crs"
+        ).eq("segment", "cash")
+        if as_of_date:
+            q = q.lte("as_of_date", as_of_date)
+        res = q.order("as_of_date", desc=True).limit(5).execute()
+        inst_rows = list(getattr(res, "data", None) or [])
+        if inst_rows:
+            ctx["institutional"] = inst_rows[0]
+    except Exception as exc:  # noqa: BLE001
+        logger.info("institutional_flow read failed: %s", exc)
+    # --- 3b: latest signal_v2 risk label per symbol (symbol_daily_features.action_signal) ---
+    try:
+        q = client.table("symbol_daily_features").select(
+            "trade_date,symbol,action_signal"
+        ).in_("symbol", syms)
+        if as_of_date:
+            q = q.lte("trade_date", as_of_date)
+        res = q.order("trade_date", desc=True).limit(4000).execute()
+        labels: dict[str, str] = {}
+        for r in list(getattr(res, "data", None) or []):
+            sym = str(r.get("symbol")).upper()
+            if sym not in labels and r.get("action_signal"):
+                labels[sym] = str(r.get("action_signal")).strip().lower()
+        ctx["v2_labels"] = labels
+    except Exception as exc:  # noqa: BLE001
+        logger.info("symbol_daily_features label read failed: %s", exc)
+    # --- Phase 3: corporate-actions / results calendar (corporate_actions_calendar) ---
+    try:
+        anchor = as_of_date or datetime.now(IST).date().isoformat()
+        lookahead = max(0, int(_env_float("TITAN_CALENDAR_LOOKAHEAD_DAYS", 5.0)))
+        end_date = (date.fromisoformat(anchor) + timedelta(days=lookahead)).isoformat()
+        q = client.table("corporate_actions_calendar").select(
+            "symbol,ex_date,purpose"
+        ).in_("symbol", syms).gte("ex_date", anchor).lte("ex_date", end_date)
+        res = q.order("ex_date").execute()
+        for r in list(getattr(res, "data", None) or []):
+            sym = str(r.get("symbol") or "").strip().upper()
+            if sym:
+                ctx["calendar"].setdefault(sym, []).append(r)
+        ctx["calendar_lookahead_days"] = lookahead
+        ctx["calendar_window_end"] = end_date
+    except Exception as exc:  # noqa: BLE001
+        logger.info("corporate_actions_calendar read failed: %s", exc)
+    return ctx
+
+
+def _resolve_symbol_gates(
+    client: Any,
+    *,
+    symbol: str,
+    exchange: str,
+    eod_ctx: dict[str, Any],
+    session_move: float,
+    absorption: float,
+) -> list[dict[str, Any]]:
+    """Per-symbol shadow gates: v2-risk, calendar, delivery/ban/futures, pledge stub."""
+    gates: list[dict[str, Any]] = [
+        _v2_risk_gate(symbol, eod_ctx),
+        _calendar_event_gate(symbol, eod_ctx),
+        _delivery_churn_gate(symbol, eod_ctx, session_move=session_move),
+        _ban_veto_gate(symbol, eod_ctx),
+        _futures_oi_gate(symbol, eod_ctx, session_move=session_move),
+    ]
+    pledge = _pledge_slb_gate(symbol, eod_ctx)
+    if isinstance(pledge, dict):
+        gates.append(pledge)
+    return [g for g in gates if isinstance(g, dict)]
+
+
+# ---- STEP 3b (P1-6): gate the winners shortlist by the signal_v2 risk label ----
+_V2_RISK_SUPPRESS = ("trim", "exit-risk")
+_V2_RISK_DAMP_MULT = 0.5
+
+
+def _v2_risk_gate(symbol: str, eod_ctx: dict[str, Any]) -> dict[str, Any]:
+    """Down-rank / withhold a momentum winner the defensive signal_v2 flags as risky.
+
+    Reconciles the offensive winners list with the defensive engine (deep-scan P1-6: of
+    10 Defence buys, signal_v2 labelled 0 buy / 5 trim-exit incl. #1 BDL). NaN-safe: no
+    stored label -> no-op.
+    """
+    mode = _gate_mode("TITAN_V2_RISK_GATE_MODE")
+    damp = _env_float("TITAN_V2_RISK_GATE_DAMP_MULT", _V2_RISK_DAMP_MULT)
+    label = str((eod_ctx.get("v2_labels") or {}).get(str(symbol).upper()) or "").strip().lower()
+    triggered = label in _V2_RISK_SUPPRESS
+    mult, withhold = _gate_effect(mode, triggered, damp)
+    return {
+        "gate": "v2_risk_label",
+        "mode": mode,
+        "triggered": triggered,
+        "would": f"down-rank/withhold ({label})" if triggered else "allow",
+        "v2_label": label or None,
+        "score_multiplier": round(mult, 4),
+        "withhold": withhold,
+    }
+
+
+# ---- Phase 3: corporate-actions / results calendar gate ----
+_CALENDAR_EVENT_KEYWORDS = ("dividend", "result")
+_CALENDAR_LOOKAHEAD_DAYS = 5
+_CALENDAR_DAMP_MULT = 0.5
+
+
+def _calendar_purpose_is_event(purpose: str) -> bool:
+    p = str(purpose or "").strip().lower()
+    return any(kw in p for kw in _CALENDAR_EVENT_KEYWORDS)
+
+
+def _calendar_event_gate(symbol: str, eod_ctx: dict[str, Any]) -> dict[str, Any]:
+    """Damp/withhold buys ahead of dividend or results ex-dates (deep-scan P1-1).
+
+    Reads ``corporate_actions_calendar`` (NSE corp-actions ingest). NaN-safe: empty
+    table / no matching rows -> no-op. Default mode is shadow (records only).
+    """
+    mode = _gate_mode("TITAN_CALENDAR_GATE_MODE")
+    damp = _env_float("TITAN_CALENDAR_GATE_DAMP_MULT", _CALENDAR_DAMP_MULT)
+    lookahead = max(0, int(_env_float("TITAN_CALENDAR_LOOKAHEAD_DAYS", float(_CALENDAR_LOOKAHEAD_DAYS))))
+    events = list((eod_ctx.get("calendar") or {}).get(str(symbol).upper()) or [])
+    matched = [e for e in events if _calendar_purpose_is_event(str(e.get("purpose") or ""))]
+    reasons: list[str] = []
+    for ev in matched:
+        reasons.append(f"{ev.get('ex_date')}: {str(ev.get('purpose') or '')[:80]}")
+    triggered = bool(matched)
+    mult, withhold = _gate_effect(mode, triggered, damp)
+    return {
+        "gate": "calendar_event",
+        "mode": mode,
+        "triggered": triggered,
+        "would": "damp/withhold (upcoming event)" if triggered else "allow",
+        "reasons": reasons,
+        "lookahead_days": lookahead,
+        "window_end": eod_ctx.get("calendar_window_end"),
+        "n_events": len(matched),
+        "score_multiplier": round(mult, 4),
+        "withhold": withhold,
+    }
+
+
+# ---- Phase 3: promoter-pledge / SLB borrow gate (stub — no data source yet) ----
+def _pledge_slb_gate(symbol: str, eod_ctx: dict[str, Any]) -> dict[str, Any] | None:
+    """Placeholder for promoter-pledge spike + SLB borrow-trend distress flags.
+
+    NSE pledge disclosures are quarterly PDFs and SLB borrow trends need a dedicated
+    ingest table; neither exists in Supabase yet. When the env knob is not ``off``,
+    shadow-logs ``not_implemented`` so rollout wiring is in place before data lands.
+    """
+    mode = _gate_mode("TITAN_PLEDGE_SLB_GATE_MODE", default="off")
+    if mode == "off":
+        return None
+    logger.info(
+        "pledge_slb gate not_implemented for %s (mode=%s; awaiting pledge/SLB ingest)",
+        symbol,
+        mode,
+    )
+    return {
+        "gate": "pledge_slb",
+        "mode": mode,
+        "triggered": False,
+        "would": "allow",
+        "status": "not_implemented",
+        "reason": "no pledge/SLB time-series in Supabase yet",
+        "score_multiplier": 1.0,
+        "withhold": False,
+    }
+
+
+def _breeze_data_freshness_gate() -> dict[str, Any]:
+    """Market-wide gate when Breeze session/token is stale (Phase 3 data freshness).
+
+    Shadow mode logs the would-be withhold without changing ranks. When
+    ``TITAN_BREEZE_STALE_HARD_STOP=1`` and mode is ``skip``, stale data triggers a
+    real withhold (for enforce rollout later).
+    """
+    from breeze_client import breeze_data_stale_reason, breeze_stale_hard_stop_enabled, is_breeze_data_stale
+
+    mode = _gate_mode("TITAN_BREEZE_FRESHNESS_GATE_MODE", default="shadow")
+    stale = is_breeze_data_stale()
+    reason = breeze_data_stale_reason() if stale else ""
+    hard = breeze_stale_hard_stop_enabled()
+    triggered = stale
+    if stale:
+        logger.warning("data_stale withhold (shadow): %s", reason or "breeze session unavailable")
+    if triggered and hard and mode == "skip":
+        mult, withhold = 0.0, True
+    else:
+        mult, withhold = _gate_effect(mode, triggered, 0.5)
+    return {
+        "gate": "data_freshness",
+        "mode": mode,
+        "triggered": triggered,
+        "would": "withhold (stale Breeze data)" if triggered else "allow",
+        "stale": stale,
+        "reason": reason or None,
+        "hard_stop": hard,
+        "score_multiplier": round(mult, 4),
+        "withhold": withhold,
+    }
+
+
+# ---- STEP 4b: delivery% / churn gate (delivery_daily) ----
+_DELIVERY_FLOOR_PCT = 35.0       # trailing-avg delivery% below this = churn-heavy
+_DELIVERY_FALL_PCT = 12.0        # delivery% drop (avg->latest) that counts as falling
+_DELIVERY_LOOKBACK = 5
+_DELIVERY_DAMP_MULT = 0.5
+
+
+def _delivery_churn_gate(symbol: str, eod_ctx: dict[str, Any], *, session_move: float) -> dict[str, Any]:
+    """Penalise/withhold a buy that is high-volume but LOW or FALLING delivery% -- churn,
+    not real accumulation (deep-scan miss: DIXON). NaN-safe: no delivery rows -> no-op.
+    """
+    mode = _gate_mode("TITAN_DELIVERY_GATE_MODE")
+    floor = _env_float("TITAN_DELIVERY_FLOOR_PCT", _DELIVERY_FLOOR_PCT)
+    fall = _env_float("TITAN_DELIVERY_FALL_PCT", _DELIVERY_FALL_PCT)
+    lookback = max(2, int(_env_float("TITAN_DELIVERY_LOOKBACK", float(_DELIVERY_LOOKBACK))))
+    damp = _env_float("TITAN_DELIVERY_GATE_DAMP_MULT", _DELIVERY_DAMP_MULT)
+
+    rows = list((eod_ctx.get("delivery") or {}).get(str(symbol).upper()) or [])
+    rows.sort(key=lambda r: str(r.get("trade_date") or ""))
+    window = rows[-lookback:]
+    dvals = [_safe_float(r.get("deliv_per")) for r in window]
+    dvals = [v for v in dvals if not math.isnan(v)]
+    latest = dvals[-1] if dvals else float("nan")
+    avg = sum(dvals) / len(dvals) if dvals else float("nan")
+    reasons: list[str] = []
+    low = (not math.isnan(avg)) and avg < floor
+    falling = (not math.isnan(latest) and not math.isnan(avg)) and (avg - latest) >= fall
+    if low:
+        reasons.append(f"avg delivery {avg:.0f}% < floor {floor:.0f}%")
+    if falling:
+        reasons.append(f"delivery falling avg {avg:.0f}%->{latest:.0f}%")
+    triggered = low or falling
+    mult, withhold = _gate_effect(mode, triggered, damp)
+    return {
+        "gate": "delivery_churn",
+        "mode": mode,
+        "triggered": triggered,
+        "would": "damp/withhold (churn)" if triggered else "allow",
+        "reasons": reasons,
+        "delivery_latest": _round_or_none(latest, 2),
+        "delivery_avg": _round_or_none(avg, 2),
+        "n_sessions": len(dvals),
+        "score_multiplier": round(mult, 4),
+        "withhold": withhold,
+    }
+
+
+# ---- STEP 4c: F&O ban-list veto (fno_ban_daily) ----
+def _ban_veto_gate(symbol: str, eod_ctx: dict[str, Any]) -> dict[str, Any]:
+    """Hard buy-withhold veto for an F&O-banned name. NaN-safe: empty ban set -> no-op.
+
+    Ban is a hard regulatory state, so when enforced the default is to withhold (not just
+    damp); in shadow it only records the would-be veto.
+    """
+    mode = _gate_mode("TITAN_BAN_GATE_MODE")
+    banned = eod_ctx.get("ban") or set()
+    triggered = str(symbol).upper() in banned
+    # Ban veto enforces a withhold (skip-strength) rather than a soft damp.
+    if not triggered or mode in ("off", "shadow"):
+        mult, withhold = 1.0, False
+    elif mode == "damp":
+        mult, withhold = _env_float("TITAN_BAN_GATE_DAMP_MULT", 0.5), False
+    else:  # skip
+        mult, withhold = 0.0, True
+    return {
+        "gate": "fno_ban",
+        "mode": mode,
+        "triggered": triggered,
+        "would": "withhold (in F&O ban)" if triggered else "allow",
+        "ban_date": eod_ctx.get("ban_date"),
+        "score_multiplier": round(mult, 4),
+        "withhold": withhold,
+    }
+
+
+# ---- STEP 4d: futures OI short-covering vs long-buildup flag (futures_daily) ----
+def _futures_oi_gate(symbol: str, eod_ctx: dict[str, Any], *, session_move: float) -> dict[str, Any]:
+    """Flag a price pop driven by short-covering (price up + OI down) rather than fresh
+    long buildup (price up + OI up). Short-covering pops are less durable, so the flag
+    damps; long buildup is informational only. NaN-safe: <2 futures rows -> no-op.
+    """
+    mode = _gate_mode("TITAN_FUTURES_GATE_MODE")
+    damp = _env_float("TITAN_FUTURES_GATE_DAMP_MULT", 0.75)
+    rows = list((eod_ctx.get("futures") or {}).get(str(symbol).upper()) or [])
+    rows.sort(key=lambda r: str(r.get("trade_date") or ""))
+    structure = "unknown"
+    triggered = False
+    oi_chg = float("nan")
+    if len(rows) >= 1:
+        oi_chg = _safe_float(rows[-1].get("change_in_oi"))
+    price_up = (not math.isnan(session_move)) and session_move > 0.0
+    price_dn = (not math.isnan(session_move)) and session_move < 0.0
+    if not math.isnan(oi_chg):
+        if price_up and oi_chg > 0:
+            structure = "long_buildup"
+        elif price_up and oi_chg < 0:
+            structure = "short_covering"
+            triggered = True
+        elif price_dn and oi_chg > 0:
+            structure = "short_buildup"
+        elif price_dn and oi_chg < 0:
+            structure = "long_unwinding"
+    mult, withhold = _gate_effect(mode, triggered, damp)
+    return {
+        "gate": "futures_oi",
+        "mode": mode,
+        "triggered": triggered,
+        "would": "damp (short-covering pop)" if triggered else "allow",
+        "structure": structure,
+        "change_in_oi": _round_or_none(oi_chg, 0),
+        "score_multiplier": round(mult, 4),
+        "withhold": withhold,
+    }
+
+
+def _institutional_context(eod_ctx: dict[str, Any]) -> dict[str, Any]:
+    """Market-level FII/DII net flow as a separate institutional_score input (STEP 4d).
+
+    Informational/contextual (not a per-name withhold): a strongly FII-negative tape is a
+    risk-off backdrop. NaN-safe.
+    """
+    inst = eod_ctx.get("institutional") or {}
+    fii = _safe_float(inst.get("fii_net_crs"))
+    dii = _safe_float(inst.get("dii_net_crs"))
+    score = float("nan")
+    if not math.isnan(fii) or not math.isnan(dii):
+        score = (0.0 if math.isnan(fii) else fii) + (0.0 if math.isnan(dii) else dii)
+    return {
+        "as_of_date": inst.get("as_of_date"),
+        "fii_net_crs": _round_or_none(fii, 2),
+        "dii_net_crs": _round_or_none(dii, 2),
+        "institutional_score": _round_or_none(score, 2),
+        "risk_off": (not math.isnan(fii)) and fii < 0.0,
+    }
 
 
 def build_sector_rankings(
@@ -1996,9 +2852,14 @@ def build_sector_rankings(
     instruments: list[SectorInstrument],
     top_n: int = 10,
 ) -> list[dict[str, Any]]:
-    from breeze_client import create_breeze_session
+    from breeze_client import BreezeDataStaleError, create_breeze_session
 
-    breeze = create_breeze_session(cfg)
+    breeze = None
+    try:
+        breeze = create_breeze_session(cfg)
+    except BreezeDataStaleError as exc:
+        logger.warning("Breeze session unavailable; ranking without live prices: %s", exc)
+    freshness_gate = _breeze_data_freshness_gate()
     as_of_date = datetime.now(IST).date().isoformat()
     prev_caps = _load_previous_market_caps(cfg, sector_key=sector_key)
     snapshot = resolve_global_news_snapshot(cfg)
@@ -2023,10 +2884,24 @@ def build_sector_rankings(
     if math.isnan(sector_news_score):
         sector_news_score = 0.0
     blend_points = _news_blend_points(sector_news_score)
+    # Shadow-mode gates context (read-only; NaN-safe). Regime is per-sector; the EOD /
+    # v2-risk gates are per-symbol and resolved inside the loop.
+    gate_client = create_client(cfg.supabase_url, cfg.supabase_key)
+    regime = _fetch_sector_regime(gate_client, sector_key=sector_key, as_of_date=as_of_date)
+    regime_hostile = bool(regime.get("triggered"))
+    eod_ctx = _fetch_eod_gate_context(
+        gate_client,
+        symbols=[inst.symbol for inst in instruments],
+        as_of_date=as_of_date,
+    )
+    institutional_ctx = _institutional_context(eod_ctx)
     rows: list[dict[str, Any]] = []
     for inst in instruments:
         issues: list[str] = []
+        symbol_u = str(inst.symbol).strip().upper()
         try:
+            if breeze is None:
+                raise BreezeDataStaleError("Breeze session unavailable")
             df = fetch_equity_data(
                 cfg,
                 inst.symbol,
@@ -2035,6 +2910,10 @@ def build_sector_rankings(
                 lookback_calendar_days=90,
                 max_retries=2,
             )
+        except BreezeDataStaleError as exc:
+            logger.warning("Ranking data fetch skipped for %s (%s): %s", inst.symbol, inst.exchange, exc)
+            df = pd.DataFrame()
+            issues.append("breeze_data_stale")
         except Exception as exc:
             logger.warning("Ranking data fetch failed for %s (%s): %s", inst.symbol, inst.exchange, exc)
             df = pd.DataFrame()
@@ -2043,7 +2922,12 @@ def build_sector_rankings(
         series = pd.to_numeric(df[close_col], errors="coerce") if close_col is not None else pd.Series(dtype=float)
         ret_1w = _return_pct(series, periods_back=5)
         ret_1m = _return_pct(series, periods_back=20)
+        ret_1d = _return_pct(series, periods_back=1)  # latest session move (P0-2 sign-gate)
         absorption = volume_participation_ratio(df) if not df.empty else float("nan")
+        # Fix A inputs: ATR-normalized EMA200 stretch (NaN-safe; needs full history +
+        # OHLC, so it stays NaN when the 90-day fetch is too short -- penalty then
+        # relies on the run channel only).
+        ema_dist, stretch = _stretch_inputs_from_df(df, series)
         market_cap_cr, market_cap_source = fetch_nse_market_cap_inr_cr(inst.symbol)
         if market_cap_cr is None:
             market_cap_cr, market_cap_source = fetch_moneycontrol_market_cap_inr_cr(inst.symbol)
@@ -2067,13 +2951,40 @@ def build_sector_rankings(
             issues.append("return_1m_missing")
         if math.isnan(absorption):
             issues.append("absorption_missing")
+        overext = _overextension_penalty(
+            ret_1w=ret_1w,
+            ret_1m=ret_1m,
+            absorption=absorption,
+            stretch=stretch,
+            ema_dist=ema_dist,
+            regime_hostile=regime_hostile,
+        )
+        absorption_bd = _absorption_term(absorption, ret_1d)
         base_score = _score_from_features(
             bucket=bucket,
             ret_1w=ret_1w,
             ret_1m=ret_1m,
             absorption=absorption,
+            stretch=stretch,
+            ema_dist=ema_dist,
+            regime_hostile=regime_hostile,
+            session_move=ret_1d,
         )
-        score = round(base_score + blend_points, 4)
+        pre_gate_score = round(base_score + blend_points, 4)
+        # Shadow-mode buy-suppression gates (regime + delivery/ban/futures/v2-risk). In
+        # the default shadow mode the multiplier is 1.0 / withhold False, so the published
+        # rank is unchanged and only the would-be decisions are recorded in meta.
+        symbol_gates = _resolve_symbol_gates(
+            gate_client,
+            symbol=symbol_u,
+            exchange=inst.exchange,
+            eod_ctx=eod_ctx,
+            session_move=ret_1d,
+            absorption=absorption,
+        )
+        gate_records = [regime, freshness_gate] + symbol_gates
+        gate_mult, gate_withhold = _combine_gate_effects(gate_records)
+        score = round(pre_gate_score * gate_mult, 4)
         news_meta: dict[str, Any] = {
             "fetched_count": len(global_news),
             "snapshot_source": snapshot.get("source"),
@@ -2116,6 +3027,14 @@ def build_sector_rankings(
                     "rows_count": int(len(df)),
                     "issues": sorted(set(issues)),
                     "technical_rank_score": base_score,
+                    "overextension_penalty": overext.get("penalty", 0.0),
+                    "overextension_components": overext.get("components", {}),
+                    "absorption_term": absorption_bd,
+                    "pre_gate_rank_score": pre_gate_score,
+                    "gate_multiplier": round(gate_mult, 4),
+                    "gate_withhold": gate_withhold,
+                    "shadow_gates": gate_records,
+                    "institutional_context": institutional_ctx,
                     "news": news_meta,
                 },
             }
@@ -2126,7 +3045,12 @@ def build_sector_rankings(
         reverse=True,
     )
     top_n = max(1, int(top_n))
-    priority_candidates = [r for r in ranked if int((r.get("meta") or {}).get("rows_count") or 0) > 0]
+    priority_candidates = [
+        r
+        for r in ranked
+        if int((r.get("meta") or {}).get("rows_count") or 0) > 0
+        and not bool((r.get("meta") or {}).get("gate_withhold"))
+    ]
     # Primary objective: small/micro-cap AI names for higher-move opportunity.
     preferred = [r for r in priority_candidates if str(r.get("market_cap_bucket")) in ("micro", "small")]
     fallback = [r for r in priority_candidates if str(r.get("market_cap_bucket")) not in ("micro", "small")]
@@ -2325,6 +3249,8 @@ def persist_daily_winners(
                     "return_1m_pct": row.get("return_1m_pct"),
                     "absorption_ratio": row.get("absorption_ratio"),
                     "technical_rank_score": meta.get("technical_rank_score"),
+                    "overextension_penalty": meta.get("overextension_penalty"),
+                    "overextension_components": meta.get("overextension_components"),
                     "news_sector_score": ((meta.get("news") or {}).get("sector_news_score")),
                     "news_blend_points": ((meta.get("news") or {}).get("blend_points")),
                 },

@@ -6,9 +6,13 @@ import threading
 import time
 
 from breeze_client import (
+    BreezeDataStaleError,
     _classify_breeze_option_chain_response,
     _rate_limited_historical_call,
+    breeze_data_stale_reason,
+    clear_breeze_data_stale_for_tests,
     create_breeze_session,
+    is_breeze_data_stale,
     fetch_equity_data,
     fetch_equity_quote,
     fetch_nifty_data,
@@ -25,12 +29,31 @@ from config_loader import TitanConfig
 
 @patch("breeze_client.BreezeConnect")
 def test_create_breeze_session_expired_raises_actionable(mock_cls):
+    clear_breeze_data_stale_for_tests()
     api = MagicMock()
     api.generate_session.side_effect = Exception("Session key is expired.")
     mock_cls.return_value = api
     cfg = make_cfg()
-    with pytest.raises(RuntimeError, match=r"\[Breeze\] Session token expired"):
+    with pytest.raises(BreezeDataStaleError, match=r"\[Breeze\] Session token expired"):
         create_breeze_session(cfg)
+    assert is_breeze_data_stale()
+    assert "expired" in breeze_data_stale_reason().lower()
+
+
+def test_create_breeze_session_missing_token_marks_stale():
+    clear_breeze_data_stale_for_tests()
+    cfg = make_cfg()
+    cfg = TitanConfig(
+        breeze_api_key=cfg.breeze_api_key,
+        breeze_secret=cfg.breeze_secret,
+        breeze_session_token="",
+        gemini_api_keys=cfg.gemini_api_keys,
+        supabase_url=cfg.supabase_url,
+        supabase_key=cfg.supabase_key,
+    )
+    with pytest.raises(BreezeDataStaleError, match=r"BREEZE_SESSION_TOKEN missing"):
+        create_breeze_session(cfg)
+    assert is_breeze_data_stale()
 
 
 def test_create_breeze_session_blocked_in_reconcile_mode(monkeypatch):

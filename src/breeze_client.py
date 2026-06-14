@@ -8,6 +8,7 @@ import os
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -40,6 +41,58 @@ _HISTORICAL_CALL_TIMEOUT_SECONDS_DEFAULT = 25.0
 
 class BreezeHistoricalTimeoutError(RuntimeError):
     """Raised when Breeze historical data call exceeds hard timeout."""
+
+
+class BreezeDataStaleError(RuntimeError):
+    """Raised when a live Breeze fetch is required but the session/token is unavailable."""
+
+
+@dataclass(frozen=True)
+class _BreezeStaleState:
+    stale: bool = False
+    reason: str = ""
+
+
+_BREEZE_STALE = _BreezeStaleState()
+
+
+def is_breeze_data_stale() -> bool:
+    """True when the last Breeze auth attempt marked market data as stale/unusable."""
+    return _BREEZE_STALE.stale
+
+
+def breeze_data_stale_reason() -> str:
+    return _BREEZE_STALE.reason
+
+
+def clear_breeze_data_stale_for_tests() -> None:
+    global _BREEZE_STALE
+    _BREEZE_STALE = _BreezeStaleState()
+
+
+def breeze_stale_hard_stop_enabled() -> bool:
+    """When set, enforce-mode freshness gate may withhold buys (Phase 3 rollout knob)."""
+    return (os.environ.get("TITAN_BREEZE_STALE_HARD_STOP") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _mark_breeze_data_stale(reason: str) -> None:
+    global _BREEZE_STALE
+    _BREEZE_STALE = _BreezeStaleState(stale=True, reason=reason)
+    logger.warning("[Breeze] data stale: %s", reason)
+
+
+def _session_token_missing(config: _BreezeCredentials) -> bool:
+    return not str(getattr(config, "breeze_session_token", "") or "").strip()
+
+
+def _is_session_expired_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return "session" in msg and ("expired" in msg or "expire" in msg)
 
 
 def _reconcile_mode_enabled() -> bool:
@@ -143,6 +196,14 @@ def _rate_limited_quote_call(breeze: BreezeConnect, **kwargs: Any) -> Any:
 def create_breeze_session(config: _BreezeCredentials) -> BreezeConnect:
     """Create a Breeze client and authenticate (reuse for multiple API calls in one run)."""
     _ensure_breeze_allowed("create_breeze_session")
+    if _session_token_missing(config):
+        msg = (
+            "[Breeze] BREEZE_SESSION_TOKEN missing. Get a session from ICICI (browser login), then update: "
+            "local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. "
+            "Run: python scripts/breeze_session.py"
+        )
+        _mark_breeze_data_stale(msg)
+        raise BreezeDataStaleError(msg)
     breeze = BreezeConnect(api_key=config.breeze_api_key)
     try:
         breeze.generate_session(
@@ -150,13 +211,14 @@ def create_breeze_session(config: _BreezeCredentials) -> BreezeConnect:
             session_token=config.breeze_session_token,
         )
     except Exception as e:
-        msg = str(e).lower()
-        if "session" in msg and ("expired" in msg or "expire" in msg):
-            raise RuntimeError(
+        if _is_session_expired_error(e):
+            msg = (
                 "[Breeze] Session token expired. Get a new session from ICICI (browser login), then update: "
                 "local .env BREEZE_SESSION_TOKEN, GitHub secret BREEZE_SESSION_TOKEN, and/or Supabase session_config. "
                 "Run: python scripts/breeze_session.py"
-            ) from e
+            )
+            _mark_breeze_data_stale(msg)
+            raise BreezeDataStaleError(msg) from e
         raise
     return breeze
 
@@ -594,7 +656,16 @@ def fetch_equity_data(
     Retries up to `max_retries` times with exponential backoff on failure.
     """
     _ensure_breeze_allowed("fetch_equity_data")
-    breeze = breeze or create_breeze_session(config)
+    try:
+        breeze = breeze or create_breeze_session(config)
+    except BreezeDataStaleError:
+        raise
+    except Exception as e:
+        if _is_session_expired_error(e):
+            msg = f"[Breeze] Session expired during equity fetch for {stock_code!r}"
+            _mark_breeze_data_stale(msg)
+            raise BreezeDataStaleError(msg) from e
+        raise
     sc_raw = stock_code.strip().upper()
     ex = exchange_code.strip().upper()
     if ex not in ("NSE", "BSE"):
@@ -714,7 +785,16 @@ def fetch_equity_quote(
     Live cash quote for an equity symbol. Returns normalized floats where possible.
     """
     _ensure_breeze_allowed("fetch_equity_quote")
-    breeze = breeze or create_breeze_session(config)
+    try:
+        breeze = breeze or create_breeze_session(config)
+    except BreezeDataStaleError:
+        raise
+    except Exception as e:
+        if _is_session_expired_error(e):
+            msg = f"[Breeze] Session expired during quote fetch for {stock_code!r}"
+            _mark_breeze_data_stale(msg)
+            raise BreezeDataStaleError(msg) from e
+        raise
     sc_raw = stock_code.strip().upper()
     ex = exchange_code.strip().upper()
     if ex not in ("NSE", "BSE"):

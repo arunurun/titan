@@ -20,9 +20,45 @@ _EVENT_PATTERNS: dict[str, tuple[str, ...]] = {
 _TICKER_RE = re.compile(r"\b[A-Z]{2,12}\b")
 _COMPANY_SUFFIXES = (" ltd", " limited", " corp", " corporation", " inc", " plc", " industries")
 _POSITIVE_TERMS = frozenset(
-    {"surge", "beat", "beating", "growth", "wins", "approval", "record", "upgrade", "profit", "jumps", "jump"}
+    {
+        "surge", "beat", "beating", "growth", "wins", "win", "approval", "record",
+        "upgrade", "profit", "jumps", "jump",
+        # Financial-positive terms (added so genuinely constructive headlines can CONFIRM
+        # rather than only veto; the general VADER lexicon under-scores these on Indian
+        # market headlines, biasing aggregate sentiment negative).
+        "order win", "bags", "bags order", "wins order", "order book", "bonus", "rally",
+        "rallies", "gain", "gains", "rises", "rise", "expansion", "expand", "launch",
+        "partnership", "deal", "acquire", "acquisition", "stake buy", "buyback",
+        "outperform", "bullish", "high", "uptrend", "rerating", "re-rating", "capex",
+    }
 )
 _NEGATIVE_TERMS = frozenset({"fall", "drop", "cuts", "downgrade", "probe", "ban", "loss", "miss", "decline", "crash", "violation"})
+
+
+def _news_vader_weight() -> float:
+    """Weight on the general VADER compound vs the financial lexicon (1 - weight).
+
+    Lowering this (TITAN_NEWS_VADER_WEIGHT, default 0.5) reduces VADER's known negative
+    bias on financial headlines so domain-specific positive signals can confirm.
+    """
+    raw = (str(os.environ.get("TITAN_NEWS_VADER_WEIGHT", "")) or "").strip()
+    if not raw:
+        return 0.5
+    try:
+        return _clamp(float(raw), 0.0, 1.0)
+    except ValueError:
+        return 0.5
+
+
+def _news_sentiment_bias() -> float:
+    """Additive recenter applied to the blended score (TITAN_NEWS_SENTIMENT_BIAS, default 0.0)."""
+    raw = (str(os.environ.get("TITAN_NEWS_SENTIMENT_BIAS", "")) or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        return _clamp(float(raw), -0.5, 0.5)
+    except ValueError:
+        return 0.0
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -87,7 +123,10 @@ def compute_sentiment_vader(text: str) -> dict[str, Any]:
     scores = analyzer.polarity_scores(txt)
     compound = float(scores.get("compound") or 0.0)
     fin_adj = _financial_lexicon_adjustment(txt)
-    blended = round(_clamp((compound * 0.5) + (fin_adj * 0.5), -1.0, 1.0), 4)
+    vw = _news_vader_weight()
+    blended = round(
+        _clamp((compound * vw) + (fin_adj * (1.0 - vw)) + _news_sentiment_bias(), -1.0, 1.0), 4
+    )
     return {
         "sentiment": _label_from_score(blended),
         "score": blended,

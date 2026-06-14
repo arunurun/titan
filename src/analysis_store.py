@@ -75,6 +75,276 @@ def analysis_store_enabled() -> bool:
     return _env_truthy("TITAN_ENABLE_ANALYSIS_STORE", default=False)
 
 
+def forward_return_eval_enabled() -> bool:
+    """When set, shortlist efficacy scores FORWARD (+1/+5) returns vs same-day."""
+    return _env_truthy("TITAN_FORWARD_RETURN_EVAL", default=False)
+
+
+def forward_outcomes_persist_enabled() -> bool:
+    """When set, persist +1/+5 forward outcomes and post-signal drawdown into tape_extras."""
+    return _env_truthy("TITAN_FORWARD_OUTCOMES_PERSIST", default=False)
+
+
+_DEFAULT_FORWARD_OUTCOME_HORIZONS: tuple[int, ...] = (1, 5)
+_FORWARD_OUTCOME_LOOKBACK_ENV = "TITAN_FORWARD_OUTCOMES_LOOKBACK_DAYS"
+_DEFAULT_FORWARD_OUTCOME_LOOKBACK_DAYS = 90
+
+
+def _forward_outcome_lookback_days() -> int:
+    raw = os.environ.get(_FORWARD_OUTCOME_LOOKBACK_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_FORWARD_OUTCOME_LOOKBACK_DAYS
+    try:
+        return max(7, int(raw))
+    except ValueError:
+        return _DEFAULT_FORWARD_OUTCOME_LOOKBACK_DAYS
+
+
+def _import_forward_return_eval() -> Any:
+    import sys
+    from pathlib import Path
+
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    scripts_str = str(scripts_dir)
+    if scripts_str not in sys.path:
+        sys.path.insert(0, scripts_str)
+    import forward_return_eval  # noqa: PLC0415
+
+    return forward_return_eval
+
+
+def _existing_forward_outcomes(tape_extras: Any) -> dict[str, Any]:
+    if not isinstance(tape_extras, dict):
+        return {}
+    existing = tape_extras.get("forward_outcomes")
+    return dict(existing) if isinstance(existing, dict) else {}
+
+
+def _forward_outcomes_need_update(existing: dict[str, Any], patch: dict[str, Any]) -> bool:
+    if not patch:
+        return False
+    new_sessions = int(patch.get("sessions_available") or 0)
+    old_sessions = int(existing.get("sessions_available") or 0)
+    if new_sessions > old_sessions:
+        return True
+    if not existing and new_sessions > 0:
+        return True
+    for h in _DEFAULT_FORWARD_OUTCOME_HORIZONS:
+        key = f"forward_{h}d_pct"
+        new_v = patch.get(key)
+        old_v = existing.get(key)
+        if new_v is not None and old_v is None:
+            return True
+    dd_key = f"max_drawdown_{max(_DEFAULT_FORWARD_OUTCOME_HORIZONS)}d_pct"
+    if patch.get(dd_key) is not None and existing.get(dd_key) is None:
+        return True
+    return False
+
+
+def compute_forward_outcome_patches(
+    rows: Sequence[dict[str, Any]],
+    *,
+    start_iso: str,
+    end_iso: str,
+    horizons: Sequence[int] = _DEFAULT_FORWARD_OUTCOME_HORIZONS,
+) -> dict[tuple[str, str, str], dict[str, Any]]:
+    """Return ``(sector, symbol, trade_date)`` -> sanitized ``forward_outcomes`` tape patch."""
+    if not rows:
+        return {}
+    fre = _import_forward_return_eval()
+    indexed = fre.compute_forward_outcomes_for_rows(
+        rows,
+        start=start_iso,
+        end=end_iso,
+        horizons=horizons,
+    )
+    sector_by_symbol_date: dict[tuple[str, str], str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        sym = str(row.get("symbol") or "").strip().upper()
+        td = str(row.get("trade_date") or "").strip()[:10]
+        sec = str(row.get("sector") or "").strip().lower()
+        if sym and td and sec:
+            sector_by_symbol_date[(sym, td)] = sec
+
+    computed_at = datetime.now(IST).isoformat(timespec="seconds")
+    out: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for (sym, td), obs in indexed.items():
+        sec = sector_by_symbol_date.get((sym, td), "")
+        if not sec:
+            continue
+        patch = fre.build_tape_forward_outcomes_patch(
+            obs,
+            horizons=horizons,
+            computed_at=computed_at,
+        )
+        out[(sec, sym, td)] = sanitize_for_json(patch)
+    return out
+
+
+def _fetch_feature_rows_for_forward_outcomes(
+    client: Any,
+    *,
+    sector: str | None,
+    all_stocks: bool,
+    start_iso: str,
+    end_iso: str,
+) -> list[dict[str, Any]]:
+    select_cols = "trade_date,sector,symbol,exchange,action_signal,return_1d_pct,tape_extras"
+    rows: list[dict[str, Any]] = []
+    offset = 0
+    page = 1000
+    while True:
+        q = (
+            client.table("symbol_daily_features")
+            .select(select_cols)
+            .gte("trade_date", start_iso)
+            .lte("trade_date", end_iso)
+            .order("trade_date")
+        )
+        if not all_stocks and sector:
+            q = q.eq("sector", str(sector).strip().lower())
+        q = q.range(offset, offset + page - 1)
+        batch = list(getattr(q.execute(), "data", None) or [])
+        rows.extend(batch)
+        if len(batch) < page:
+            break
+        offset += page
+    return rows
+
+
+def persist_forward_outcomes(
+    cfg: TitanConfig,
+    *,
+    client: Any | None = None,
+    sector: str | None = None,
+    all_stocks: bool = False,
+    as_of_date: date | str | None = None,
+    lookback_days: int | None = None,
+) -> dict[str, Any]:
+    """Backfill/update ``tape_extras.forward_outcomes`` for matured signal dates (NaN-safe)."""
+    if not forward_outcomes_persist_enabled():
+        return {"enabled": False, "updated": 0}
+    as_of = _parse_date(as_of_date) if isinstance(as_of_date, str) else as_of_date
+    as_of = as_of or datetime.now(IST).date()
+    lookback = lookback_days if lookback_days is not None else _forward_outcome_lookback_days()
+    start = as_of - timedelta(days=max(7, int(lookback)))
+    start_iso = start.isoformat()
+    end_iso = as_of.isoformat()
+    client = client or create_client(cfg.supabase_url, cfg.supabase_key)
+    try:
+        rows = _fetch_feature_rows_for_forward_outcomes(
+            client,
+            sector=sector,
+            all_stocks=all_stocks,
+            start_iso=start_iso,
+            end_iso=end_iso,
+        )
+        if not rows:
+            return {
+                "enabled": True,
+                "updated": 0,
+                "reason": "no_rows",
+                "scope": "all-stocks" if all_stocks else str(sector or ""),
+            }
+
+        patches = compute_forward_outcome_patches(rows, start_iso=start_iso, end_iso=end_iso)
+        row_index: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            sec = str(row.get("sector") or "").strip().lower()
+            sym = str(row.get("symbol") or "").strip().upper()
+            td = str(row.get("trade_date") or "").strip()[:10]
+            exch = str(row.get("exchange") or "NSE").strip().upper() or "NSE"
+            if sec and sym and td:
+                row_index[(sec, sym, td)] = row
+
+        updates: list[dict[str, Any]] = []
+        for key, patch in patches.items():
+            row = row_index.get(key)
+            if row is None:
+                continue
+            existing = _existing_forward_outcomes(_safe_tape_extras(row))
+            if not _forward_outcomes_need_update(existing, patch):
+                continue
+            tape = dict(_safe_tape_extras(row))
+            tape["forward_outcomes"] = patch
+            updates.append(
+                sanitize_for_json(
+                    {
+                        "trade_date": key[2],
+                        "sector": key[0],
+                        "symbol": key[1],
+                        "exchange": str(row.get("exchange") or "NSE").strip().upper() or "NSE",
+                        "tape_extras": tape,
+                    }
+                )
+            )
+
+        if not updates:
+            return {
+                "enabled": True,
+                "updated": 0,
+                "candidates": len(patches),
+                "scope": "all-stocks" if all_stocks else str(sector or ""),
+            }
+
+        client.table("symbol_daily_features").upsert(
+            updates,
+            on_conflict="trade_date,sector,symbol,exchange",
+        ).execute()
+        return {
+            "enabled": True,
+            "updated": len(updates),
+            "candidates": len(patches),
+            "scope": "all-stocks" if all_stocks else str(sector or ""),
+            "start": start_iso,
+            "end": end_iso,
+        }
+    except APIError as e:
+        payload = e.args[0] if e.args else {}
+        msg = payload.get("message", str(e)) if isinstance(payload, dict) else str(e)
+        logger.warning("Forward outcomes persist failed: %s", msg)
+        return {"enabled": True, "updated": 0, "reason": "api_error", "message": msg}
+    except Exception as e:  # pragma: no cover
+        logger.warning("Forward outcomes persist failed: %s", e)
+        return {"enabled": True, "updated": 0, "reason": "unexpected"}
+
+
+def _forward_returns_after(symbol_rows: Sequence[dict[str, Any]], as_of_iso: str) -> tuple[float, float]:
+    """Compounded forward returns over the +1 and +5 sessions AFTER ``as_of_iso``.
+
+    Derived from the stored trailing ``return_1d_pct`` of the FOLLOWING sessions
+    (no same-day move). Returns ``(nan, nan)`` when no forward sessions are stored,
+    so callers stay backward-compatible in the normal as-of-latest reconcile path.
+    """
+    forward = sorted(
+        (
+            r
+            for r in symbol_rows
+            if isinstance(r, dict) and str(r.get("trade_date") or "")[:10] > as_of_iso
+        ),
+        key=lambda r: str(r.get("trade_date") or ""),
+    )
+    if not forward:
+        return float("nan"), float("nan")
+    fwd_1d = float("nan")
+    fwd_5d = float("nan")
+    cum = 1.0
+    for i, r in enumerate(forward[:5]):
+        v = _safe_float(r.get("return_1d_pct"))
+        if math.isnan(v):
+            continue
+        cum *= 1.0 + v / 100.0
+        if i == 0:
+            fwd_1d = (cum - 1.0) * 100.0
+    if any(not math.isnan(_safe_float(r.get("return_1d_pct"))) for r in forward[:5]):
+        fwd_5d = (cum - 1.0) * 100.0
+    return fwd_1d, fwd_5d
+
+
 VALID_ACTION_SIGNALS: tuple[str, ...] = ("buy", "hold", "trim", "exit-risk")
 _ACCUMULATE_SIGNAL = "accumulate"
 
@@ -546,6 +816,18 @@ def build_symbol_daily_feature(
         "ohlc_bar_incomplete": audit.get("ohlc_bar_incomplete"),
         "session_move_vs_prev_close_pct": audit.get("session_move_vs_prev_close_pct"),
         "price_snapshot_ts": audit.get("price_snapshot_ts"),
+        # v2 risk-gate inputs (Layers C/C-8/D): computed in build_equity_live_audit but
+        # previously never persisted, so backtests/reconcile ran money-flow / ADX-regime /
+        # over-extension layers at zero. Persist them so they are reproducible offline.
+        "cmf_20": audit.get("cmf_20"),
+        "obv_slope_20": audit.get("obv_slope_20"),
+        "adx_14": audit.get("adx_14"),
+        "adx_plus_di_14": audit.get("adx_plus_di_14"),
+        "adx_minus_di_14": audit.get("adx_minus_di_14"),
+        "ema200_stretch_atr": audit.get("ema200_stretch_atr"),
+        "sector_pctile_ema200_stretch": audit.get("sector_pctile_ema200_stretch"),
+        "sector_pctile_cmf_20": audit.get("sector_pctile_cmf_20"),
+        "sector_pctile_adx_14": audit.get("sector_pctile_adx_14"),
     }
 
     vpr = audit.get("volume_participation_ratio", audit.get("absorption_ratio"))
@@ -694,6 +976,12 @@ def persist_sector_run_analytics(
             on_conflict="trade_date,sector,symbol,exchange",
             optional_columns=_SYMBOL_FEATURE_OPTIONAL_COLUMNS,
         )
+        forward_outcomes_meta = persist_forward_outcomes(
+            cfg,
+            client=client,
+            sector=sector,
+            as_of_date=run_ts.date(),
+        )
         transition_persist_meta = persist_stock_signal_transition_analytics(
             cfg,
             client=client,
@@ -723,6 +1011,7 @@ def persist_sector_run_analytics(
             "persisted": True,
             "run_id": run_id,
             "feature_rows": len(features),
+            "forward_outcomes": forward_outcomes_meta,
             "transition_rows": int(transition_persist_meta.get("rows") or 0),
             "transition_validation_checks": build_stock_transition_validation_checks(
                 sector=sector,
@@ -854,7 +1143,18 @@ def update_sector_period_rollups(
         client.table("sector_period_rollup").upsert(
             to_upsert, on_conflict="period_type,period_end,sector"
         ).execute()
-        return {"enabled": True, "updated": True, "rows": len(to_upsert)}
+        forward_outcomes_meta = persist_forward_outcomes(
+            cfg,
+            client=client,
+            sector=sector,
+            as_of_date=as_of,
+        )
+        return {
+            "enabled": True,
+            "updated": True,
+            "rows": len(to_upsert),
+            "forward_outcomes": forward_outcomes_meta,
+        }
     except APIError as e:
         payload = e.args[0] if e.args else {}
         msg = payload.get("message", str(e)) if isinstance(payload, dict) else str(e)
@@ -1397,6 +1697,12 @@ def build_stock_reconcile_snapshot(
                 shortlist_total += 1
                 ret_1d = _safe_float(current.get("return_1d_pct"))
                 ret_5d = _safe_float(current_tape.get("return_5d_pct"))
+                if forward_return_eval_enabled():
+                    fwd_1d, fwd_5d = _forward_returns_after(symbol_rows, as_of_iso)
+                    if not math.isnan(fwd_1d):
+                        ret_1d = fwd_1d
+                    if not math.isnan(fwd_5d):
+                        ret_5d = fwd_5d
                 if not math.isnan(ret_1d) and ret_1d > 0:
                     shortlist_1d_hit += 1
                 if not math.isnan(ret_5d):
