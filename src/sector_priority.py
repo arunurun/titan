@@ -3113,6 +3113,8 @@ def _gate_record_applied(record: dict[str, Any]) -> bool:
     mode = str(record.get("mode") or "shadow").strip().lower()
     if mode in ("off", "shadow"):
         return False
+    if mode in ("damp", "skip", "enforce"):
+        return True
     if bool(record.get("withhold")):
         return True
     try:
@@ -3191,6 +3193,10 @@ def rehydrate_persisted_gate_record(record: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(record, dict) or not bool(record.get("triggered")):
         return record
     out = dict(record)
+    stored_mode = str(out.get("mode") or "shadow").strip().lower()
+    if stored_mode in ("damp", "skip", "enforce"):
+        out["applied"] = _gate_record_applied(out)
+        return out
     gate = str(out.get("gate") or "").strip().lower()
     if gate == "fno_ban":
         mode = _gate_mode("TITAN_BAN_GATE_MODE")
@@ -3224,6 +3230,7 @@ def rehydrate_persisted_gate_record(record: dict[str, Any]) -> dict[str, Any]:
     out["mode"] = mode
     out["score_multiplier"] = round(mult, 4)
     out["withhold"] = withhold
+    out["applied"] = _gate_record_applied(out)
     return out
 
 
@@ -3240,6 +3247,18 @@ def rehydrate_institutional_context(ctx: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(ctx, dict) or not bool(ctx.get("risk_off")):
         return ctx
     out = dict(ctx)
+    stored_mode = str(out.get("mode") or "shadow").strip().lower()
+    if stored_mode in ("damp", "skip", "enforce"):
+        out["gate_applied"] = _gate_record_applied(
+            {
+                "gate": "institutional",
+                "mode": stored_mode,
+                "triggered": True,
+                "score_multiplier": out.get("score_multiplier", 1.0),
+                "withhold": bool(out.get("withhold")),
+            }
+        )
+        return out
     gate = _institutional_gate(
         {
             "institutional": {
@@ -3249,6 +3268,8 @@ def rehydrate_institutional_context(ctx: dict[str, Any]) -> dict[str, Any]:
         }
     )
     out["mode"] = gate.get("mode")
+    out["score_multiplier"] = gate.get("score_multiplier")
+    out["withhold"] = gate.get("withhold")
     out["gate_applied"] = _gate_record_applied(gate)
     return out
 

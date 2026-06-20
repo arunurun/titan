@@ -90,8 +90,12 @@ def test_derive_trim_and_exit_bands():
     exit_sig, exit_risk, _ = derive_action_signal(
         {
             "next_week_score": 40.0,
+            "effective_intent_score": 42.0,
             "z_score": -2.4,
             "return_1d_pct": -2.6,
+            "return_5d_pct": -8.0,
+            "return_21d_pct": -12.0,
+            "cmf_20": -0.15,
             "trap_exit_proxy": True,
             "fundamental_status": "weak",
         }

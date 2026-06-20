@@ -848,6 +848,8 @@ def _gate_record_applied(record: dict[str, Any]) -> bool:
         return True
     if mode in ("off", "shadow"):
         return False
+    if mode in ("damp", "skip", "enforce"):
+        return True
     if bool(record.get("withhold")):
         return True
     try:
@@ -954,14 +956,17 @@ def _institutional_shadow_record(ctx: dict[str, Any]) -> dict[str, Any]:
         parts.append(f"DII net {float(dii):+.0f} Cr")
     reason = ", ".join(parts) if parts else "risk-off institutional backdrop"
     mode = str(ctx.get("mode") or "shadow").strip().lower()
-    mult = 1.0
-    withhold = False
-    if mode == "damp":
-        mult = 0.85
-    elif mode == "skip":
-        mult = 0.85
+    mult = _safe_float(ctx.get("score_multiplier"))
+    if math.isnan(mult):
+        mult = 1.0
+        if mode == "damp":
+            mult = 0.85
+        elif mode == "skip":
+            mult = 0.85
+    withhold = bool(ctx.get("withhold"))
+    if mode == "skip" and not withhold:
         withhold = True
-    return {
+    record: dict[str, Any] = {
         "gate": "institutional",
         "mode": mode,
         "triggered": True,
@@ -970,10 +975,22 @@ def _institutional_shadow_record(ctx: dict[str, Any]) -> dict[str, Any]:
         "score_multiplier": mult,
         "withhold": withhold,
     }
+    if bool(ctx.get("gate_applied")) or mode in ("damp", "skip", "enforce"):
+        record["applied"] = True
+    return record
 
 
 def _digest_shadow_gate_notes(audit: dict[str, Any]) -> list[str]:
     """Per-stock gate lines for digest Context (shadow preview or applied enforcement)."""
+    from sector_priority import rehydrate_institutional_context, rehydrate_persisted_gate_records
+
+    if isinstance(audit.get("shadow_gates"), list):
+        audit["shadow_gates"] = rehydrate_persisted_gate_records(audit["shadow_gates"])
+    if isinstance(audit.get("institutional_context"), dict):
+        audit["institutional_context"] = rehydrate_institutional_context(
+            audit["institutional_context"]
+        )
+
     notes: list[str] = []
     seen: set[str] = set()
 
@@ -1121,12 +1138,16 @@ def _bridge_priority_shadow_context(
             audit["sector_key"] = sector_key
         meta = meta_by_key.get((sym, ex)) or {}
         if isinstance(meta.get("shadow_gates"), list) and not audit.get("shadow_gates"):
-            audit["shadow_gates"] = rehydrate_persisted_gate_records(meta["shadow_gates"])
+            audit["shadow_gates"] = list(meta["shadow_gates"])
+        if isinstance(audit.get("shadow_gates"), list):
+            audit["shadow_gates"] = rehydrate_persisted_gate_records(audit["shadow_gates"])
         if isinstance(meta.get("absorption_term"), dict) and not audit.get("absorption_term_shadow"):
             audit["absorption_term_shadow"] = meta["absorption_term"]
         if isinstance(meta.get("institutional_context"), dict) and not audit.get("institutional_context"):
+            audit["institutional_context"] = dict(meta["institutional_context"])
+        if isinstance(audit.get("institutional_context"), dict):
             audit["institutional_context"] = rehydrate_institutional_context(
-                meta["institutional_context"]
+                audit["institutional_context"]
             )
 
 
