@@ -1971,21 +1971,61 @@ def _load_previous_market_caps(
     return out
 
 
+def _env_truthy(name: str, *, default: bool = False) -> bool:
+    raw = (str(os.environ.get(name, "")) or "").strip().lower()
+    if raw == "":
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
+def use_sector_relative_ranking() -> bool:
+    """When true, rank_score uses ``compute_sector_relative_momentum_score`` instead of 1w/1m terms."""
+    return _env_truthy("TITAN_USE_SECTOR_RELATIVE_RANKING", default=False)
+
+
+def compute_sector_relative_momentum_score(
+    *,
+    sector_pctile_return_1m: float,
+    sector_pctile_return_3m: float,
+    sector_pctile_rel_strength: float,
+    sector_pctile_intent: float,
+    sector_pctile_next_week: float,
+) -> float:
+    """Weighted sector-relative momentum score normalized to 0-100."""
+    weights = (0.35, 0.25, 0.20, 0.10, 0.10)
+    inputs = (
+        sector_pctile_return_1m,
+        sector_pctile_return_3m,
+        sector_pctile_rel_strength,
+        sector_pctile_intent,
+        sector_pctile_next_week,
+    )
+    total = 0.0
+    for w, v in zip(weights, inputs):
+        pct = 50.0 if math.isnan(_safe_float(v)) else _clamp(float(v), 0.0, 100.0)
+        total += w * pct
+    return round(_clamp(total, 0.0, 100.0), 4)
+
+
 def _cohort_return_percentiles(pending: list[dict[str, Any]]) -> None:
-    """Assign cross-sectional 1w/1m return percentiles; NaN returns -> sector median."""
+    """Assign cross-sectional return percentiles; NaN returns -> sector median (50)."""
     ret_1w_vals = [float(p["ret_1w"]) for p in pending if not math.isnan(_safe_float(p.get("ret_1w")))]
     ret_1m_vals = [float(p["ret_1m"]) for p in pending if not math.isnan(_safe_float(p.get("ret_1m")))]
+    ret_3m_vals = [float(p["ret_3m"]) for p in pending if not math.isnan(_safe_float(p.get("ret_3m")))]
+    rel_vals = [float(p["rel_strength"]) for p in pending if not math.isnan(_safe_float(p.get("rel_strength")))]
     for p in pending:
         r1w = _safe_float(p.get("ret_1w"))
         r1m = _safe_float(p.get("ret_1m"))
-        if math.isnan(r1w):
-            p["percentile_1w"] = _PCTILE_MEDIAN_DEFAULT
-        else:
-            p["percentile_1w"] = percentile_rank_0_100(ret_1w_vals, r1w)
-        if math.isnan(r1m):
-            p["percentile_1m"] = _PCTILE_MEDIAN_DEFAULT
-        else:
-            p["percentile_1m"] = percentile_rank_0_100(ret_1m_vals, r1m)
+        r3m = _safe_float(p.get("ret_3m"))
+        rel = _safe_float(p.get("rel_strength"))
+        p["percentile_1w"] = 50.0 if math.isnan(r1w) else percentile_rank_0_100(ret_1w_vals, r1w)
+        p["percentile_1m"] = 50.0 if math.isnan(r1m) else percentile_rank_0_100(ret_1m_vals, r1m)
+        p["percentile_3m"] = 50.0 if math.isnan(r3m) else percentile_rank_0_100(ret_3m_vals, r3m)
+        p["percentile_rel_strength"] = 50.0 if math.isnan(rel) else percentile_rank_0_100(rel_vals, rel)
+        if math.isnan(_safe_float(p.get("percentile_intent"))):
+            p["percentile_intent"] = 50.0
+        if math.isnan(_safe_float(p.get("percentile_next_week"))):
+            p["percentile_next_week"] = 50.0
 
 
 def _return_pct(series: pd.Series, periods_back: int) -> float:
@@ -2238,6 +2278,7 @@ def _score_from_features(
     session_move: float = float("nan"),
     percentile_1w: float = 50.0,
     percentile_1m: float = 50.0,
+    sector_relative_score: float | None = None,
 ) -> float:
     ref_1w = _env_float("TITAN_RANK_PCTILE_1W_REF", _PCTILE_1W_REF_RETURN)
     ref_1m = _env_float("TITAN_RANK_PCTILE_1M_REF", _PCTILE_1M_REF_RETURN)
@@ -2245,9 +2286,13 @@ def _score_from_features(
     pct_1m = 50.0 if math.isnan(percentile_1m) else percentile_1m
     ret_1w_term = 1.1 * (pct_1w / 100.0) * ref_1w
     ret_1m_term = 0.45 * (pct_1m / 100.0) * ref_1m
-    # P0-2 (STEP 3a): capped + sign-gated absorption term (down-day no longer a bonus).
     absorption_term = _absorption_term(absorption, session_move)["value"]
-    score = _cap_bias(bucket) + ret_1w_term + ret_1m_term + absorption_term
+    if use_sector_relative_ranking() and sector_relative_score is not None:
+        ref_total = _env_float("TITAN_SRM_REF_POINTS", ref_1w + ref_1m)
+        momentum_term = (float(sector_relative_score) / 100.0) * ref_total
+    else:
+        momentum_term = ret_1w_term + ret_1m_term
+    score = _cap_bias(bucket) + momentum_term + absorption_term
     # Fix A: down-rank statistically extended winners (smooth, env-tunable; STEP 2a
     # gates the penalty behind momentum/regime confirmation).
     penalty = _overextension_penalty(
@@ -2563,7 +2608,7 @@ def _fetch_eod_gate_context(
     # --- 3b: latest signal_v2 label + risk_net per symbol (symbol_daily_features) ---
     try:
         q = client.table("symbol_daily_features").select(
-            "trade_date,symbol,action_signal,signal_reason_trace"
+            "trade_date,symbol,action_signal,signal_reason_trace,effective_intent_score,next_week_score"
         ).in_("symbol", query_syms)
         if as_of_date:
             q = q.lte("trade_date", as_of_date)
@@ -2571,6 +2616,8 @@ def _fetch_eod_gate_context(
         labels: dict[str, str] = {}
         risk_net_map: dict[str, float] = {}
         label_dates: dict[str, str] = {}
+        intent_map: dict[str, float] = {}
+        next_week_map: dict[str, float] = {}
         for r in list(getattr(res, "data", None) or []):
             sym = str(r.get("symbol")).upper()
             if sym not in labels and r.get("action_signal"):
@@ -2580,9 +2627,19 @@ def _fetch_eod_gate_context(
                 rn = _parse_v2_risk_net(r.get("signal_reason_trace"))
                 if not math.isnan(rn):
                     risk_net_map[sym] = rn
+            if sym not in intent_map:
+                iv = _safe_float(r.get("effective_intent_score"))
+                if not math.isnan(iv):
+                    intent_map[sym] = iv
+            if sym not in next_week_map:
+                nw = _safe_float(r.get("next_week_score"))
+                if not math.isnan(nw):
+                    next_week_map[sym] = nw
         ctx["v2_labels"] = labels
         ctx["v2_risk_net"] = risk_net_map
         ctx["v2_label_dates"] = label_dates
+        ctx["intent_scores"] = intent_map
+        ctx["next_week_scores"] = next_week_map
     except Exception as exc:  # noqa: BLE001
         logger.info("symbol_daily_features label read failed: %s", exc)
     # --- Phase 3: corporate-actions / results calendar (corporate_actions_calendar) ---
@@ -2632,7 +2689,7 @@ def _resolve_symbol_gates(
 _V2_RISK_SUPPRESS = ("trim", "exit-risk")
 _V2_RISK_DAMP_MULT = 0.5
 _V2_RANK_BONUS_MAX = 1.5
-_V2_RANK_PENALTY_MAX = 6.0
+_V2_RANK_PENALTY_MAX = 3.0
 _V2_RANK_TRIM_THRESHOLD = 5.0
 _V2_LABEL_RISK_NET: dict[str, float] = {
     "buy": 1.0,
@@ -2701,10 +2758,22 @@ def _resolve_v2_signal(symbol: str, eod_ctx: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def cap_rank_penalty_families(families: dict[str, float]) -> dict[str, float]:
+    """Cap each risk family at ``TITAN_V2_RANK_PENALTY_FAMILY_CAP`` (default 30%) of total penalty."""
+    cap_frac = _env_float("TITAN_V2_RANK_PENALTY_FAMILY_CAP", 0.30)
+    cleaned = {k: max(0.0, float(v)) for k, v in families.items()}
+    total = sum(cleaned.values())
+    if total <= 0.0 or cap_frac <= 0.0:
+        return cleaned
+    max_each = total * cap_frac
+    return {k: min(v, max_each) for k, v in cleaned.items()}
+
+
 def _v2_rank_adjustment(
     v2: dict[str, Any],
     *,
     overextension_penalty: float = 0.0,
+    penalty_families: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """Translate signal_v2 risk_net into a rank_score bonus/penalty term."""
     label = str(v2.get("label") or "").strip().lower()
@@ -2728,10 +2797,16 @@ def _v2_rank_adjustment(
         frac = (risk_net - trim_at) / span
         adj = -penalty_max * _clamp(frac, 0.0, 1.0)
         mode = "penalty"
-        # De-conflict: when sector overextension penalty already fired, damp duplicate vol/risk.
+        if penalty_families:
+            capped = cap_rank_penalty_families(penalty_families)
+            capped_total = sum(capped.values())
+            raw_total = sum(max(0.0, float(v)) for v in penalty_families.values())
+            if raw_total > 0.0 and capped_total < raw_total:
+                adj *= capped_total / raw_total
+                mode = "penalty_family_capped"
         if overextension_penalty > 0.05 and vol_damp > 0.0:
             adj *= max(0.0, 1.0 - vol_damp)
-            mode = "penalty_vol_damped"
+            mode = "penalty_vol_damped" if mode == "penalty" else mode
     return {
         "adjustment": round(adj, 4),
         "label": label or None,
@@ -3156,6 +3231,7 @@ def build_sector_rankings(
         series = pd.to_numeric(df[close_col], errors="coerce") if close_col is not None else pd.Series(dtype=float)
         ret_1w = _return_pct(series, periods_back=5)
         ret_1m = _return_pct(series, periods_back=20)
+        ret_3m = _return_pct(series, periods_back=60)
         ret_1d = _return_pct(series, periods_back=1)  # latest session move (P0-2 sign-gate)
         absorption = volume_participation_ratio(df) if not df.empty else float("nan")
         # Fix A inputs: ATR-normalized EMA200 stretch (NaN-safe; needs ~250 sessions +
@@ -3192,6 +3268,7 @@ def build_sector_rankings(
                 "df": df,
                 "ret_1w": ret_1w,
                 "ret_1m": ret_1m,
+                "ret_3m": ret_3m,
                 "ret_1d": ret_1d,
                 "absorption": absorption,
                 "stretch": stretch,
@@ -3202,6 +3279,27 @@ def build_sector_rankings(
             }
         )
 
+    intent_vals = [
+        _safe_float((eod_ctx.get("intent_scores") or {}).get(str(p["symbol_u"]).upper()))
+        for p in pending
+    ]
+    nw_vals = [
+        _safe_float((eod_ctx.get("next_week_scores") or {}).get(str(p["symbol_u"]).upper()))
+        for p in pending
+    ]
+    valid_intent = [v for v in intent_vals if not math.isnan(v)]
+    valid_nw = [v for v in nw_vals if not math.isnan(v)]
+    ret_1m_cohort = [_safe_float(p.get("ret_1m")) for p in pending if not math.isnan(_safe_float(p.get("ret_1m")))]
+    med_1m = float(sum(ret_1m_cohort) / len(ret_1m_cohort)) if ret_1m_cohort else float("nan")
+    for p, intent_v, nw_v in zip(pending, intent_vals, nw_vals):
+        r1m = _safe_float(p.get("ret_1m"))
+        p["rel_strength"] = (r1m - med_1m) if not (math.isnan(r1m) or math.isnan(med_1m)) else float("nan")
+        p["percentile_intent"] = (
+            50.0 if math.isnan(intent_v) else percentile_rank_0_100(valid_intent, intent_v)
+        ) if valid_intent else 50.0
+        p["percentile_next_week"] = (
+            50.0 if math.isnan(nw_v) else percentile_rank_0_100(valid_nw, nw_v)
+        ) if valid_nw else 50.0
     _cohort_return_percentiles(pending)
     rows: list[dict[str, Any]] = []
     for p in pending:
@@ -3220,6 +3318,15 @@ def build_sector_rankings(
         bucket = p["bucket"]
         pct_1w = _safe_float(p.get("percentile_1w"))
         pct_1m = _safe_float(p.get("percentile_1m"))
+        srm_score: float | None = None
+        if use_sector_relative_ranking():
+            srm_score = compute_sector_relative_momentum_score(
+                sector_pctile_return_1m=pct_1m,
+                sector_pctile_return_3m=_safe_float(p.get("percentile_3m")),
+                sector_pctile_rel_strength=_safe_float(p.get("percentile_rel_strength")),
+                sector_pctile_intent=_safe_float(p.get("percentile_intent")),
+                sector_pctile_next_week=_safe_float(p.get("percentile_next_week")),
+            )
         overext = _overextension_penalty(
             ret_1w=ret_1w,
             ret_1m=ret_1m,
@@ -3240,6 +3347,7 @@ def build_sector_rankings(
             session_move=ret_1d,
             percentile_1w=pct_1w,
             percentile_1m=pct_1m,
+            sector_relative_score=srm_score,
         )
         pre_gate_score = round(base_score + blend_points, 4)
         v2_signal = _resolve_v2_signal(symbol_u, eod_ctx)
@@ -3306,6 +3414,16 @@ def build_sector_rankings(
                     "technical_rank_score": base_score,
                     "percentile_1w": _round_or_none(pct_1w, digits=2),
                     "percentile_1m": _round_or_none(pct_1m, digits=2),
+                    "percentile_3m": _round_or_none(_safe_float(p.get("percentile_3m")), digits=2),
+                    "percentile_rel_strength": _round_or_none(
+                        _safe_float(p.get("percentile_rel_strength")), digits=2
+                    ),
+                    "percentile_intent": _round_or_none(_safe_float(p.get("percentile_intent")), digits=2),
+                    "percentile_next_week": _round_or_none(
+                        _safe_float(p.get("percentile_next_week")), digits=2
+                    ),
+                    "sector_relative_momentum_score": srm_score,
+                    "sector_relative_ranking": use_sector_relative_ranking(),
                     "overextension_penalty": overext.get("penalty", 0.0),
                     "overextension_components": overext.get("components", {}),
                     "absorption_term": absorption_bd,

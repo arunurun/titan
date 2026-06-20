@@ -124,6 +124,41 @@ def v2_enabled() -> bool:
     return True
 
 
+_MOMENTUM_SECTORS = frozenset({
+    "renewables_clean_energy",
+    "railways_transport_infra",
+    "power_utilities",
+    "defence",
+})
+
+
+def _sector_aware_tier2_enabled() -> bool:
+    return _env_truthy("TITAN_SECTOR_AWARE_TIER2", default=False)
+
+
+def _tier2_thresholds(audit: dict[str, Any]) -> tuple[int, int]:
+    trim = _env_int("TITAN_SIGV2_B_TIER2_TRIM_COUNT", 2)
+    exit_c = _env_int("TITAN_SIGV2_B_TIER2_EXIT_COUNT", 3)
+    if _sector_aware_tier2_enabled():
+        sector = str(audit.get("sector_key") or audit.get("sector") or "").strip().lower()
+        if sector in _MOMENTUM_SECTORS:
+            trim = 3
+            exit_c = 4
+    return trim, exit_c
+
+
+def _overext_counts_as_corroborator(audit: dict[str, Any], c: dict[str, Any]) -> bool:
+    if not bool(c.get("over_extension_hot")):
+        return False
+    if not _sector_aware_tier2_enabled():
+        return True
+    cmf = _sf(audit.get("cmf_20"))
+    distribution = (not math.isnan(cmf)) and cmf < -0.05
+    rel5 = _sf(audit.get("rel_return_5d_vs_nifty_pct"))
+    weak_rel = (not math.isnan(rel5) and rel5 <= -3.0)
+    return distribution or weak_rel
+
+
 # ---------------------------------------------------------------------------
 # small numeric helpers
 # ---------------------------------------------------------------------------
@@ -367,7 +402,12 @@ def layer_c(audit: dict[str, Any]) -> dict[str, Any]:
 
     cmf = _sf(audit.get("cmf_20"))
     obv_confirm = _obv_trend_confirm(audit)
-    stretch = _sf(audit.get("ema200_stretch_atr"))
+    try:
+        from stretch_engine import effective_stretch_atr
+
+        stretch = effective_stretch_atr(audit)
+    except ImportError:
+        stretch = _sf(audit.get("ema200_stretch_atr"))
     stretch_pctile = _sf(audit.get("sector_pctile_ema200_stretch"))
     z = _sf(audit.get("z_score"))
 
@@ -375,6 +415,8 @@ def layer_c(audit: dict[str, Any]) -> dict[str, Any]:
     cap_cmf = _env_float("TITAN_SIGV2_C_CMF_CAP", 2.0)
     stretch_deadband = _env_float("TITAN_SIGV2_C_STRETCH_DEADBAND_ATR", 3.0)
     if _bullish_adx_trend(audit):
+        stretch_deadband *= _env_float("TITAN_SIGV2_C_STRETCH_DEADBAND_BULL_MULT", 1.5)
+    if bool(audit.get("regime_ignore_mild_overextension")):
         stretch_deadband *= _env_float("TITAN_SIGV2_C_STRETCH_DEADBAND_BULL_MULT", 1.5)
     stretch_ramp = _env_float("TITAN_SIGV2_C_STRETCH_RAMP_ATR", 8.0)
     stretch_cap = _env_float("TITAN_SIGV2_C_STRETCH_CAP", 2.0)
@@ -599,8 +641,7 @@ def layer_b(audit: dict[str, Any], c: dict[str, Any], d: dict[str, Any]) -> dict
 
     reasons: list[str] = []
     tier1_gap_pct = _env_float("TITAN_SIGV2_B_TIER1_GAP_PCT", -8.0)
-    trim_count = _env_int("TITAN_SIGV2_B_TIER2_TRIM_COUNT", 2)
-    exit_count = _env_int("TITAN_SIGV2_B_TIER2_EXIT_COUNT", 3)
+    trim_count, exit_count = _tier2_thresholds(audit)
 
     ret1d = _sf(audit.get("return_1d_pct"))
     med_notional = _sf(audit.get("median_notional_inr_20d"))
@@ -640,7 +681,7 @@ def layer_b(audit: dict[str, Any], c: dict[str, Any], d: dict[str, Any]) -> dict
         signals.append("vpr-proxy stress")
     if not math.isnan(cmf) and cmf < -0.05:
         signals.append("cmf distribution")
-    if bool(c.get("over_extension_hot")):
+    if _overext_counts_as_corroborator(audit, c):
         signals.append("over-extension hot")
     if (not math.isnan(adx) and adx < 20.0) and (
         not math.isnan(plus_di) and not math.isnan(minus_di) and minus_di > plus_di
@@ -656,11 +697,13 @@ def layer_b(audit: dict[str, Any], c: dict[str, Any], d: dict[str, Any]) -> dict
         signals.append("below put OI support")
 
     count = len(signals)
+    tier2_mult = float(audit.get("regime_tier2_penalty_mult", 1.0))
+    effective_count = count * tier2_mult
     out["corroborators"] = count
-    if count >= exit_count:
+    if effective_count >= exit_count:
         out["forced_label"] = "exit-risk"
         reasons.append(f"Tier-2: {count} corroborators -> exit-risk ({', '.join(signals)})")
-    elif count >= trim_count or bool(d.get("staleflow_downgrade")):
+    elif effective_count >= trim_count or bool(d.get("staleflow_downgrade")):
         out["forced_label"] = "trim"
         reasons.append(f"Tier-2: {count} corroborators -> trim ({', '.join(signals)})")
     out["reasons"] = reasons
@@ -672,8 +715,9 @@ def layer_b(audit: dict[str, Any], c: dict[str, Any], d: dict[str, Any]) -> dict
 # ---------------------------------------------------------------------------
 
 
-def _aggregate(c: dict[str, Any], d: dict[str, Any]) -> dict[str, float]:
+def _aggregate(c: dict[str, Any], d: dict[str, Any], audit: dict[str, Any] | None = None) -> dict[str, float]:
     """Apply Layer-D multipliers + bumps to Layer-C terms -> risk_c, bull_c."""
+    audit = audit or {}
     fam = c.get("families", {})
     mult_mom = float(d.get("mult_momentum", 1.0))
     mult_mf = float(d.get("mult_money_flow", 1.0))
@@ -692,6 +736,9 @@ def _aggregate(c: dict[str, Any], d: dict[str, Any]) -> dict[str, float]:
     risk_c += float(c.get("upside_z", 0.0)) * mult_oe
     risk_c += float(c.get("fundamental", 0.0))  # may be negative (strong fundamentals)
     risk_c += float(d.get("divergence_bump", 0.0))
+    defensive_mult = float(audit.get("regime_defensive_penalty_mult", 1.0))
+    if defensive_mult > 1.0:
+        risk_c *= defensive_mult
     risk_c = _clamp(risk_c, 0.0, 10.0)
 
     bull_c = float(c.get("money_flow_bull", 0.0)) * mult_mf
@@ -744,6 +791,10 @@ def _buy_gate(audit: dict[str, Any], a: dict[str, Any], c: dict[str, Any]) -> di
 
     buy_nw_min = _env_float("TITAN_SIGV2_BUY_NEXT_WEEK_MIN", 65.0)
     buy_intent_min = _env_float("TITAN_SIGV2_BUY_INTENT_MIN", 60.0)
+    buy_delta = _sf(audit.get("regime_buy_threshold_delta"))
+    if not math.isnan(buy_delta) and buy_delta != 0.0:
+        buy_nw_min += buy_delta
+        buy_intent_min += buy_delta
 
     constructive_scores = (
         not math.isnan(next_week)
@@ -1451,7 +1502,7 @@ def evaluate_signal_v2(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
     d = layer_d(audit, c)
     b = layer_b(audit, c, d)
 
-    agg = _aggregate(c, d)
+    agg = _aggregate(c, d, audit)
     risk_c = agg["risk_c"]
     bull_c = agg["bull_c"]
 

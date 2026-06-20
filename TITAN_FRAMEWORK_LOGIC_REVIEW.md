@@ -183,7 +183,7 @@ from `symbol_daily_features` are translated into a bounded bonus/penalty before 
 
 - `risk_net < 5` (buy/accumulate/hold): bonus up to **+1.5** (`TITAN_V2_RANK_BONUS_MAX`), linear
   from trim threshold down to 0.
-- `risk_net ≥ 5` (trim/exit-risk): penalty up to **−6.0** (`TITAN_V2_RANK_PENALTY_MAX`), linear
+- `risk_net ≥ 5` (trim/exit-risk): penalty up to **−3.0** (`TITAN_V2_RANK_PENALTY_MAX`, default lowered Jun 2026), linear
   from 5→10 on the 0–10 `risk_net` scale. When sector overextension penalty already fired,
   v2 penalty is damped by `TITAN_V2_RANK_VOL_DAMP_FRAC` (default 0.25) to avoid double-counting
   volatility/stretch already in `risk_c`.
@@ -631,6 +631,28 @@ rebuilds audits (`feature_row_to_audit`, `:171-204`), recomputes labels via `eva
 
 Walk-forward labels feed `prev_action_signal` so v2 hysteresis is exercised in backtest only
 (`walk_labels`, `:270-294`).
+
+---
+
+## 7b. Seven-phase framework improvements (Jun 2026, feature-flagged)
+
+All flags default **OFF** (or **shadow** for regime/calibration). Legacy behaviour when disabled.
+Re-architecture **682657a** (OBV EMA, directional ADX, percentile 1w/1m rank terms, vol de-dup,
+hysteresis 3.0/5.0, 400-day lookback) remains baseline; flags below extend it.
+
+| Flag | Module | When enabled |
+|---|---|---|
+| `TITAN_USE_SECTOR_RELATIVE_RANKING` | `sector_priority.py` | `compute_sector_relative_momentum_score()` replaces 1w/1m return terms (0.35×1m + 0.25×3m + 0.20×rel_strength + 0.10×intent + 0.10×next_week). |
+| `TITAN_ENABLE_REGIME_ENGINE` | `market_regime.py` | STRONG_BULL / BULL / NEUTRAL / DEFENSIVE / BEAR on `audit["market_regime"]`. |
+| `TITAN_REGIME_ENGINE_MODE` | `market_regime.py` | `shadow` (default) or `enforce` for buy-threshold / Tier-2 / defensive adaptations. |
+| `TITAN_SECTOR_AWARE_TIER2` | `signal_v2.py` | Momentum sectors: trim=3, exit=4; overextension alone never trims. |
+| `TITAN_V2_RANK_PENALTY_MAX` | `sector_priority.py` | Default **−3.0**; `TITAN_V2_RANK_PENALTY_FAMILY_CAP` (0.30) caps single-family share. |
+| `TITAN_NEW_STRETCH_ENGINE` | `stretch_engine.py` | Composite stretch (0.5×ema20 + 0.3×ema50 + 0.2×52w) in v2 C-8. |
+| `TITAN_ENABLE_PROBABILITY_CALIBRATION` | `probability_calibration.py` | Bucket map → `predicted_probability`. |
+| `TITAN_PROB_CALIB_MODE` | `probability_calibration.py` | `shadow` / `enforce` for confidence replacement. |
+
+Validation: **legacy** (off) / **shadow** (log) / **enforce** (apply). Analytics:
+`analytics/performance_metrics.py` — profit factor, expectancy, Sharpe, drawdown.
 
 ---
 
