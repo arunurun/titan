@@ -135,8 +135,9 @@ _MOMENTUM_SECTORS = frozenset({
 def _tier2_thresholds(audit: dict[str, Any]) -> tuple[int, int]:
     trim = _env_int("TITAN_SIGV2_B_TIER2_TRIM_COUNT", 2)
     exit_c = _env_int("TITAN_SIGV2_B_TIER2_EXIT_COUNT", 3)
-    sector = str(audit.get("sector_key") or audit.get("sector") or "").strip().lower()
-    if sector in _MOMENTUM_SECTORS:
+    sector_clean = str(audit.get("sector_key") or audit.get("sector") or "").strip().lower()
+    is_momentum_sector = any(m_sec in sector_clean for m_sec in _MOMENTUM_SECTORS)
+    if is_momentum_sector:
         trim = 3
         exit_c = 4
     return trim, exit_c
@@ -177,7 +178,7 @@ _SEVERITY: dict[str, int] = {
 
 _SIGV2_BUY_RISK_MAX = 3.0
 _SIGV2_TRIM_RISK_MIN = 5.0
-_SIGV2_EXIT_RISK_MIN = 7.0
+_SIGV2_EXIT_RISK_MIN = 7.5
 
 
 def _sf(v: Any) -> float:
@@ -514,6 +515,7 @@ def layer_d(audit: dict[str, Any], c: dict[str, Any]) -> dict[str, Any]:
         "mult_over_extension": 1.0,
         "mult_momentum": 1.0,
         "mult_risk": 1.0,
+        "layer_c_risk_mult": 1.0,
         "divergence_bump": 0.0,
         "buy_confidence_cap": None,
         "pullback_bull_bump": 0.0,
@@ -576,11 +578,27 @@ def layer_d(audit: dict[str, Any], c: dict[str, Any]) -> dict[str, Any]:
         "mult_risk": out["mult_risk"],
     }
 
-    # 2) Money-flow divergence ("hollow breakout"): price up on net distribution.
-    if (not math.isnan(ret1d) and ret1d > divergence_ret1d) and (not math.isnan(cmf) and cmf < -0.05):
+    # 2) Money-flow divergence ("hollow breakout"): price up on net distribution
+    #    without OBV trend confirmation (distribution not absorbed on tape).
+    if (
+        (not math.isnan(ret1d) and ret1d > divergence_ret1d)
+        and (not math.isnan(cmf) and cmf < -0.05)
+        and obv_confirm is not True
+    ):
         out["divergence_bump"] = 1.0
         out["buy_confidence_cap"] = 0.5
         reasons.append(f"hollow-breakout divergence (ret1d {ret1d:.2f}%, cmf {cmf:.3f})")
+
+    # 2b) Institutional absorption: down day with positive CMF and OBV above EMA.
+    # Halves Layer-C bear risk in _aggregate via layer_c_risk_mult (see _aggregate).
+    if (
+        (not math.isnan(ret1d) and ret1d < 0.0)
+        and (not math.isnan(cmf) and cmf > 0.05)
+        and obv_confirm is True
+    ):
+        out["pullback_bull_bump"] = max(float(out["pullback_bull_bump"]), 0.75)
+        out["layer_c_risk_mult"] = 0.5
+        reasons.append("institutional absorption: CMF+ / OBV confirm on down day")
 
     # 3) Healthy-pullback rescue: low-volume down day with intact flow & trend.
     if (
@@ -711,31 +729,45 @@ def layer_b(audit: dict[str, Any], c: dict[str, Any], d: dict[str, Any]) -> dict
 def _aggregate(c: dict[str, Any], d: dict[str, Any], audit: dict[str, Any] | None = None) -> dict[str, float]:
     """Apply Layer-D multipliers + bumps to Layer-C terms -> risk_c, bull_c."""
     audit = audit or {}
-    fam = c.get("families", {})
-    mult_mom = float(d.get("mult_momentum", 1.0))
-    mult_mf = float(d.get("mult_money_flow", 1.0))
-    mult_oe = float(d.get("mult_over_extension", 1.0))
-    mult_risk = float(d.get("mult_risk", 1.0))
+    fam = c.get("families", {}) if isinstance(c.get("families"), dict) else {}
+    mult_mom = _sf(d.get("mult_momentum", 1.0))
+    mult_mf = _sf(d.get("mult_money_flow", 1.0))
+    mult_oe = _sf(d.get("mult_over_extension", 1.0))
+    mult_risk = _sf(d.get("mult_risk", 1.0))
+    layer_c_mult = _sf(d.get("layer_c_risk_mult", 1.0))
+    if math.isnan(mult_mom):
+        mult_mom = 1.0
+    if math.isnan(mult_mf):
+        mult_mf = 1.0
+    if math.isnan(mult_oe):
+        mult_oe = 1.0
+    if math.isnan(mult_risk):
+        mult_risk = 1.0
+    if math.isnan(layer_c_mult):
+        layer_c_mult = 1.0
 
     risk_c = 0.0
-    risk_c += float(fam.get("horizon", 0.0))
-    risk_c += float(fam.get("intent", 0.0))
-    risk_c += float(fam.get("z", 0.0))
-    risk_c += min(3.0, float(fam.get("momentum", 0.0)) * mult_mom)
-    risk_c += float(fam.get("trend", 0.0))
-    risk_c += float(fam.get("volatility", 0.0)) * mult_risk
-    risk_c += float(c.get("money_flow_bear", 0.0)) * mult_mf
-    risk_c += float(c.get("over_extension", 0.0)) * mult_oe
-    risk_c += float(c.get("upside_z", 0.0)) * mult_oe
-    risk_c += float(c.get("fundamental", 0.0))  # may be negative (strong fundamentals)
-    risk_c += float(d.get("divergence_bump", 0.0))
-    defensive_mult = float(audit.get("regime_defensive_penalty_mult", 1.0))
-    if defensive_mult > 1.0:
+    risk_c += _sf(fam.get("horizon", 0.0))
+    risk_c += _sf(fam.get("intent", 0.0))
+    risk_c += _sf(fam.get("z", 0.0))
+    risk_c += min(3.0, _sf(fam.get("momentum", 0.0)) * mult_mom)
+    risk_c += _sf(fam.get("trend", 0.0))
+    risk_c += _sf(fam.get("volatility", 0.0)) * mult_risk
+    risk_c += _sf(c.get("money_flow_bear", 0.0)) * mult_mf
+    risk_c += _sf(c.get("over_extension", 0.0)) * mult_oe
+    risk_c += _sf(c.get("upside_z", 0.0)) * mult_oe
+    risk_c += _sf(c.get("fundamental", 0.0))  # may be negative (strong fundamentals)
+    risk_c *= layer_c_mult
+    risk_c += _sf(d.get("divergence_bump", 0.0))
+    defensive_mult = _sf(audit.get("regime_defensive_penalty_mult", 1.0))
+    if not math.isnan(defensive_mult) and defensive_mult > 1.0:
         risk_c *= defensive_mult
     risk_c = _clamp(risk_c, 0.0, 10.0)
 
-    bull_c = float(c.get("money_flow_bull", 0.0)) * mult_mf
-    bull_c += float(d.get("pullback_bull_bump", 0.0))
+    bull_c = _sf(c.get("money_flow_bull", 0.0)) * mult_mf
+    bull_c += _sf(d.get("pullback_bull_bump", 0.0))
+    if math.isnan(bull_c):
+        bull_c = 0.0
     bull_c = _clamp(bull_c, 0.0, 10.0)
     return {"risk_c": risk_c, "bull_c": bull_c}
 
@@ -862,8 +894,42 @@ def _short_history_accumulate_ok(audit: dict[str, Any], risk_net: float) -> bool
     )
 
 
-def _map_label(risk_net: float, gate: dict[str, bool], audit: dict[str, Any], a: dict[str, Any]) -> str:
+def _prior_label_from_audit(audit: dict[str, Any]) -> str | None:
+    """Read normalized prior label from audit prev_action_signal."""
+    prior = audit.get("prev_action_signal")
+    if prior is None:
+        return None
+    p = str(prior).strip().lower()
+    return p if p else None
+
+
+def _apply_prior_defensive_deadband(
+    label: str, risk_net: float, prior_label: str | None
+) -> str:
+    """Asymmetric entry deadband after trim/exit-risk: block constructive re-entry."""
+    if prior_label not in ("trim", "exit-risk"):
+        return label
+    buy_max = _buy_risk_ceiling()
+    trim_min = _trim_risk_floor()
+    if risk_net >= buy_max:
+        if label in ("buy", "accumulate"):
+            return "hold"
+    if buy_max <= risk_net < trim_min:
+        return "hold"
+    return label
+
+
+def _map_label(
+    risk_net: float,
+    gate: dict[str, bool],
+    audit: dict[str, Any],
+    a: dict[str, Any],
+    *,
+    prior_label: str | None = None,
+) -> str:
     """Score -> label (before forced overrides / hysteresis)."""
+    if prior_label is None:
+        prior_label = _prior_label_from_audit(audit)
     buy_allowed = bool(a.get("buy_allowed"))
     constructive_ok = _constructive_allowed(a, audit)
     buy_max = _buy_risk_ceiling()
@@ -874,28 +940,31 @@ def _map_label(risk_net: float, gate: dict[str, bool], audit: dict[str, Any], a:
         return "trim"
     # risk_net below trim floor
     if gate["clean_buy"] and risk_net < buy_max:
-        return "buy"
-    if gate["constructive_core"] and risk_net < buy_max:
-        return "accumulate"
-    accum_pref_max = _env_float("TITAN_SIGV2_ACCUM_PREF_RISK_MAX", buy_max)
-    if (
-        constructive_ok
-        and gate.get("constructive_scores")
-        and risk_net < accum_pref_max
-    ):
-        return "accumulate"
-    if _accumulate_band(audit, risk_net, buy_allowed=constructive_ok):
-        return "accumulate"
-    if _leader_participation_floor(audit, risk_net, buy_allowed=constructive_ok):
-        return "accumulate"
-    if _participation_accumulate_ok(audit, risk_net, buy_allowed=constructive_ok):
-        return "accumulate"
-    if (
-        bool(audit.get("history_lt_200_sessions"))
-        and _short_history_accumulate_ok(audit, risk_net)
-    ):
-        return "accumulate"
-    return "hold"
+        label = "buy"
+    elif gate["constructive_core"] and risk_net < buy_max:
+        label = "accumulate"
+    else:
+        accum_pref_max = _env_float("TITAN_SIGV2_ACCUM_PREF_RISK_MAX", buy_max)
+        if (
+            constructive_ok
+            and gate.get("constructive_scores")
+            and risk_net < accum_pref_max
+        ):
+            label = "accumulate"
+        elif _accumulate_band(audit, risk_net, buy_allowed=constructive_ok):
+            label = "accumulate"
+        elif _leader_participation_floor(audit, risk_net, buy_allowed=constructive_ok):
+            label = "accumulate"
+        elif _participation_accumulate_ok(audit, risk_net, buy_allowed=constructive_ok):
+            label = "accumulate"
+        elif (
+            bool(audit.get("history_lt_200_sessions"))
+            and _short_history_accumulate_ok(audit, risk_net)
+        ):
+            label = "accumulate"
+        else:
+            label = "hold"
+    return _apply_prior_defensive_deadband(label, risk_net, prior_label)
 
 
 def _apply_tier2_forced(
@@ -1415,6 +1484,9 @@ def _apply_hysteresis(
 
     # From defensive labels: require strict buy ceiling before constructive upgrade.
     if prior_label in ("trim", "exit-risk") and label in ("hold", "accumulate", "buy"):
+        if buy_max <= risk_net < trim_min:
+            if label in ("buy", "accumulate"):
+                return "hold", True
         if risk_net >= buy_max:
             return prior_label, True
         if recovery_ok:
@@ -1505,7 +1577,8 @@ def evaluate_signal_v2(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
     risk_net = _clamp(risk_c - bull_offset * bull_c, 0.0, 10.0)
 
     gate = _buy_gate(audit, a, c)
-    label = _map_label(risk_net, gate, audit, a)
+    prior_label = _prior_label_from_audit(audit)
+    label = _map_label(risk_net, gate, audit, a, prior_label=prior_label)
     if bool(audit.get("history_lt_200_sessions")) and label in ("buy", "accumulate"):
         if not _short_history_accumulate_ok(audit, risk_net):
             label = "hold"
@@ -1569,10 +1642,9 @@ def evaluate_signal_v2(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
         staleflow_downgrade=bool(d.get("staleflow_downgrade")),
     )
     label = _apply_tier2_forced(label, b.get("forced_label"), forced_label)
+    label = _apply_prior_defensive_deadband(label, risk_net, prior_label)
 
     bypass = bool(b.get("bypass_hysteresis"))
-    prior_label = audit.get("prev_action_signal")
-    prior_label = str(prior_label).strip().lower() if prior_label else None
     label, _hyst = _apply_hysteresis(
         label,
         risk_net,

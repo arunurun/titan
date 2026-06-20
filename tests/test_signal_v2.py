@@ -187,6 +187,53 @@ def test_divergence_caps_buy_confidence():
     assert d["buy_confidence_cap"] == 0.5
 
 
+def test_hollow_breakout_blocked_when_obv_trend_confirm():
+    d = v2.layer_d(
+        {
+            "return_1d_pct": 5.0,
+            "cmf_20": -0.1,
+            "adx_14": 22.0,
+            "obv_trend_confirm": True,
+            "obv_latest": 120.0,
+            "obv_ema_20": 100.0,
+        },
+        {},
+    )
+    assert d["divergence_bump"] == 0.0
+    assert d["buy_confidence_cap"] is None
+
+
+def test_institutional_absorption_bump_and_halves_layer_c_risk():
+    audit = {
+        "return_1d_pct": -1.5,
+        "cmf_20": 0.12,
+        "obv_trend_confirm": True,
+        "obv_latest": 120.0,
+        "obv_ema_20": 100.0,
+        "adx_14": 22.0,
+    }
+    d = v2.layer_d(audit, {"over_extension_hot": False})
+    assert d["pullback_bull_bump"] == pytest.approx(0.75)
+    assert d["layer_c_risk_mult"] == pytest.approx(0.5)
+    c = v2.layer_c(
+        {
+            "next_week_score": 40.0,
+            "effective_intent_score": 42.0,
+            "z_score": -2.0,
+            "return_1d_pct": -1.5,
+            "return_5d_pct": -3.0,
+            "return_10d_pct": -5.0,
+            "ema_200_distance_pct": -2.0,
+            "atr_14_pct": 4.0,
+            "cmf_20": 0.12,
+        }
+    )
+    base_agg = v2._aggregate(c, {"mult_momentum": 1.0, "mult_money_flow": 1.0, "mult_over_extension": 1.0, "mult_risk": 1.0, "layer_c_risk_mult": 1.0, "divergence_bump": 0.0, "pullback_bull_bump": 0.0})
+    abs_agg = v2._aggregate(c, d)
+    assert abs_agg["risk_c"] == pytest.approx(base_agg["risk_c"] * 0.5, abs=0.05)
+    assert abs_agg["bull_c"] > base_agg["bull_c"]
+
+
 def test_healthy_pullback_rescue():
     d = v2.layer_d(
         {
@@ -335,7 +382,7 @@ def test_hysteresis_blocks_constructive_until_buy_ceiling():
     label, applied = v2._apply_hysteresis(
         "accumulate", 3.5, prior_label="trim", bypass=False, buffer=0.5, audit={}
     )
-    assert label == "trim" and applied is True
+    assert label == "hold" and applied is True
     label2, applied2 = v2._apply_hysteresis(
         "accumulate",
         2.5,
@@ -719,4 +766,15 @@ def test_map_label_uses_asymmetric_risk_thresholds():
     assert v2._map_label(2.5, gate, {}, a) == "buy"
     assert v2._map_label(3.5, gate, {}, a) == "hold"
     assert v2._map_label(5.5, gate, {}, a) == "trim"
+    assert v2._map_label(7.0, gate, {}, a) == "trim"
     assert v2._map_label(7.5, gate, {}, a) == "exit-risk"
+
+
+def test_prior_trim_risk_35_forces_hold_not_accumulate():
+    """Prior trim + risk_net in recovery deadband must not re-enter accumulate."""
+    gate = {"clean_buy": False, "constructive_core": True, "constructive_scores": True}
+    a = {"buy_allowed": True}
+    audit = {"prev_action_signal": "trim", "next_week_score": 66.0, "effective_intent_score": 68.0}
+    assert v2._map_label(3.5, gate, audit, a) == "hold"
+    assert v2._apply_prior_defensive_deadband("accumulate", 3.5, "trim") == "hold"
+    assert v2._apply_prior_defensive_deadband("accumulate", 2.5, "trim") == "accumulate"

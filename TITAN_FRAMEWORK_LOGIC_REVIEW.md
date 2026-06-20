@@ -396,8 +396,12 @@ Produces multipliers/bumps/flags; **never returns a label**. Defaults: `TITAN_SI
    `mult_momentum=1.3, mult_risk=0.8` (volatility term in aggregate scaled ×0.8). `adx ≥ 25 AND
    -DI > +DI` → `mult_momentum=0.5, mult_risk=1.5`. `20 ≤ adx < 25` deadband persists prior
    session multipliers from `prev_adx_regime_mults` / `tape_extras.adx_regime_mults` (default 1.0).
-2. **Money-flow divergence ("hollow breakout")** (`:446-449`): `ret1d > 2.0 AND cmf < -0.05` →
-   `divergence_bump = +1.0` (added to risk) and `buy_confidence_cap = 0.5`.
+2. **Money-flow divergence ("hollow breakout")** (`layer_d`): `ret1d > 2.0 AND cmf < -0.05 AND
+   obv_trend_confirm is not True` → `divergence_bump = +1.0` and `buy_confidence_cap = 0.5`.
+   OBV-confirmed uptrends skip the hollow-breakout penalty.
+2b. **Institutional absorption** (`layer_d`): `ret1d < 0 AND cmf > 0.05 AND obv_trend_confirm is
+   True` → `pullback_bull_bump = +0.75` and `layer_c_risk_mult = 0.5` (halves Layer-C bear risk
+   in `_aggregate` before the divergence bump is added).
 3. **Healthy-pullback rescue** (`:452-461`): `ret1d < 0 AND vpr < 1.0 AND cmf > 0.05 AND ret5d ≥
    -3.0 AND ema_200_distance_pct ≥ 0` → `mult_momentum = min(mult_momentum, 0.5)` and
    `pullback_bull_bump = +0.5`.
@@ -481,14 +485,17 @@ constructive_core = core
 
 ## 5. Label / ceiling decision logic
 
-**Mapping ladder** `_map_label(risk_net, gate, a)` (`:635-647`):
+**Mapping ladder** `_map_label(risk_net, gate, audit, a, prior_label)`:
 ```
-risk_net >= 7:                       exit-risk
+risk_net >= 7.5:                     exit-risk   (TITAN_SIGV2_E_EXIT_RISK_MIN)
 risk_net >= 5:                       trim          (TITAN_SIGV2_E_TRIM_RISK_MIN)
 risk_net <  5 and clean_buy and risk < 3:         buy   (TITAN_SIGV2_E_BUY_RISK_MAX)
 risk_net <  5 and constructive_core and risk < 3: accumulate
 otherwise:                           hold
 ```
+After the ladder, `_apply_prior_defensive_deadband` reads `prev_action_signal`: from
+trim/exit-risk, buy/accumulate blocked until `risk_net < 3.0`; in `[3.0, 5.0)` the label is
+forced to `hold` regardless of constructive gates.
 
 Then applied in order inside `evaluate_signal_v2` (`:743-752`):
 1. **`_apply_ceiling`** (`:650-654`): if `label_ceiling == "hold"` and label ∈ {buy, accumulate} →
@@ -643,7 +650,7 @@ hysteresis 3.0/5.0, 400-day lookback) is baseline; the items below are always-on
 |---|---|---|
 | Sector-relative ranking | `sector_priority.py` | `compute_sector_relative_momentum_score()` replaces 1w/1m return terms (0.35×1m + 0.25×3m + 0.20×rel_strength + 0.10×intent + 0.10×next_week). |
 | Market regime engine | `market_regime.py` | STRONG_BULL / BULL / NEUTRAL / DEFENSIVE / BEAR on `audit["market_regime"]`; adaptations applied by default (`enforce`). Optional `TITAN_REGIME_ENGINE_MODE=shadow\|off` for rollout observation. |
-| Sector-aware Tier-2 | `signal_v2.py` | Momentum sectors: trim=3, exit=4; overextension alone never trims. |
+| Sector-aware Tier-2 | `signal_v2.py` | Momentum sectors (substring match on `sector_key`): trim=3, exit=4; overextension alone never trims. |
 | V2 rank penalty cap | `sector_priority.py` | Default **−3.0**; `TITAN_V2_RANK_PENALTY_FAMILY_CAP` (0.30) caps single-family share. |
 | Multi-horizon stretch | `stretch_engine.py` | Composite stretch (0.5×ema20 + 0.3×ema50 + 0.2×52w) in v2 C-8. |
 | Probability calibration | `probability_calibration.py` | Bucket map → `predicted_probability`; confidence replaced by default (`enforce`). Optional `TITAN_PROB_CALIB_MODE=shadow\|off` for rollout observation. |

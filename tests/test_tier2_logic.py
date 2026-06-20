@@ -46,6 +46,9 @@ def test_momentum_sector_requires_higher_corroboration():
     trim, exit_c = _tier2_thresholds({"sector_key": "defence"})
     assert trim == 3
     assert exit_c == 4
+    trim_sub, exit_sub = _tier2_thresholds({"sector_key": "india_defence_stocks"})
+    assert trim_sub == 3
+    assert exit_sub == 4
     trim2, exit2 = _tier2_thresholds({"sector_key": "pharma_healthcare"})
     assert trim2 == 2
     assert exit2 == 3
