@@ -1578,6 +1578,16 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
 
     lines_out: list[str] = []
     lines_out.append(f"{symbol} ({exchange}) — {_sell_signal_plain_english(str(sell_signal))}")
+    risk_net = _safe_float(audit.get("sell_signal_risk_score"))
+    if str(sell_signal).lower() == "hold" and not math.isnan(risk_net) and risk_net < 4.0:
+        nw_gate = 65.0
+        intent_gate = 60.0
+        nw_val = _safe_float(next_week)
+        intent_val = _safe_float(intent)
+        lines_out.append(
+            f"   Buy gate: next_week {_fmt_metric(nw_val)}/{nw_gate:.0f}, "
+            f"intent {_fmt_metric(intent_val)}/{intent_gate:.0f}"
+        )
 
     lines_out.append("▸ Trend Regime (14D)")
     trend_regime = _trend_regime_label(adx_14, plus_di_14, minus_di_14)

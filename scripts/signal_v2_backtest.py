@@ -69,7 +69,7 @@ def main() -> int:
     parser.add_argument(
         "--accumulate",
         action="store_true",
-        help="Set TITAN_SIGV2_ENABLE_ACCUMULATE=1 during recompute (default off).",
+        help="Deprecated no-op; accumulate is always enabled in production v2.",
     )
     parser.add_argument(
         "--json",

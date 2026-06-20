@@ -650,7 +650,7 @@ flowchart TD
 | Volume participation in email | Digest shows **raw** `volume_participation_ratio` (EOD) and `session_volume_participation_ratio` (live); scoring still uses calibrated EOD input. |
 | 20D range / ATR ratio | Display-only; not in v2 CORE_METRICS. |
 | ADX smoothing | Simple rolling sums/means, not classic Wilder EMA. |
-| Accumulate label | Collapses to HOLD unless `TITAN_SIGV2_ENABLE_ACCUMULATE` is set. |
+| Accumulate label | First-class label in v2; always active (no env gate). |
 
 ---
 

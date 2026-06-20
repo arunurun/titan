@@ -564,11 +564,13 @@ risk_net < 4 and constructive_core:    accumulate
 otherwise:                             hold
 ```
 Then in order (`:701-707`):
-1. `_apply_ceiling` (`:607-611`): if `label_ceiling=="hold"` and label ∈ {buy, accumulate} → `hold`.
+1. `_apply_ceiling` (`:607-611`): if `label_ceiling=="hold"` and label ∈ {buy, accumulate} → `hold`;
+   `label_ceiling=="accumulate"` caps buy → accumulate (e.g. short history).
 2. `_escalate` (`:614-617`): `forced_label` from Layer B overrides **only if more severe**
    (`_SEVERITY`).
-3. **Accumulate gating** (`:705-706`): if label==`accumulate` and
-   `TITAN_SIGV2_ENABLE_ACCUMULATE` (default **off**, `:69-70`) is not set → collapse to `hold`.
+
+**Note:** `accumulate` is a first-class always-on label; there is no `TITAN_SIGV2_ENABLE_ACCUMULATE`
+gate in production.
 
 **Hysteresis** `_apply_hysteresis` (`:620-651`; `TITAN_SIGV2_E_HYST_BUFFER` = **0.5**, `:695`),
 applied only if Layer E enabled (`:711-714`):

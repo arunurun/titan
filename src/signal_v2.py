@@ -193,9 +193,9 @@ def layer_a(audit: dict[str, Any]) -> dict[str, Any]:
 
     if bool(audit.get("history_lt_200_sessions")):
         out["buy_allowed"] = False
-        out["label_ceiling"] = "hold"  # short history cannot reach accumulate/buy
+        out["label_ceiling"] = "accumulate"  # short history: accumulate max, never buy
         seed *= short_hist_conf
-        reasons.append("short history (<200 sessions): ceiling=hold")
+        reasons.append("short history (<200 sessions): ceiling=accumulate")
 
     if bool(audit.get("liquidity_thin_proxy")):
         out["buy_allowed"] = False
@@ -601,11 +601,22 @@ def _aggregate(c: dict[str, Any], d: dict[str, Any]) -> dict[str, float]:
     return {"risk_c": risk_c, "bull_c": bull_c}
 
 
+def _participation_vpr(audit: dict[str, Any]) -> float:
+    """Best available volume-participation proxy (EOD raw, then scoring input)."""
+    vpr = _sf(audit.get("volume_participation_ratio", audit.get("absorption_ratio")))
+    if not math.isnan(vpr):
+        return vpr
+    return _sf(
+        audit.get("volume_participation_for_scoring", audit.get("absorption_for_scoring"))
+    )
+
+
 def _buy_gate(audit: dict[str, Any], a: dict[str, Any], c: dict[str, Any]) -> dict[str, bool]:
     """Ported legacy BUY gate + money-flow / over-extension constructive checks.
 
-    Returns clean_buy (all constructive incl. flow & not over-extended) and
-    constructive_core (everything except the flow / over-extension checks).
+    Returns clean_buy (all constructive incl. flow & not over-extended),
+    constructive_core (everything except the flow / over-extension checks),
+    and constructive_scores (intent/next_week tier only).
     """
     next_week = _sf(audit.get("next_week_score"))
     eff = _sf(audit.get("effective_intent_score", audit.get("intent_score")))
@@ -614,26 +625,85 @@ def _buy_gate(audit: dict[str, Any], a: dict[str, Any], c: dict[str, Any]) -> di
     cmf = _sf(audit.get("cmf_20"))
     extreme_move = bool(audit.get("extreme_price_move_proxy"))
 
+    buy_nw_min = _env_float("TITAN_SIGV2_BUY_NEXT_WEEK_MIN", 65.0)
+    buy_intent_min = _env_float("TITAN_SIGV2_BUY_INTENT_MIN", 60.0)
+
+    constructive_scores = (
+        not math.isnan(next_week)
+        and next_week >= buy_nw_min
+        and not math.isnan(eff)
+        and eff >= buy_intent_min
+    )
     core = (
         bool(a.get("buy_allowed"))
         and not bool(audit.get("trap_exit_proxy"))
         and not bool(audit.get("liquidity_thin_proxy"))
         and not extreme_move
-        and not math.isnan(next_week)
-        and next_week >= 70.0
-        and not math.isnan(eff)
-        and eff >= 65.0
+        and constructive_scores
         and not (not math.isnan(ret5d) and ret5d <= -4.0)
         and not (not math.isnan(rel5) and rel5 <= -3.0)
     )
     flow_ok = math.isnan(cmf) or cmf >= -0.05
     not_overextended = not bool(c.get("over_extension_hot"))
     clean = core and flow_ok and not_overextended
-    return {"clean_buy": clean, "constructive_core": core}
+    return {
+        "clean_buy": clean,
+        "constructive_core": core,
+        "constructive_scores": constructive_scores,
+    }
 
 
-def _map_label(risk_net: float, gate: dict[str, bool], a: dict[str, Any]) -> str:
+def _accumulate_band(audit: dict[str, Any], risk_net: float, *, buy_allowed: bool) -> bool:
+    """Lower-bar accumulate when scores are decent and risk is low."""
+    if not buy_allowed or risk_net >= 4.0:
+        return False
+    nw_min = _env_float("TITAN_SIGV2_ACCUM_NEXT_WEEK_MIN", 60.0)
+    intent_min = _env_float("TITAN_SIGV2_ACCUM_INTENT_MIN", 60.0)
+    next_week = _sf(audit.get("next_week_score"))
+    eff = _sf(audit.get("effective_intent_score", audit.get("intent_score")))
+    return (
+        not math.isnan(next_week)
+        and next_week >= nw_min
+        and not math.isnan(eff)
+        and eff >= intent_min
+    )
+
+
+def _leader_participation_floor(audit: dict[str, Any], risk_net: float, *, buy_allowed: bool) -> bool:
+    """Leader + participation: strong intent with elevated VPR → at least accumulate."""
+    if not buy_allowed or risk_net >= 4.0:
+        return False
+    intent_min = _env_float("TITAN_SIGV2_LEADER_INTENT_MIN", 65.0)
+    vpr_min = _env_float("TITAN_SIGV2_LEADER_VPR_MIN", 1.5)
+    eff = _sf(audit.get("effective_intent_score", audit.get("intent_score")))
+    vpr = _participation_vpr(audit)
+    return (
+        not math.isnan(eff)
+        and eff >= intent_min
+        and not math.isnan(vpr)
+        and vpr >= vpr_min
+    )
+
+
+def _short_history_accumulate_ok(audit: dict[str, Any], risk_net: float) -> bool:
+    """Short-history names may reach accumulate (never buy) when tape is strong."""
+    if risk_net >= 4.0:
+        return False
+    intent_min = _env_float("TITAN_SIGV2_SHORT_HIST_INTENT_MIN", 65.0)
+    vpr_min = _env_float("TITAN_SIGV2_SHORT_HIST_VPR_MIN", 1.5)
+    eff = _sf(audit.get("effective_intent_score", audit.get("intent_score")))
+    vpr = _participation_vpr(audit)
+    return (
+        not math.isnan(eff)
+        and eff >= intent_min
+        and not math.isnan(vpr)
+        and vpr >= vpr_min
+    )
+
+
+def _map_label(risk_net: float, gate: dict[str, bool], audit: dict[str, Any], a: dict[str, Any]) -> str:
     """Score -> label (before forced overrides / hysteresis)."""
+    buy_allowed = bool(a.get("buy_allowed"))
     if risk_net >= 7.0:
         return "exit-risk"
     if risk_net >= 4.0:
@@ -642,7 +712,22 @@ def _map_label(risk_net: float, gate: dict[str, bool], a: dict[str, Any]) -> str
     if gate["clean_buy"]:
         return "buy"
     if gate["constructive_core"]:
-        # constructive-but-capped (flow / over-extension / confidence cap)
+        return "accumulate"
+    accum_pref_max = _env_float("TITAN_SIGV2_ACCUM_PREF_RISK_MAX", 3.5)
+    if (
+        buy_allowed
+        and gate.get("constructive_scores")
+        and risk_net < accum_pref_max
+    ):
+        return "accumulate"
+    if _accumulate_band(audit, risk_net, buy_allowed=buy_allowed):
+        return "accumulate"
+    if _leader_participation_floor(audit, risk_net, buy_allowed=buy_allowed):
+        return "accumulate"
+    if (
+        bool(audit.get("history_lt_200_sessions"))
+        and _short_history_accumulate_ok(audit, risk_net)
+    ):
         return "accumulate"
     return "hold"
 
@@ -942,7 +1027,10 @@ def evaluate_signal_v2(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
     risk_net = _clamp(risk_c - bull_offset * bull_c, 0.0, 10.0)
 
     gate = _buy_gate(audit, a, c)
-    label = _map_label(risk_net, gate, a)
+    label = _map_label(risk_net, gate, audit, a)
+    if bool(audit.get("history_lt_200_sessions")) and label in ("buy", "accumulate"):
+        if not _short_history_accumulate_ok(audit, risk_net):
+            label = "hold"
     # STEP 2b: over-extension ceiling (shadow-first). Compute the would-be cap always;
     # apply it only when enforced (damp applies the milder accumulate cap, never hold).
     oe_mode = _overextension_ceiling_mode()

@@ -84,11 +84,11 @@ def test_v2_default_differs_from_legacy_on_representative_audits():
 # --------------------------------------------------------------------------- #
 
 
-def test_layer_a_short_history_caps_at_hold(monkeypatch):
+def test_layer_a_short_history_caps_at_accumulate(monkeypatch):
     monkeypatch.delenv("TITAN_SIGNAL_V2_LAYER_A", raising=False)
     a = v2.layer_a({"history_lt_200_sessions": True, "z_score": 1.0, "cmf_20": 0.1})
     assert a["buy_allowed"] is False
-    assert a["label_ceiling"] == "hold"
+    assert a["label_ceiling"] == "accumulate"
     assert a["confidence_seed"] < 1.0
 
 
@@ -107,7 +107,7 @@ def test_layer_a_thin_liquidity_forbids_buy():
 def test_layer_a_short_history_always_applies():
     a = v2.layer_a({"history_lt_200_sessions": True})
     assert a["buy_allowed"] is False
-    assert a["label_ceiling"] == "hold"
+    assert a["label_ceiling"] == "accumulate"
 
 
 # --------------------------------------------------------------------------- #
@@ -399,6 +399,77 @@ def test_gap_guard_derives_from_return_series(monkeypatch):
     assert source == "return_series"
     label, _, _ = v2.evaluate_signal_v2(audit)
     assert audit["gap_guard"]["would_action"] == "damp"
+
+
+def test_datamatics_case_accumulates_on_loosened_gate():
+    """Intent 73.75 / next_week 67.09 blocked buy at old 70/65 gates → accumulate."""
+    audit = {
+        "next_week_score": 67.09,
+        "effective_intent_score": 73.75,
+        "z_score": 1.2,
+        "return_1d_pct": 1.0,
+        "return_5d_pct": 2.0,
+        "return_10d_pct": 3.0,
+        "rel_return_5d_vs_nifty_pct": 1.0,
+        "cmf_20": -0.08,
+        "ema_200_distance_pct": 5.0,
+        "ema200_stretch_atr": 2.5,
+        "atr_14_pct": 2.5,
+        "adx_14": 25.0,
+    }
+    label, risk, _ = v2.evaluate_signal_v2(audit)
+    assert risk < 4.0
+    assert label == "accumulate"
+
+
+def test_short_history_strong_vpr_accumulates():
+    audit = {
+        "next_week_score": 72.0,
+        "effective_intent_score": 70.0,
+        "z_score": 1.5,
+        "return_1d_pct": 1.0,
+        "return_5d_pct": 2.0,
+        "rel_return_5d_vs_nifty_pct": 1.0,
+        "cmf_20": 0.10,
+        "ema_200_distance_pct": 3.0,
+        "ema200_stretch_atr": 1.5,
+        "atr_14_pct": 2.0,
+        "adx_14": 28.0,
+        "volume_participation_ratio": 1.6,
+        "history_lt_200_sessions": True,
+    }
+    label, _risk, _ = v2.evaluate_signal_v2(audit)
+    assert label == "accumulate"
+
+
+def test_leader_participation_floor():
+    audit = {
+        "next_week_score": 58.0,
+        "effective_intent_score": 68.0,
+        "z_score": 0.5,
+        "return_1d_pct": 0.5,
+        "return_5d_pct": 1.0,
+        "cmf_20": 0.05,
+        "ema_200_distance_pct": 4.0,
+        "ema200_stretch_atr": 1.2,
+        "atr_14_pct": 2.5,
+        "adx_14": 22.0,
+        "volume_participation_ratio": 1.8,
+    }
+    label, risk, _ = v2.evaluate_signal_v2(audit)
+    assert risk < 4.0
+    assert label == "accumulate"
+
+
+def test_buy_gate_env_overrides(monkeypatch):
+    monkeypatch.setenv("TITAN_SIGV2_BUY_NEXT_WEEK_MIN", "75")
+    monkeypatch.setenv("TITAN_SIGV2_BUY_INTENT_MIN", "70")
+    audit = _clean_buy_audit()
+    audit["next_week_score"] = 72.0
+    audit["effective_intent_score"] = 68.0
+    label, _, _ = v2.evaluate_signal_v2(audit)
+    assert label in ("hold", "accumulate")
+    assert label != "buy"
 
 
 def test_gap_guard_session_move_proxy_when_flagged(monkeypatch):
