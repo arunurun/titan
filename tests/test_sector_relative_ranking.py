@@ -1,14 +1,6 @@
-"""Sector-relative rank score with legacy/shadow/enforce rollout."""
+"""Sector-relative rank score (always-on production ranking path)."""
 
 from __future__ import annotations
-
-import pytest
-
-
-@pytest.fixture(autouse=True)
-def _enforce_ranking(monkeypatch):
-    monkeypatch.setenv("TITAN_ENABLE_SECTOR_RELATIVE_RANKING", "1")
-    monkeypatch.setenv("TITAN_SECTOR_RELATIVE_RANKING_MODE", "enforce")
 
 
 def test_top_percentile_beats_large_absolute_return():
@@ -34,7 +26,6 @@ def test_top_percentile_beats_large_absolute_return():
         ret_1m=4.0,
         absorption=1.0,
         sector_relative_rank_score=high_pct,
-        ranking_mode="enforce",
     )
     score_low = _score_from_features(
         bucket="small",
@@ -42,7 +33,6 @@ def test_top_percentile_beats_large_absolute_return():
         ret_1m=20.0,
         absorption=1.0,
         sector_relative_rank_score=low_pct,
-        ranking_mode="enforce",
     )
     assert score_high > score_low
 
@@ -107,10 +97,9 @@ def test_intent_and_next_week_weighted_in_rank_score():
     assert intent_led > flat
 
 
-def test_legacy_mode_uses_percentile_1w_1m_terms(monkeypatch):
+def test_without_rank_score_falls_back_to_percentile_terms():
     from sector_priority import _score_from_features
 
-    monkeypatch.delenv("TITAN_ENABLE_SECTOR_RELATIVE_RANKING", raising=False)
     legacy = _score_from_features(
         bucket="small",
         ret_1w=10.0,
@@ -118,8 +107,7 @@ def test_legacy_mode_uses_percentile_1w_1m_terms(monkeypatch):
         absorption=1.0,
         percentile_1w=80.0,
         percentile_1m=70.0,
-        sector_relative_rank_score=99.0,
-        ranking_mode="off",
+        sector_relative_rank_score=None,
     )
     with_rank = _score_from_features(
         bucket="small",
@@ -129,7 +117,6 @@ def test_legacy_mode_uses_percentile_1w_1m_terms(monkeypatch):
         percentile_1w=80.0,
         percentile_1m=70.0,
         sector_relative_rank_score=99.0,
-        ranking_mode="enforce",
     )
     assert with_rank > legacy
 

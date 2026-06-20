@@ -651,14 +651,13 @@ Walk-forward labels feed `prev_action_signal` so v2 hysteresis is exercised in b
 Re-architecture **682657a** (OBV EMA, directional ADX, percentile 1w/1m rank terms, vol de-dup,
 hysteresis 3.0/5.0, 400-day lookback) is baseline. **2de00ac** promoted seven-phase items to
 default production logic. The **June 2026 v2 review Phase 1** items below are **always-on**
-production logic (no feature flags); sector-relative **ranking** and probability calibration
-remain flag-gated (§9).
+production logic (no feature flags).
 
-| Component | Module | Behaviour (always-on unless noted) |
+| Component | Module | Behaviour (always-on) |
 |---|---|---|
-| Sector-relative ranking | `sector_priority.py` | **Flag-gated** — see §9. |
+| Sector-relative ranking | `sector_priority.py` | Weighted sector-relative rank score drives momentum term in `rank_score`. |
 | Medium-term momentum | `signal_v2.py`, `sector_audit.py` | `return_21d/63d/126d_pct` in audit; Layer-C momentum bear uses weighted 5d/21d/63d/126d (10/25/35/30%); 1d excluded. |
-| Probability calibration | `probability_calibration.py` | **Flag-gated** — bucket interpolation; TODO isotonic Phase 2. |
+| Probability calibration | `probability_calibration.py` | Bucket interpolation replaces `signal_confidence` on every audit pass; TODO isotonic Phase 2. |
 | Family risk caps | `signal_v2.py` | PRICE (4.0) / FLOW (2.5) / EXTENSION (2.0) / VOLATILITY (2.0) caps in `_aggregate` before `risk_net`. |
 | IPO leader exception | `signal_v2.py` | Short history may **buy** when intent≥75, nw≥70, VPR≥2, CMF>0.05, risk_net<2, not thin liquidity; else accumulate ceiling. |
 | Layer D audit messages | `signal_v2.py` | `strong ADX X (+DI=…, -DI=…)` format (always on — no flag). |
@@ -671,28 +670,24 @@ Analytics: `analytics/performance_metrics.py` — profit factor, expectancy, Sha
 
 ---
 
-## 9. V2 review rollout flags (Jun 2026)
+## 9. Operational delivery gates (Jun 2026)
 
-Shared helper: `src/titan_rollout.py` — `rollout_mode(enable_env, mode_env)` returns
-`off` | `shadow` | `enforce`. Used for **remaining** flag-gated items only.
+**Phase 1 core signal/ranking/calibration is always-on** — no `TITAN_ENABLE_*` rollout flags.
+Buy-suppression and delivery gates below use off/shadow/damp/skip/enforce modes for safe
+operational rollout; default shadow leaves published ranks and action labels unchanged.
 
-**Always-on (Phase 1, no flags):** medium-term momentum (5d/21d/63d/126d composite),
-family risk caps, IPO leader exception, Layer D healthy-pullback halving (`mult_momentum *= 0.5`).
+| Gate family | Example env | Purpose |
+|---|---|---|
+| Delivery / ban / futures | `TITAN_DELIVERY_GATE_MODE`, ban gates | Operational withhold on delivery/ban data |
+| Sector regime / institutional | `TITAN_REGIME_GATE_MODE`, `TITAN_INSTITUTIONAL_GATE_MODE` | Buy-suppression multipliers (shadow default) |
+| Overext ceiling / gap guard | `TITAN_SIGV2_OVEREXT_CEILING_MODE`, `TITAN_GAP_GUARD_MODE` | Phase 2 entry guards (shadow-first) |
+| Market regime engine | `TITAN_REGIME_ENGINE_MODE` | Optional shadow/off for regime observation |
+| Analysis store | `TITAN_ENABLE_ANALYSIS_STORE` | Persistence toggle (not core signal logic) |
 
-| Priority | Master flag (default) | Mode env (default when enabled) | Legacy (`off`) | Shadow | Enforce |
-|---|---|---|---|---|---|
-| 1 Sector-relative ranking | `TITAN_ENABLE_SECTOR_RELATIVE_RANKING` (off) | `TITAN_SECTOR_RELATIVE_RANKING_MODE` (shadow) | 1w/1m percentile rank terms | Log shadow rank | `rank_score` uses weighted rank score |
-| 2 Medium-term momentum | *(always on — no flag)* | — | — | — | Weighted 5d/21d/63d/126d (10/25/35/30%) |
-| 3 Probability calibration | `TITAN_ENABLE_PROBABILITY_CALIBRATION` (off) | `TITAN_PROB_CALIB_MODE` (shadow) | No calibration fields | Write probabilities; keep raw confidence | Replace `signal_confidence` |
-| 4 Family risk caps | *(always on — no flag)* | — | — | — | Apply PRICE/FLOW/EXTENSION/VOL caps |
-| 5 IPO leader exception | *(always on — no flag)* | — | — | — | Allow buy when precheck + risk ok |
-| 6 Layer D ADX messages | *(none — always on)* | — | — | — | `strong ADX X (+DI=…, -DI=…)` |
-
-**Dual-path note:** With all flags off, behaviour matches pre-review legacy paths. With flags on
-in shadow, audit/meta records show would-be v2 outcomes without changing published ranks or
-action labels. Enforce applies the v2 review logic. `compute_sector_relative_momentum_score()`
-(2de00ac weights) is always computed in ranking meta for analytics but is distinct from the
-rank-score path gated by priority 1.
+**Always-on Phase 1 (no flags):** sector-relative ranking, medium-term momentum (5d/21d/63d/126d),
+probability calibration, family risk caps, IPO leader exception, Layer D healthy-pullback halving
+(`mult_momentum *= 0.5`). `compute_sector_relative_momentum_score()` (2de00ac weights) is always
+computed in ranking meta for analytics but is distinct from the rank-score path.
 
 ---
 
