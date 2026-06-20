@@ -103,6 +103,42 @@ _SECTOR_THEME_KEYWORDS: dict[str, tuple[str, ...]] = {
         "transport infrastructure",
     ),
 }
+
+# P1: sector-tuned constructive thresholds consumed by signal_v2 (always-on, no flags).
+_SECTOR_SIGNAL_PROFILES: dict[str, dict[str, float]] = {
+    "ai": {
+        "accum_intent_min": 62.0,
+        "accum_nw_min": 60.0,
+        "participation_intent_min": 68.0,
+        "participation_nw_min": 63.0,
+        "participation_vpr_min": 1.4,
+        "leader_intent_min": 68.0,
+        "leader_vpr_min": 1.6,
+        "cmf_constructive_min": 0.0,
+    },
+}
+
+
+def sector_signal_profile_for(sector_key: str) -> dict[str, float]:
+    """Return sector-specific signal_v2 threshold overrides (empty when none)."""
+    sec = str(sector_key or "").strip().lower()
+    profile = _SECTOR_SIGNAL_PROFILES.get(sec)
+    return dict(profile) if profile else {}
+
+
+def enrich_audit_sector_signal_profile(audit: dict[str, Any], sector_key: str) -> None:
+    """Attach sector signal profile + sector_key onto an audit dict in place."""
+    if not isinstance(audit, dict):
+        return
+    sec = str(sector_key or audit.get("sector_key") or audit.get("sector") or "").strip().lower()
+    if sec and not audit.get("sector_key"):
+        audit["sector_key"] = sec
+    if audit.get("sector_signal_profile"):
+        return
+    profile = sector_signal_profile_for(sec)
+    if profile:
+        audit["sector_signal_profile"] = profile
+
 _POSITIVE_NEWS_TERMS = {
     "surge",
     "expand",

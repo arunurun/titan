@@ -1134,8 +1134,9 @@ def _bridge_priority_shadow_context(
             continue
         sym = str(r.get("symbol") or "").strip().upper()
         ex = str(r.get("exchange") or "NSE").strip().upper()
-        if sector_key and not audit.get("sector_key"):
-            audit["sector_key"] = sector_key
+        from sector_priority import enrich_audit_sector_signal_profile
+
+        enrich_audit_sector_signal_profile(audit, sector_key)
         meta = meta_by_key.get((sym, ex)) or {}
         if isinstance(meta.get("shadow_gates"), list) and not audit.get("shadow_gates"):
             audit["shadow_gates"] = list(meta["shadow_gates"])
