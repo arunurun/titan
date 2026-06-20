@@ -25,8 +25,9 @@ from breeze_client import fetch_equity_data, volume_participation_ratio
 from config_loader import TitanConfig
 from sector_registry import SectorInstrument, expand_symbols_with_aliases, symbol_lookup_variants
 from tape_metrics import percentile_rank_0_100
-
 logger = logging.getLogger(__name__)
+
+_SECTOR_RELATIVE_RANK_WEIGHTS = (0.30, 0.25, 0.20, 0.15, 0.10)
 IST = ZoneInfo("Asia/Kolkata")
 _NSE_HOME_URL = "https://www.nseindia.com"
 _NSE_QUOTE_URL = "https://www.nseindia.com/api/quote-equity?symbol={symbol}"
@@ -1971,16 +1972,16 @@ def _load_previous_market_caps(
     return out
 
 
-def compute_sector_relative_momentum_score(
+
+def _sector_relative_weighted_score(
     *,
     sector_pctile_return_1m: float,
     sector_pctile_return_3m: float,
     sector_pctile_rel_strength: float,
     sector_pctile_intent: float,
     sector_pctile_next_week: float,
+    weights: tuple[float, ...],
 ) -> float:
-    """Weighted sector-relative momentum score normalized to 0-100."""
-    weights = (0.35, 0.25, 0.20, 0.10, 0.10)
     inputs = (
         sector_pctile_return_1m,
         sector_pctile_return_3m,
@@ -1993,6 +1994,43 @@ def compute_sector_relative_momentum_score(
         pct = 50.0 if math.isnan(_safe_float(v)) else _clamp(float(v), 0.0, 100.0)
         total += w * pct
     return round(_clamp(total, 0.0, 100.0), 4)
+
+
+def compute_sector_relative_rank_score(
+    *,
+    sector_pctile_return_1m: float,
+    sector_pctile_return_3m: float,
+    sector_pctile_rel_strength: float,
+    sector_pctile_intent: float,
+    sector_pctile_next_week: float,
+) -> float:
+    """V2 review sector-relative rank score (0-100) with intent/next-week emphasis."""
+    return _sector_relative_weighted_score(
+        sector_pctile_return_1m=sector_pctile_return_1m,
+        sector_pctile_return_3m=sector_pctile_return_3m,
+        sector_pctile_rel_strength=sector_pctile_rel_strength,
+        sector_pctile_intent=sector_pctile_intent,
+        sector_pctile_next_week=sector_pctile_next_week,
+        weights=_SECTOR_RELATIVE_RANK_WEIGHTS,
+    )
+
+
+def compute_sector_relative_momentum_score(
+    *,
+    sector_pctile_return_1m: float,
+    sector_pctile_return_3m: float,
+    sector_pctile_rel_strength: float,
+    sector_pctile_intent: float,
+    sector_pctile_next_week: float,
+) -> float:
+    """Alias for ``compute_sector_relative_rank_score`` (always-on rank weights)."""
+    return compute_sector_relative_rank_score(
+        sector_pctile_return_1m=sector_pctile_return_1m,
+        sector_pctile_return_3m=sector_pctile_return_3m,
+        sector_pctile_rel_strength=sector_pctile_rel_strength,
+        sector_pctile_intent=sector_pctile_intent,
+        sector_pctile_next_week=sector_pctile_next_week,
+    )
 
 
 def _cohort_return_percentiles(pending: list[dict[str, Any]]) -> None:
@@ -2267,6 +2305,7 @@ def _score_from_features(
     percentile_1w: float = 50.0,
     percentile_1m: float = 50.0,
     sector_relative_score: float | None = None,
+    sector_relative_rank_score: float | None = None,
 ) -> float:
     ref_1w = _env_float("TITAN_RANK_PCTILE_1W_REF", _PCTILE_1W_REF_RETURN)
     ref_1m = _env_float("TITAN_RANK_PCTILE_1M_REF", _PCTILE_1M_REF_RETURN)
@@ -2275,9 +2314,9 @@ def _score_from_features(
     ret_1w_term = 1.1 * (pct_1w / 100.0) * ref_1w
     ret_1m_term = 0.45 * (pct_1m / 100.0) * ref_1m
     absorption_term = _absorption_term(absorption, session_move)["value"]
-    if sector_relative_score is not None:
-        ref_total = _env_float("TITAN_SRM_REF_POINTS", ref_1w + ref_1m)
-        momentum_term = (float(sector_relative_score) / 100.0) * ref_total
+    ref_total = _env_float("TITAN_SRM_REF_POINTS", ref_1w + ref_1m)
+    if sector_relative_rank_score is not None:
+        momentum_term = (float(sector_relative_rank_score) / 100.0) * ref_total
     else:
         momentum_term = ret_1w_term + ret_1m_term
     score = _cap_bias(bucket) + momentum_term + absorption_term
@@ -3306,13 +3345,15 @@ def build_sector_rankings(
         bucket = p["bucket"]
         pct_1w = _safe_float(p.get("percentile_1w"))
         pct_1m = _safe_float(p.get("percentile_1m"))
-        srm_score = compute_sector_relative_momentum_score(
-            sector_pctile_return_1m=pct_1m,
-            sector_pctile_return_3m=_safe_float(p.get("percentile_3m")),
-            sector_pctile_rel_strength=_safe_float(p.get("percentile_rel_strength")),
-            sector_pctile_intent=_safe_float(p.get("percentile_intent")),
-            sector_pctile_next_week=_safe_float(p.get("percentile_next_week")),
-        )
+        pct_inputs = {
+            "sector_pctile_return_1m": pct_1m,
+            "sector_pctile_return_3m": _safe_float(p.get("percentile_3m")),
+            "sector_pctile_rel_strength": _safe_float(p.get("percentile_rel_strength")),
+            "sector_pctile_intent": _safe_float(p.get("percentile_intent")),
+            "sector_pctile_next_week": _safe_float(p.get("percentile_next_week")),
+        }
+        srm_score = compute_sector_relative_momentum_score(**pct_inputs)
+        srr_score = compute_sector_relative_rank_score(**pct_inputs)
         overext = _overextension_penalty(
             ret_1w=ret_1w,
             ret_1m=ret_1m,
@@ -3333,7 +3374,7 @@ def build_sector_rankings(
             session_move=ret_1d,
             percentile_1w=pct_1w,
             percentile_1m=pct_1m,
-            sector_relative_score=srm_score,
+            sector_relative_rank_score=srr_score,
         )
         pre_gate_score = round(base_score + blend_points, 4)
         v2_signal = _resolve_v2_signal(symbol_u, eod_ctx)
@@ -3409,6 +3450,7 @@ def build_sector_rankings(
                         _safe_float(p.get("percentile_next_week")), digits=2
                     ),
                     "sector_relative_momentum_score": srm_score,
+                    "sector_relative_rank_score": srr_score,
                     "overextension_penalty": overext.get("penalty", 0.0),
                     "overextension_components": overext.get("components", {}),
                     "absorption_term": absorption_bd,

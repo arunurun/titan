@@ -124,6 +124,74 @@ def v2_enabled() -> bool:
     return True
 
 
+_FAMILY_CAP_LIMITS = {
+    "price": 4.0,
+    "flow": 2.5,
+    "extension": 2.0,
+    "volatility": 2.0,
+}
+
+
+def _cap_family_groups(groups: dict[str, float]) -> dict[str, float]:
+    return {
+        key: min(_clamp(val, 0.0, 10.0), _FAMILY_CAP_LIMITS[key])
+        for key, val in groups.items()
+    }
+
+
+def _apply_family_caps_to_risk(
+    *,
+    fam: dict[str, float],
+    momentum_scaled: float,
+    money_flow_bear: float,
+    over_extension: float,
+    upside_z: float,
+    volatility: float,
+    fundamental: float,
+) -> tuple[float, dict[str, float]]:
+    """Group Layer-C bear terms and cap each family before summing."""
+    price = momentum_scaled + _sf(fam.get("trend", 0.0)) + _sf(fam.get("z", 0.0))
+    groups = {
+        "price": price,
+        "flow": money_flow_bear,
+        "extension": over_extension + upside_z,
+        "volatility": volatility,
+    }
+    capped = _cap_family_groups(groups)
+    risk_c = (
+        _sf(fam.get("horizon", 0.0))
+        + _sf(fam.get("intent", 0.0))
+        + sum(capped.values())
+        + fundamental
+    )
+    return risk_c, capped
+
+
+def _ipo_leader_precheck(audit: dict[str, Any]) -> bool:
+    intent_min = _env_float("TITAN_IPO_LEADER_INTENT_MIN", 75.0)
+    nw_min = _env_float("TITAN_IPO_LEADER_NW_MIN", 70.0)
+    vpr_min = _env_float("TITAN_IPO_LEADER_VPR_MIN", 2.0)
+    eff = _sf(audit.get("effective_intent_score", audit.get("intent_score")))
+    nw = _sf(audit.get("next_week_score"))
+    vpr = _participation_vpr(audit)
+    cmf = _sf(audit.get("cmf_20"))
+    return (
+        not math.isnan(eff)
+        and eff >= intent_min
+        and not math.isnan(nw)
+        and nw >= nw_min
+        and not math.isnan(vpr)
+        and vpr >= vpr_min
+        and not math.isnan(cmf)
+        and cmf > 0.05
+    )
+
+
+def _ipo_leader_buy_ok(audit: dict[str, Any], risk_net: float) -> bool:
+    risk_max = _env_float("TITAN_IPO_LEADER_RISK_MAX", 2.0)
+    return risk_net < risk_max and _ipo_leader_precheck(audit)
+
+
 _MOMENTUM_SECTORS = frozenset({
     "renewables_clean_energy",
     "railways_transport_infra",
@@ -165,7 +233,8 @@ CORE_METRICS: tuple[str, ...] = (
     "atr_14_pct",
     "return_1d_pct",
     "return_5d_pct",
-    "return_10d_pct",
+    "return_21d_pct",
+    "return_63d_pct",
 )
 
 _SEVERITY: dict[str, int] = {
@@ -290,10 +359,14 @@ def layer_a(audit: dict[str, Any]) -> dict[str, Any]:
         reasons.append(f"NaN census >= {nan_max}: buy withheld")
 
     if bool(audit.get("history_lt_200_sessions")):
-        out["buy_allowed"] = False
-        out["label_ceiling"] = "accumulate"  # short history: accumulate max, never buy
-        seed *= short_hist_conf
-        reasons.append("short history (<200 sessions): ceiling=accumulate")
+        if _ipo_leader_precheck(audit):
+            out["label_ceiling"] = "accumulate"
+            reasons.append("short history: IPO leader precheck passed (buy allowed if risk ok)")
+        else:
+            out["buy_allowed"] = False
+            out["label_ceiling"] = "accumulate"
+            seed *= short_hist_conf
+            reasons.append("short history (<200 sessions): ceiling=accumulate")
 
     if bool(audit.get("liquidity_thin_proxy")):
         out["buy_allowed"] = False
@@ -319,7 +392,8 @@ def _family_points(audit: dict[str, Any]) -> dict[str, Any]:
     z = _sf(audit.get("z_score"))
     ret1d = _sf(audit.get("return_1d_pct"))
     ret5d = _sf(audit.get("return_5d_pct"))
-    ret10d = _sf(audit.get("return_10d_pct"))
+    ret21d = _sf(audit.get("return_21d_pct"))
+    ret63d = _sf(audit.get("return_63d_pct"))
     ema_dist = _sf(audit.get("ema_200_distance_pct"))
     atr_pct = _sf(audit.get("atr_14_pct"))
     atr_pi = _sf(audit.get("atr_penalty_input"))
@@ -354,13 +428,14 @@ def _family_points(audit: dict[str, Any]) -> dict[str, Any]:
     fam["z"] = min(2.0, zc)
     add("z", "z_score", z, fam["z"])
 
-    # Multi-day momentum (cap 3): ramped sub-terms summed then capped
-    mom = 0.0
-    mom += _ramp(ret1d, zero_at=-1.0, full_at=-2.0, full_points=2.0 * ret1d_weight)
-    mom += _ramp(ret5d, zero_at=-2.0, full_at=-6.0, full_points=2.0)
-    mom += _ramp(ret10d, zero_at=-6.0, full_at=-10.0, full_points=1.5)
-    fam["momentum"] = min(3.0, mom)
-    add("momentum", "return_1d/5d/10d_pct", ret1d, fam["momentum"])
+    # Multi-day momentum (cap 3): weighted 1/5/21/63d horizons (10/25/30/35%).
+    unit = 3.0
+    r1 = _ramp(ret1d, zero_at=-1.0, full_at=-2.0, full_points=unit) * ret1d_weight
+    r5 = _ramp(ret5d, zero_at=-2.0, full_at=-6.0, full_points=unit)
+    r21 = _ramp(ret21d, zero_at=-4.0, full_at=-12.0, full_points=unit)
+    r63 = _ramp(ret63d, zero_at=-8.0, full_at=-20.0, full_points=unit)
+    fam["momentum"] = min(unit, 0.10 * r1 + 0.25 * r5 + 0.30 * r21 + 0.35 * r63)
+    add("momentum", "return_1d/5d/21d/63d_pct", ret1d, fam["momentum"])
 
     # Below-EMA200 trend only (cap 2): ramp -2 -> -6 (over-extension is C-8)
     em = _ramp(ema_dist, zero_at=-2.0, full_at=-6.0, full_points=2.0)
@@ -555,15 +630,21 @@ def layer_d(audit: dict[str, Any], c: dict[str, Any]) -> dict[str, Any]:
             if not math.isnan(plus_di) and not math.isnan(minus_di) and plus_di > minus_di:
                 out["mult_momentum"] = 1.3
                 out["mult_risk"] = 0.8
-                reasons.append(f"strong ADX {adx:.1f} +DI>{minus_di:.1f}: momentum up, vol noise down")
+                reasons.append(
+                    f"strong ADX {adx:.1f} (+DI={plus_di:.1f}, -DI={minus_di:.1f}): momentum up, vol noise down"
+                )
             elif not math.isnan(plus_di) and not math.isnan(minus_di) and minus_di > plus_di:
                 out["mult_momentum"] = 0.5
                 out["mult_risk"] = 1.5
-                reasons.append(f"strong ADX {adx:.1f} -DI>{plus_di:.1f}: momentum down, risk up")
+                reasons.append(
+                    f"strong ADX {adx:.1f} (+DI={plus_di:.1f}, -DI={minus_di:.1f}): momentum down, risk up"
+                )
             else:
                 out["mult_momentum"] = 1.3
                 out["mult_risk"] = 0.8
-                reasons.append(f"strong ADX {adx:.1f}: momentum up-weighted (DI tie)")
+                reasons.append(
+                    f"strong ADX {adx:.1f} (+DI={plus_di:.1f}, -DI={minus_di:.1f}): momentum up-weighted (DI tie)"
+                )
         else:
             out["mult_money_flow"] = float(prev_mults.get("mult_money_flow", 1.0))
             out["mult_over_extension"] = float(prev_mults.get("mult_over_extension", 1.0))
@@ -728,7 +809,8 @@ def layer_b(audit: dict[str, Any], c: dict[str, Any], d: dict[str, Any]) -> dict
 
 def _aggregate(c: dict[str, Any], d: dict[str, Any], audit: dict[str, Any] | None = None) -> dict[str, float]:
     """Apply Layer-D multipliers + bumps to Layer-C terms -> risk_c, bull_c."""
-    audit = audit or {}
+    if audit is None:
+        audit = {}
     fam = c.get("families", {}) if isinstance(c.get("families"), dict) else {}
     mult_mom = _sf(d.get("mult_momentum", 1.0))
     mult_mf = _sf(d.get("mult_money_flow", 1.0))
@@ -746,17 +828,25 @@ def _aggregate(c: dict[str, Any], d: dict[str, Any], audit: dict[str, Any] | Non
     if math.isnan(layer_c_mult):
         layer_c_mult = 1.0
 
-    risk_c = 0.0
-    risk_c += _sf(fam.get("horizon", 0.0))
-    risk_c += _sf(fam.get("intent", 0.0))
-    risk_c += _sf(fam.get("z", 0.0))
-    risk_c += min(3.0, _sf(fam.get("momentum", 0.0)) * mult_mom)
-    risk_c += _sf(fam.get("trend", 0.0))
-    risk_c += _sf(fam.get("volatility", 0.0)) * mult_risk
-    risk_c += _sf(c.get("money_flow_bear", 0.0)) * mult_mf
-    risk_c += _sf(c.get("over_extension", 0.0)) * mult_oe
-    risk_c += _sf(c.get("upside_z", 0.0)) * mult_oe
-    risk_c += _sf(c.get("fundamental", 0.0))  # may be negative (strong fundamentals)
+    momentum_scaled = min(3.0, _sf(fam.get("momentum", 0.0)) * mult_mom)
+    money_flow_bear = _sf(c.get("money_flow_bear", 0.0)) * mult_mf
+    over_extension = _sf(c.get("over_extension", 0.0)) * mult_oe
+    upside_z = _sf(c.get("upside_z", 0.0)) * mult_oe
+    volatility = _sf(fam.get("volatility", 0.0)) * mult_risk
+    fundamental = _sf(c.get("fundamental", 0.0))
+
+    risk_c, capped_groups = _apply_family_caps_to_risk(
+        fam=fam,
+        momentum_scaled=momentum_scaled,
+        money_flow_bear=money_flow_bear,
+        over_extension=over_extension,
+        upside_z=upside_z,
+        volatility=volatility,
+        fundamental=0.0,
+    )
+    risk_c += fundamental
+    audit["family_caps"] = {"groups": capped_groups}
+
     risk_c *= layer_c_mult
     risk_c += _sf(d.get("divergence_bump", 0.0))
     defensive_mult = _sf(audit.get("regime_defensive_penalty_mult", 1.0))
@@ -1469,7 +1559,8 @@ def _apply_hysteresis(
     Enter trim: risk_net >= trim_floor (default 5.0).
     From trim/exit-risk: cannot upgrade to constructive until risk_net < buy_ceiling.
     """
-    audit = audit or {}
+    if audit is None:
+        audit = {}
     buy_max = _buy_risk_ceiling()
     trim_min = _trim_risk_floor()
     if prior_label is None or prior_label == label:
@@ -1579,8 +1670,12 @@ def evaluate_signal_v2(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
     gate = _buy_gate(audit, a, c)
     prior_label = _prior_label_from_audit(audit)
     label = _map_label(risk_net, gate, audit, a, prior_label=prior_label)
-    if bool(audit.get("history_lt_200_sessions")) and label in ("buy", "accumulate"):
-        if not _short_history_accumulate_ok(audit, risk_net):
+    if bool(audit.get("history_lt_200_sessions")):
+        if _ipo_leader_buy_ok(audit, risk_net) and gate.get("clean_buy"):
+            label = "buy"
+            a["label_ceiling"] = None
+            audit["ipo_leader_exception"] = {"applied_buy": True}
+        elif label in ("buy", "accumulate") and not _short_history_accumulate_ok(audit, risk_net):
             label = "hold"
     # STEP 2b: over-extension ceiling (shadow-first). Compute the would-be cap always;
     # apply it only when enforced (damp applies the milder accumulate cap, never hold).

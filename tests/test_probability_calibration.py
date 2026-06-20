@@ -1,4 +1,4 @@
-"""Phase 6: probability calibration layer."""
+"""Probability calibration layer (always-on)."""
 
 from __future__ import annotations
 
@@ -30,14 +30,17 @@ def test_calibration_improves_brier_vs_raw_confidence():
 
 
 def test_calibration_always_writes_audit():
-    from probability_calibration import apply_probability_calibration
+    from probability_calibration import ProbabilityCalibrator, apply_probability_calibration
 
     audit = {"next_week_score": 67.0, "signal_confidence": 0.55}
     out = apply_probability_calibration(audit)
     assert out["enabled"] is True
     assert out["mode"] == "enforce"
     assert audit["predicted_probability"] == 0.48
+    assert audit["predicted_success_probability"] == 0.48
+    assert audit["signal_probability"] == 0.48
     assert audit["signal_confidence"] == 0.48
+    assert ProbabilityCalibrator().predict(67.0) == 0.48
 
 
 def test_shadow_mode_preserves_raw_confidence(monkeypatch):
@@ -48,4 +51,5 @@ def test_shadow_mode_preserves_raw_confidence(monkeypatch):
     out = apply_probability_calibration(audit)
     assert out["mode"] == "shadow"
     assert audit["predicted_probability"] == 0.48
+    assert audit["predicted_success_probability"] == 0.48
     assert audit["signal_confidence"] == 0.55

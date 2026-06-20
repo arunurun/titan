@@ -1,10 +1,6 @@
-"""Historical score → P(up 5d) calibration layer.
+"""Historical score → P(up 5d) calibration layer (always-on).
 
-``predicted_probability`` is always computed and written onto the audit. Optional
-``TITAN_PROB_CALIB_MODE``: ``enforce`` (default) replaces ``signal_confidence``;
-``shadow`` records only; ``off`` skips confidence replacement.
-
-Default buckets use isotonic-style monotonic mapping from next_week_score deciles.
+``TITAN_PROB_CALIB_MODE``: ``shadow`` (record only) or ``enforce`` (replace confidence).
 """
 
 from __future__ import annotations
@@ -13,7 +9,6 @@ import math
 import os
 from typing import Any
 
-# Monotonic bucket midpoints: (score_lo, score_hi, P_up_5d)
 _DEFAULT_BUCKETS: tuple[tuple[float, float, float], ...] = (
     (0.0, 45.0, 0.28),
     (45.0, 52.0, 0.32),
@@ -25,9 +20,9 @@ _DEFAULT_BUCKETS: tuple[tuple[float, float, float], ...] = (
 )
 
 
-def calibration_mode() -> str:
-    raw = os.environ.get("TITAN_PROB_CALIB_MODE", "").strip().lower()
-    return raw if raw in ("off", "shadow", "enforce") else "enforce"
+def _calibration_mode() -> str:
+    raw = os.environ.get("TITAN_PROB_CALIB_MODE", "enforce").strip().lower()
+    return raw if raw in ("shadow", "enforce") else "enforce"
 
 
 def _sf(v: Any) -> float:
@@ -48,7 +43,6 @@ def calibrate_probability(
     sector: str | None = None,
     buckets: tuple[tuple[float, float, float], ...] | None = None,
 ) -> float:
-    """Map a constructive score (typically next_week_score) to P(up 5d) in [0, 1]."""
     s = _sf(score)
     if math.isnan(s):
         return float("nan")
@@ -56,7 +50,6 @@ def calibrate_probability(
     sector_adj = 0.0
     if sector:
         key = str(sector).strip().lower()
-        # Small sector nudges from backtest priors (shadow-first; tunable later).
         if key in ("telecom", "defence"):
             sector_adj = 0.03
         elif key in ("pharma_healthcare",):
@@ -67,12 +60,31 @@ def calibrate_probability(
     return round(_clamp(table[-1][2] + sector_adj, 0.0, 1.0), 4)
 
 
-def apply_probability_calibration(audit: dict[str, Any]) -> dict[str, Any]:
-    """Write ``predicted_probability`` and calibration metadata onto the audit."""
+class ProbabilityCalibrator:
+    def __init__(
+        self,
+        *,
+        buckets: tuple[tuple[float, float, float], ...] | None = None,
+    ) -> None:
+        self.buckets = buckets or _DEFAULT_BUCKETS
+
+    def predict(self, score: float, *, sector: str | None = None) -> float:
+        return calibrate_probability(score, sector=sector, buckets=self.buckets)
+
+    def apply(self, audit: dict[str, Any]) -> dict[str, Any]:
+        return apply_probability_calibration(audit, calibrator=self)
+
+
+def apply_probability_calibration(
+    audit: dict[str, Any],
+    *,
+    calibrator: ProbabilityCalibrator | None = None,
+) -> dict[str, Any]:
+    cal = calibrator or ProbabilityCalibrator()
     score = _sf(audit.get("next_week_score", audit.get("effective_intent_score")))
     sector = audit.get("sector") or audit.get("sector_key")
-    prob = calibrate_probability(score, sector=str(sector) if sector else None)
-    mode = calibration_mode()
+    prob = cal.predict(score, sector=str(sector) if sector else None)
+    mode = _calibration_mode()
     raw_conf = _sf(audit.get("signal_confidence"))
 
     out: dict[str, Any] = {
@@ -80,10 +92,14 @@ def apply_probability_calibration(audit: dict[str, Any]) -> dict[str, Any]:
         "mode": mode,
         "input_score": None if math.isnan(score) else round(score, 2),
         "predicted_probability": None if math.isnan(prob) else prob,
+        "predicted_success_probability": None if math.isnan(prob) else prob,
+        "signal_probability": None if math.isnan(prob) else prob,
         "raw_confidence": None if math.isnan(raw_conf) else raw_conf,
     }
     audit["probability_calibration"] = out
     audit["predicted_probability"] = prob if not math.isnan(prob) else None
+    audit["predicted_success_probability"] = audit["predicted_probability"]
+    audit["signal_probability"] = audit["predicted_probability"]
 
     if mode == "enforce" and not math.isnan(prob):
         audit["signal_confidence"] = round(prob, 3)
@@ -92,7 +108,6 @@ def apply_probability_calibration(audit: dict[str, Any]) -> dict[str, Any]:
 
 
 def brier_score(predictions: list[float], outcomes: list[int]) -> float:
-    """Mean squared error for binary outcomes (1=up, 0=down)."""
     if not predictions or len(predictions) != len(outcomes):
         return float("nan")
     total = 0.0

@@ -3212,6 +3212,11 @@ def _apply_sector_cross_section(
         assign_percentile("z_score", "sector_pctile_z_score")
         assign_percentile("return_1d_pct", "sector_pctile_return_1d_pct")
         assign_percentile("return_5d_pct", "sector_pctile_return_5d_pct")
+        assign_percentile("return_21d_pct", "sector_pctile_return_21d_pct")
+        assign_percentile("return_63d_pct", "sector_pctile_return_63d_pct")
+        assign_percentile(
+            "rel_return_20d_vs_nifty_pct", "sector_relative_strength_pctile"
+        )
         assign_percentile("median_notional_inr_20d", "sector_pctile_median_notional_20d")
         # Corroborating-only sector percentiles for the v2 money-flow / over-extension
         # gates (persisted into tape_extras so backtests can reproduce the C/C-8 layers).
@@ -3410,6 +3415,8 @@ def build_equity_live_audit(
             "return_5d_pct": float("nan"),
             "return_10d_pct": float("nan"),
             "return_20d_pct": float("nan"),
+            "return_21d_pct": float("nan"),
+            "return_63d_pct": float("nan"),
             "median_notional_inr_20d": float("nan"),
             "rel_return_5d_vs_nifty_pct": float("nan"),
             "rel_return_10d_vs_nifty_pct": float("nan"),
@@ -3450,6 +3457,8 @@ def build_equity_live_audit(
     ret5d = pct_return_n_sessions_back(series_non_na, 5)
     ret10d = pct_return_n_sessions_back(series_non_na, 10)
     ret20d = pct_return_n_sessions_back(series_non_na, 20)
+    ret21d = pct_return_n_sessions_back(series_non_na, 21)
+    ret63d = pct_return_n_sessions_back(series_non_na, 63)
     med_notional = median_notional_inr_20d(df, close_col)
     bench = getattr(_THREAD_LOCAL, "sector_benchmark_ohlc", None)
     rel_map = benchmark_relative_returns(df, bench, close_col, horizons=(5, 10, 20))
@@ -3624,6 +3633,8 @@ def build_equity_live_audit(
         "return_5d_pct": ret5d,
         "return_10d_pct": ret10d,
         "return_20d_pct": ret20d,
+        "return_21d_pct": ret21d,
+        "return_63d_pct": ret63d,
         "median_notional_inr_20d": med_notional,
         "extreme_price_move_proxy": extreme_move,
         "rel_return_5d_vs_nifty_pct": rel_map.get("rel_return_5d_vs_nifty_pct", float("nan")),

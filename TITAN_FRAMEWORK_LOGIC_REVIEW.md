@@ -641,19 +641,24 @@ Walk-forward labels feed `prev_action_signal` so v2 hysteresis is exercised in b
 
 ---
 
-## 7b. Seven-phase framework improvements (Jun 2026, core logic)
+## 7b. Seven-phase + v2 review improvements (Jun 2026, always-on core logic)
 
 Re-architecture **682657a** (OBV EMA, directional ADX, percentile 1w/1m rank terms, vol de-dup,
-hysteresis 3.0/5.0, 400-day lookback) is baseline; the items below are always-on production logic.
+hysteresis 3.0/5.0, 400-day lookback) is baseline; the items below are always-on production logic
+(no feature flags).
 
 | Component | Module | Behaviour |
 |---|---|---|
-| Sector-relative ranking | `sector_priority.py` | `compute_sector_relative_momentum_score()` replaces 1w/1m return terms (0.35×1m + 0.25×3m + 0.20×rel_strength + 0.10×intent + 0.10×next_week). |
+| Sector-relative ranking | `sector_priority.py` | `compute_sector_relative_rank_score()` replaces 1w/1m return terms (0.30×1m + 0.25×3m + 0.20×rel_strength + 0.15×intent + 0.10×next_week). |
+| Medium-term momentum | `signal_v2.py`, `sector_audit.py` | `return_21d_pct` / `return_63d_pct` in audit; Layer-C momentum bear uses weighted 1d/5d/21d/63d (10/25/30/35%). |
+| Probability calibration | `probability_calibration.py` | Always writes `predicted_probability`, `predicted_success_probability`, `signal_probability`; confidence replaced by default (`enforce`). Optional `TITAN_PROB_CALIB_MODE=shadow\|off` for confidence-only observation. |
+| Family risk caps | `signal_v2.py` | PRICE (4.0) / FLOW (2.5) / EXTENSION (2.0) / VOLATILITY (2.0) caps in `_aggregate` before `risk_net`. |
+| IPO leader exception | `signal_v2.py` | Short history may **buy** when intent≥75, nw≥70, VPR≥2, CMF>0.05, risk_net<2; else accumulate ceiling. |
+| Layer D audit messages | `signal_v2.py` | `strong ADX X (+DI=…, -DI=…)` format for directional ADX reasons. |
 | Market regime engine | `market_regime.py` | STRONG_BULL / BULL / NEUTRAL / DEFENSIVE / BEAR on `audit["market_regime"]`; adaptations applied by default (`enforce`). Optional `TITAN_REGIME_ENGINE_MODE=shadow\|off` for rollout observation. |
 | Sector-aware Tier-2 | `signal_v2.py` | Momentum sectors (substring match on `sector_key`): trim=3, exit=4; overextension alone never trims. |
 | V2 rank penalty cap | `sector_priority.py` | Default **−3.0**; `TITAN_V2_RANK_PENALTY_FAMILY_CAP` (0.30) caps single-family share. |
 | Multi-horizon stretch | `stretch_engine.py` | Composite stretch (0.5×ema20 + 0.3×ema50 + 0.2×52w) in v2 C-8. |
-| Probability calibration | `probability_calibration.py` | Bucket map → `predicted_probability`; confidence replaced by default (`enforce`). Optional `TITAN_PROB_CALIB_MODE=shadow\|off` for rollout observation. |
 
 Analytics: `analytics/performance_metrics.py` — profit factor, expectancy, Sharpe, drawdown.
 
@@ -704,3 +709,20 @@ caveats and stale-doc points found by diffing code against the in-repo docs.
    `sector_priority.py:2197-2208`), news RSS, and yfinance macro are best-effort with graceful
    `NaN`/fallback handling; missing data degrades scores rather than failing, which a reviewer
    should keep in mind when interpreting any single run.
+
+---
+
+## 9. V2 review priorities (always-on, June 2026)
+
+All six review priorities below are **always-on production logic** (no master enable flags).
+Operational sub-modes remain only where noted (e.g. confidence replacement for probability
+calibration).
+
+| Priority | Behaviour | Notes |
+|---|---|---|
+| 1 Sector-relative rank | `compute_sector_relative_rank_score()` weights 30/25/20/15/10 drives `rank_score`; `compute_sector_relative_momentum_score()` is an alias | Replaces legacy percentile 1w/1m momentum term |
+| 2 Medium-term momentum | Layer-C weighted 1d/5d/21d/63d (10/25/30/35%); audit includes `return_21d_pct`, `return_63d_pct` | `extreme_price_move_proxy` dampens 1d only |
+| 3 Probability calibration | Always writes `predicted_success_probability` / `signal_probability` | `TITAN_PROB_CALIB_MODE`: `shadow` (record only) or `enforce` (replace `signal_confidence`) |
+| 4 Family risk caps | Cap PRICE=4.0, FLOW=2.5, EXT=2.0, VOL=2.0 before `risk_net`; horizon/intent outside caps | Audit `family_caps.groups` |
+| 5 IPO leader exception | Short history → accumulate ceiling; BUY when intent≥75, nw≥70, VPR≥2.0, CMF>0.05, risk_net<2.0 | Audit `ipo_leader_exception.applied_buy` |
+| 6 Audit messages | Layer-D ADX reasons show `(+DI=x, -DI=y)` | Always on |
