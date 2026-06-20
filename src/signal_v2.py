@@ -311,15 +311,18 @@ def _clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
 
-def _ramp(value: float, zero_at: float, full_at: float, full_points: float) -> float:
+def _ramp(val: float, zero_at: float, full_at: float, full_points: float) -> float:
     """Linear ramp: 0 points at ``zero_at`` -> ``full_points`` at ``full_at`` (clamped).
 
     Direction-agnostic: works whether ``full_at`` is above or below ``zero_at`` because
-    the fraction is normalized and clamped to [0, 1]. NaN input -> 0.
+    the fraction is normalized and clamped to [0, 1]. NaN input -> 0 (safe cross-sectional
+    additive baseline). ``zero_at == full_at`` -> 0 (zero-denominator protection).
     """
-    if math.isnan(value) or zero_at == full_at:
+    if math.isnan(val):
         return 0.0
-    frac = (value - zero_at) / (full_at - zero_at)
+    if full_at == zero_at:
+        return 0.0
+    frac = (val - zero_at) / (full_at - zero_at)
     return _clamp(frac, 0.0, 1.0) * full_points
 
 
@@ -396,6 +399,8 @@ def _family_points(audit: dict[str, Any]) -> dict[str, Any]:
     ret21d = _sf(audit.get("return_21d_pct"))
     ret63d = _sf(audit.get("return_63d_pct"))
     ret126d = _sf(audit.get("return_126d_pct"))
+    rel20 = _sf(audit.get("rel_return_20d_vs_nifty_pct"))
+    rel_pctile = _sf(audit.get("sector_relative_strength_pctile"))
     ema_dist = _sf(audit.get("ema_200_distance_pct"))
     atr_pct = _sf(audit.get("atr_14_pct"))
     atr_pi = _sf(audit.get("atr_penalty_input"))
@@ -413,9 +418,9 @@ def _family_points(audit: dict[str, Any]) -> dict[str, Any]:
                 }
             )
 
-    # Horizon (cap 3): ramp 55 -> 45
-    h = _ramp(next_week, zero_at=55.0, full_at=45.0, full_points=3.0)
-    fam["horizon"] = min(3.0, h)
+    # Horizon (cap 2): short-horizon outlook; reduced vs legacy to avoid duplicating momentum.
+    h = _ramp(next_week, zero_at=55.0, full_at=45.0, full_points=2.0)
+    fam["horizon"] = min(2.0, h)
     add("horizon", "next_week_score", next_week, fam["horizon"])
 
     # Intent (cap 2): ramp 52 -> 45
@@ -437,6 +442,18 @@ def _family_points(audit: dict[str, Any]) -> dict[str, Any]:
     fam["momentum"] = min(
         unit, 0.10 * r5 + 0.25 * r21 + 0.35 * r63 + 0.30 * r126
     )
+    rel_contrib = 0.0
+    rel_metric = "sector_relative_strength"
+    rel_value = float("nan")
+    if not math.isnan(rel20):
+        rel_contrib = _ramp(rel20, zero_at=0.0, full_at=-10.0, full_points=0.5)
+        rel_value = rel20
+    elif not math.isnan(rel_pctile):
+        rel_contrib = _ramp(rel_pctile, zero_at=50.0, full_at=20.0, full_points=0.5)
+        rel_value = rel_pctile
+    if rel_contrib > 0.05:
+        fam["momentum"] = min(unit, fam["momentum"] + rel_contrib)
+        add("momentum", rel_metric, rel_value, rel_contrib)
     add("momentum", "return_5d/21d/63d/126d_pct", ret5d, fam["momentum"])
 
     # Below-EMA200 trend only (cap 2): ramp -2 -> -6 (over-extension is C-8)
@@ -657,6 +674,12 @@ def layer_d(audit: dict[str, Any], c: dict[str, Any]) -> dict[str, Any]:
                 val = _sf(prev_mults.get(key, 1.0))
                 out[attr] = 1.0 if math.isnan(val) else val
             reasons.append(f"ADX deadband {adx:.1f}: persisting prior regime multipliers")
+    else:
+        out["mult_money_flow"] = float(prev_mults.get("mult_money_flow", 1.0))
+        out["mult_over_extension"] = float(prev_mults.get("mult_over_extension", 1.0))
+        out["mult_momentum"] = float(prev_mults.get("mult_momentum", 1.0))
+        out["mult_risk"] = float(prev_mults.get("mult_risk", 1.0))
+        reasons.append("ADX unavailable: persisting prior regime multipliers")
 
     out["adx_regime_mults"] = {
         "mult_money_flow": out["mult_money_flow"],
@@ -850,8 +873,18 @@ def _aggregate(c: dict[str, Any], d: dict[str, Any], audit: dict[str, Any] | Non
         volatility=volatility,
         fundamental=0.0,
     )
+    uncapped_groups = {
+        "price": momentum_scaled + _sf(fam.get("trend", 0.0)) + _sf(fam.get("z", 0.0)),
+        "flow": money_flow_bear,
+        "extension": over_extension + upside_z,
+        "volatility": volatility,
+    }
     risk_c += fundamental
-    audit["family_caps"] = {"groups": capped_groups}
+    audit["family_caps"] = {
+        "groups": capped_groups,
+        "limits": dict(_FAMILY_CAP_LIMITS),
+        "uncapped_groups": uncapped_groups,
+    }
 
     risk_c *= layer_c_mult
     risk_c += _sf(d.get("divergence_bump", 0.0))
@@ -1107,6 +1140,21 @@ def _apply_ceiling(label: str, ceiling: str | None) -> str:
         return "hold"
     if ceiling == "accumulate" and label == "buy":
         return "accumulate"
+    return label
+
+
+def _resolve_layer_a_final_label(mapped_label: str, layer_a_out: dict[str, Any]) -> str:
+    """Final Layer-A boundary enforcement after Layer E / hysteresis.
+
+    ``buy_allowed=False`` downgrades a mapped ``buy`` to ``accumulate`` or ``hold``.
+    ``label_ceiling`` caps constructive labels (higher ``_SEVERITY`` wins).
+    """
+    label = mapped_label
+    if not layer_a_out.get("buy_allowed") and label == "buy":
+        label = "accumulate" if layer_a_out.get("label_ceiling") == "accumulate" else "hold"
+    ceiling = layer_a_out.get("label_ceiling")
+    if ceiling is not None:
+        label = max(label, ceiling, key=lambda l: _SEVERITY[l])
     return label
 
 
@@ -1786,6 +1834,10 @@ def evaluate_signal_v2(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
         audit=audit,
     )
 
+    mapped_label = label
+    label = _resolve_layer_a_final_label(mapped_label, a)
+    audit["layer_a_boundary"] = {"mapped_label": mapped_label, "final_label": label}
+
     confidence = _confidence(
         final_label=label,
         risk_net=risk_net,
@@ -1814,11 +1866,14 @@ def evaluate_signal_v2(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
         "risk_net": _round(risk_net),
         "corroborators": int(b.get("corroborators", 0)),
         "forced_label": b.get("forced_label"),
+        "bypass_hysteresis": bypass,
         "terms": c.get("trace", []),
         "modifiers": d.get("reasons", []),
         "data_quality": a.get("reasons", []),
         "adx_regime_mults": d.get("adx_regime_mults"),
     }
+    audit["forced_label"] = b.get("forced_label")
+    audit["bypass_hysteresis"] = bypass
     audit["signal_engine_version"] = "v2"
 
     return label, round(risk_net, 2), reasons[:8]

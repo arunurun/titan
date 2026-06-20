@@ -656,12 +656,12 @@ production logic (no feature flags).
 | Component | Module | Behaviour (always-on) |
 |---|---|---|
 | Sector-relative ranking | `sector_priority.py` | Weighted sector-relative rank score drives momentum term in `rank_score`. |
-| Medium-term momentum | `signal_v2.py`, `sector_audit.py` | `return_21d/63d/126d_pct` in audit; Layer-C momentum bear uses weighted 5d/21d/63d/126d (10/25/35/30%); 1d excluded. |
-| Probability calibration | `probability_calibration.py` | Bucket interpolation replaces `signal_confidence` on every audit pass; TODO isotonic Phase 2. |
-| Family risk caps | `signal_v2.py` | PRICE (4.0) / FLOW (2.5) / EXTENSION (2.0) / VOLATILITY (2.0) caps in `_aggregate` before `risk_net`. |
+| Medium-term momentum | `signal_v2.py`, `sector_audit.py` | `return_21d/63d/126d_pct` in audit; Layer-C momentum bear uses weighted 5d/21d/63d/126d (10/25/35/30%) plus sector-relative strength (`rel_return_20d_vs_nifty_pct`); horizon cap reduced to 2.0; 1d excluded. |
+| Probability calibration | `probability_calibration.py` | Bucket interpolation writes `predicted_probability`; preserves engine confidence as `technical_confidence` (does **not** overwrite `signal_confidence`); `position_score = 0.6×P + 0.4×technical_confidence`; finer intermediate buckets; `IsotonicCalibrator` stub for Phase 2. |
+| Family risk caps | `signal_v2.py` | PRICE (4.0) / FLOW (2.0) / EXTENSION (2.0) / VOLATILITY (2.0) caps in `_aggregate` before `risk_net`; `audit["family_caps"]` exposes limits + uncapped groups. |
 | IPO leader exception | `signal_v2.py` | Short history may **buy** when intent≥75, nw≥70, VPR≥2, CMF>0.05, risk_net<2, not thin liquidity; else accumulate ceiling. |
 | Layer D audit messages | `signal_v2.py` | `strong ADX X (+DI=…, -DI=…)` format (always on — no flag). |
-| Market regime engine | `market_regime.py` | STRONG_BULL / BULL / NEUTRAL / DEFENSIVE / BEAR on `audit["market_regime"]`; adaptations applied by default (`enforce`). Optional `TITAN_REGIME_ENGINE_MODE=shadow\|off` for rollout observation. |
+| Market regime engine | `market_regime.py` | STRONG_BULL / BULL / NEUTRAL / DEFENSIVE / BEAR on `audit["market_regime"]`; 3-session persistence or 5-pt breadth hysteresis before label change; prior regime loaded from `tape_extras`; adaptations applied by default (`enforce`). Optional `TITAN_REGIME_ENGINE_MODE=shadow\|off` for rollout observation. |
 | Sector-aware Tier-2 | `signal_v2.py` | Momentum sectors (substring match on `sector_key`): trim=3, exit=4; overextension alone never trims. |
 | V2 rank penalty cap | `sector_priority.py` | Default **−3.0**; `TITAN_V2_RANK_PENALTY_FAMILY_CAP` (0.30) caps single-family share. |
 | Multi-horizon stretch | `stretch_engine.py` | Composite stretch (0.5×ema20 + 0.3×ema50 + 0.2×52w) in v2 C-8. |
@@ -685,9 +685,29 @@ operational rollout; default shadow leaves published ranks and action labels unc
 | Analysis store | `TITAN_ENABLE_ANALYSIS_STORE` | Persistence toggle (not core signal logic) |
 
 **Always-on Phase 1 (no flags):** sector-relative ranking, medium-term momentum (5d/21d/63d/126d),
-probability calibration, family risk caps, IPO leader exception, Layer D healthy-pullback halving
+probability calibration (bucket → `predicted_probability`, `technical_confidence` preserved),
+family risk caps, IPO leader exception, Layer D healthy-pullback halving
 (`mult_momentum *= 0.5`). `compute_sector_relative_momentum_score()` (2de00ac weights) is always
 computed in ranking meta for analytics but is distinct from the rank-score path.
+
+### Phase 2 calibration plan (isotonic regression)
+
+Production today uses finer bucket interpolation in `probability_calibration.py`. Phase 2 replaces
+buckets with walk-forward **IsotonicRegression** once labeled cohort size is sufficient:
+
+| Feature | Audit field |
+|---|---|
+| Next-week score | `next_week_score` |
+| Intent | `effective_intent_score` |
+| Risk net | `sell_signal_risk_score` / `risk_net` |
+| Sector | `sector` / `sector_key` |
+| Market regime | `market_regime.regime` |
+| Volume participation | `volume_participation_ratio` |
+| Money flow | `cmf_20` |
+
+Stub: `IsotonicCalibrator` in `probability_calibration.py` (raises until trained). Until then,
+`position_score = 0.6 * predicted_probability + 0.4 * technical_confidence` blends calibrated P(up)
+with engine corroborator confidence for sizing / audit transparency.
 
 ---
 

@@ -2506,6 +2506,15 @@ def _attach_prior_action_signals(
             prev_mults = tape.get("adx_regime_mults")
             if isinstance(prev_mults, dict):
                 audit["prev_adx_regime_mults"] = prev_mults
+            prev_regime = tape.get("market_regime")
+            if isinstance(prev_regime, dict):
+                audit["prev_market_regime"] = prev_regime
+            elif tape.get("market_regime_label"):
+                audit["prev_market_regime"] = {
+                    "regime": tape.get("market_regime_label"),
+                    "raw_regime": tape.get("market_regime_raw"),
+                    "streak": tape.get("market_regime_streak", 0),
+                }
 
 
 def _refresh_symbol_scoring_outputs(audit: dict[str, Any]) -> None:

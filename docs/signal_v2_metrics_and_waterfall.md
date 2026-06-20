@@ -403,11 +403,13 @@ Logic:
 nan_count = #{m in CORE_METRICS : isnan(audit[m])}
 if nan_count > 0:   seed *= max(0, 1 - 0.05*nan_count)   # each NaN shaves 5%
 if nan_count >= 3:  buy_allowed=False; seed *= 0.5
-if history_lt_200_sessions: buy_allowed=False; label_ceiling="hold"; seed *= 0.6
+if history_lt_200_sessions: buy_allowed=False; label_ceiling="accumulate"; seed *= 0.6
 if liquidity_thin_proxy:    buy_allowed=False
 confidence_seed = clamp(seed, 0, 1)
 ```
-`label_ceiling="hold"` later caps constructive labels only (never blocks downgrades).
+`label_ceiling` caps constructive labels only (never blocks downgrades). After Layer E /
+hysteresis, `_resolve_layer_a_final_label` re-enforces Layer A: `buy_allowed=False` downgrades
+mapped `buy` → `accumulate` or `hold`; `label_ceiling` caps via max `_SEVERITY`.
 
 ## Layer C — graded evidence (`layer_c`, :251-353; families `_family_points`, :180-248)
 
@@ -422,9 +424,7 @@ them (§E). A term is traced only if its points `> 0.05` (`:198`).
 | horizon | `next_week_score` | 55 → 45, 3.0 | 3.0 | :211-213 |
 | intent | `effective_intent_score` | 52 → 45, 2.0 | 2.0 | :216-218 |
 | z | `z_score` (downside only) | −1 → −2, 2.0 | 2.0 | :221-223 |
-| momentum | `return_1d_pct` | −1 → −2, `2.0*ret1d_weight` | (sum capped 3.0) | :227 |
-| momentum | `return_5d_pct` | −2 → −6, 2.0 | | :228 |
-| momentum | `return_10d_pct` | −6 → −10, 1.5 | | :229 |
+| momentum | `return_5d/21d/63d/126d_pct` composite | −2→−6 / −4→−12 / −8→−20 / −12→−30 (weights 10/25/35/30) | 3.0 | :431-439 |
 | trend | `ema_200_distance_pct` (below only) | −2 → −6, 2.0 | 2.0 | :234 |
 | volatility | `atr_penalty_input` (preferred) | 1.25 → 2.2, 2.0 | 2.0 | :240 |
 | volatility | else `atr_14_pct` | 4.0 → 6.0, 2.0 | 2.0 | :243 |
@@ -469,12 +469,12 @@ defaults: `TITAN_SIGV2_D_ADX_WEAK`=**20.0** (`:385`), `TITAN_SIGV2_D_ADX_STRONG`
 `TITAN_SIGV2_D_STALEFLOW_OBV_EPS`=**0.0** (`:389`). `vpr` reads
 `volume_participation_ratio` (fallback `absorption_ratio`, `:383`).
 
-1. **ADX regime weights** (`:393-403`):
+1. **ADX regime weights** (`:621-665`):
    - `adx < 20`: `mult_money_flow=1.3, mult_over_extension=1.3, mult_momentum=0.7` (weak trend →
      up-weight mean-reversion, down-weight momentum).
-   - `adx >= 25`: `mult_money_flow=0.7, mult_over_extension=0.7, mult_momentum=1.3` (strong trend
-     → inverse).
-   - `20 <= adx < 25` (or NaN): all multipliers stay 1.0.
+   - `adx >= 25`: directional (+DI vs −DI) momentum/risk multipliers.
+   - `20 <= adx < 25` (deadband) **or ADX NaN**: persist `prev_adx_regime_mults` from prior session
+     (never reset to 1.0 when regime is unchanged/unavailable).
 
 2. **Money-flow divergence ("hollow breakout")** (`:406-409`):
    `ret1d > 2.0 AND cmf < -0.05` → `divergence_bump = +1.0` (added to risk) and

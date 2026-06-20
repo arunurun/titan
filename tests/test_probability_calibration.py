@@ -29,17 +29,36 @@ def test_calibration_improves_brier_vs_raw_confidence():
     assert brier_score(calibrated, outcomes) < brier_score(raw_conf, outcomes)
 
 
-def test_calibration_writes_audit_and_replaces_confidence():
+def test_calibration_preserves_technical_confidence():
     from probability_calibration import ProbabilityCalibrator, apply_probability_calibration
 
     audit = {"next_week_score": 67.0, "signal_confidence": 0.55}
     out = apply_probability_calibration(audit)
     assert out["enabled"] is True
+    assert audit["technical_confidence"] == 0.55
+    assert audit["signal_confidence"] == 0.55
     assert audit["predicted_probability"] == 0.48
     assert audit["predicted_success_probability"] == 0.48
     assert audit["signal_probability"] == 0.48
-    assert audit["signal_confidence"] == 0.48
     assert ProbabilityCalibrator().predict(67.0) == 0.48
+
+
+def test_exit_risk_bypass_returns_absolute_confidence():
+    from probability_calibration import apply_calibration, apply_probability_calibration
+
+    audit = {
+        "next_week_score": 40.0,
+        "signal_confidence": 0.92,
+        "forced_label": "exit-risk",
+        "bypass_hysteresis": True,
+        "action_signal": "exit-risk",
+    }
+    assert apply_calibration("exit-risk", 40.0, audit) == 1.0
+    apply_probability_calibration(audit)
+    assert audit["predicted_probability"] == 1.0
+    assert audit["technical_confidence"] == 0.92
+    assert audit["signal_confidence"] == 0.92
+    assert audit["probability_calibration"]["exit_risk_bypass"] is True
 
 
 def test_calibration_enabled_by_default():

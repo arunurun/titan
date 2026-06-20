@@ -100,3 +100,39 @@ def test_momentum_weights_favor_medium_term_horizons():
         }
     )
     assert only_126_weak["families"]["momentum"] > only_5d_weak["families"]["momentum"]
+
+
+def test_sector_relative_weakness_adds_momentum_risk():
+    base = {
+        "return_5d_pct": -0.5,
+        "return_21d_pct": -0.5,
+        "return_63d_pct": -1.0,
+        "return_126d_pct": -2.0,
+        "next_week_score": 60.0,
+        "effective_intent_score": 55.0,
+        "z_score": 0.0,
+        "ema_200_distance_pct": 2.0,
+        "atr_14_pct": 2.0,
+        "rel_return_20d_vs_nifty_pct": 2.0,
+    }
+    weak_rel = v2._family_points({**base, "rel_return_20d_vs_nifty_pct": -15.0})
+    neutral = v2._family_points(base)
+    assert weak_rel["families"]["momentum"] > neutral["families"]["momentum"]
+    metrics = [t["metric"] for t in weak_rel["trace"]]
+    assert "sector_relative_strength" in metrics
+
+
+def test_horizon_cap_reduced_vs_legacy():
+    audit = {
+        "next_week_score": 44.0,
+        "effective_intent_score": 55.0,
+        "z_score": 0.0,
+        "return_5d_pct": 0.0,
+        "return_21d_pct": 0.0,
+        "return_63d_pct": 0.0,
+        "return_126d_pct": 0.0,
+        "ema_200_distance_pct": 2.0,
+        "atr_14_pct": 2.0,
+    }
+    fp = v2._family_points(audit)
+    assert fp["families"]["horizon"] <= 2.0 + 1e-9

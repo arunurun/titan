@@ -1,7 +1,7 @@
 """Historical score → P(up 5d) calibration layer (always-on production logic).
 
-Bucket interpolation maps ``next_week_score`` / intent to calibrated probability and
-replaces ``signal_confidence`` on every signal path.
+Bucket interpolation maps ``next_week_score`` / intent to ``predicted_probability``.
+``technical_confidence`` from the signal engine is preserved separately on ``signal_confidence``.
 
 TODO Phase 2: replace bucket interpolation with isotonic regression on walk-forward
 outcomes once sufficient labeled cohort size is available.
@@ -82,6 +82,24 @@ class ProbabilityCalibrator:
         return apply_probability_calibration(audit, calibrator=self)
 
 
+def apply_calibration(
+    label: str,
+    raw_score: float,
+    audit: dict[str, Any],
+    *,
+    calibrator: ProbabilityCalibrator | None = None,
+) -> float:
+    """Calibrate raw score to P(up 5d); short-circuit for structural exit-risk bypass."""
+    trace = audit.get("signal_reason_trace") or {}
+    forced = audit.get("forced_label") or trace.get("forced_label")
+    bypass = bool(audit.get("bypass_hysteresis") or trace.get("bypass_hysteresis"))
+    if forced == "exit-risk" and bypass:
+        return 1.0
+    cal = calibrator or ProbabilityCalibrator()
+    sector = audit.get("sector") or audit.get("sector_key")
+    return cal.predict(raw_score, sector=str(sector) if sector else None)
+
+
 def apply_probability_calibration(
     audit: dict[str, Any],
     *,
@@ -90,8 +108,13 @@ def apply_probability_calibration(
     cal = calibrator or ProbabilityCalibrator()
     score = _sf(audit.get("next_week_score", audit.get("effective_intent_score")))
     sector = audit.get("sector") or audit.get("sector_key")
-    prob = cal.predict(score, sector=str(sector) if sector else None)
-    raw_conf = _sf(audit.get("signal_confidence"))
+    label = str(audit.get("action_signal") or audit.get("sell_signal") or "")
+    tech_conf = _sf(audit.get("signal_confidence"))
+
+    if not math.isnan(tech_conf):
+        audit["technical_confidence"] = round(tech_conf, 3)
+
+    prob = apply_calibration(label, score, audit, calibrator=cal)
 
     out = {
         "enabled": True,
@@ -100,15 +123,16 @@ def apply_probability_calibration(
         "predicted_probability": None if math.isnan(prob) else prob,
         "predicted_success_probability": None if math.isnan(prob) else prob,
         "signal_probability": None if math.isnan(prob) else prob,
-        "raw_confidence": None if math.isnan(raw_conf) else raw_conf,
+        "technical_confidence": audit.get("technical_confidence"),
+        "exit_risk_bypass": prob == 1.0 and (
+            (audit.get("forced_label") or (audit.get("signal_reason_trace") or {}).get("forced_label"))
+            == "exit-risk"
+        ),
     }
     audit["probability_calibration"] = out
     audit["predicted_probability"] = prob if not math.isnan(prob) else None
     audit["predicted_success_probability"] = audit["predicted_probability"]
     audit["signal_probability"] = audit["predicted_probability"]
-
-    if not math.isnan(prob):
-        audit["signal_confidence"] = round(prob, 3)
 
     return out
 

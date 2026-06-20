@@ -370,6 +370,9 @@ _SYMBOL_FEATURE_OPTIONAL_COLUMNS = frozenset(
         # Future signal-engine v2 outputs (no writer yet); optional so upserts degrade
         # gracefully when these columns are absent from the DB schema.
         "signal_confidence",
+        "technical_confidence",
+        "predicted_probability",
+        "position_score",
         "signal_reason_trace",
         "signal_engine_version",
     }
@@ -837,6 +840,19 @@ def build_symbol_daily_feature(
             else None
         ),
         "sell_signal_risk_score": audit.get("sell_signal_risk_score"),
+        "technical_confidence": audit.get("technical_confidence"),
+        "predicted_probability": audit.get("predicted_probability"),
+        "position_score": audit.get("position_score"),
+        "market_regime": audit.get("market_regime"),
+        "market_regime_label": (audit.get("market_regime") or {}).get("regime")
+        if isinstance(audit.get("market_regime"), dict)
+        else None,
+        "market_regime_raw": (audit.get("market_regime") or {}).get("raw_regime")
+        if isinstance(audit.get("market_regime"), dict)
+        else None,
+        "market_regime_streak": (audit.get("market_regime") or {}).get("streak")
+        if isinstance(audit.get("market_regime"), dict)
+        else None,
     }
 
     vpr = audit.get("volume_participation_ratio", audit.get("absorption_ratio"))

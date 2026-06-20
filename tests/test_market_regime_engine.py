@@ -87,3 +87,67 @@ def test_shadow_mode_records_without_applying(monkeypatch):
     assert audit["market_regime"]["mode"] == "shadow"
     assert audit["market_regime"]["applied"] is False
     assert audit["regime_buy_threshold_delta"] == 0.0
+
+
+def test_regime_hysteresis_holds_strong_bull_on_brief_dip():
+    from market_regime import resolve_regime_with_hysteresis
+
+    held = resolve_regime_with_hysteresis(
+        "BULL",
+        prior_regime="STRONG_BULL",
+        prior_raw_regime="BULL",
+        regime_streak=1,
+        breadth_pct=58.0,
+        nifty_above_ema200=True,
+    )
+    assert held["regime"] == "STRONG_BULL"
+    assert held["change_reason"] == "held_prior"
+
+
+def test_regime_hysteresis_exit_band_drops_strong_bull():
+    from market_regime import resolve_regime_with_hysteresis
+
+    out = resolve_regime_with_hysteresis(
+        "BULL",
+        prior_regime="STRONG_BULL",
+        prior_raw_regime="BULL",
+        regime_streak=1,
+        breadth_pct=54.0,
+        nifty_above_ema200=True,
+    )
+    assert out["regime"] == "BULL"
+    assert out["change_reason"] == "exit_band"
+
+
+def test_regime_hysteresis_persist_after_three_sessions():
+    from market_regime import resolve_regime_with_hysteresis
+
+    out = resolve_regime_with_hysteresis(
+        "DEFENSIVE",
+        prior_regime="BULL",
+        prior_raw_regime="DEFENSIVE",
+        regime_streak=2,
+        breadth_pct=38.0,
+        nifty_above_ema200=True,
+    )
+    assert out["regime"] == "DEFENSIVE"
+    assert out["change_reason"] == "persist"
+
+
+def test_apply_regime_uses_hysteresis_from_prior():
+    from market_regime import apply_regime_to_audit
+
+    audit = {
+        "nifty_above_ema200": True,
+        "market_breadth_pct": 58.0,
+        "india_vix": 15.0,
+        "prev_market_regime": {
+            "regime": "STRONG_BULL",
+            "raw_regime": "BULL",
+            "streak": 1,
+        },
+    }
+    apply_regime_to_audit(audit)
+    assert audit["market_regime"]["raw_regime"] == "BULL"
+    assert audit["market_regime"]["regime"] == "STRONG_BULL"
+    assert audit["market_regime"]["hysteresis"]["applied"] is True

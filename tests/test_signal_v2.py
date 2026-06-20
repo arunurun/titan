@@ -113,6 +113,18 @@ def test_layer_a_short_history_always_applies():
     assert a["label_ceiling"] == "accumulate"
 
 
+def test_layer_a_boundary_blocks_buy_after_hysteresis():
+    a = v2.layer_a({"liquidity_thin_proxy": True, "z_score": 1.0, "cmf_20": 0.1})
+    assert v2._resolve_layer_a_final_label("buy", a) == "hold"
+
+
+def test_layer_a_boundary_ceiling_caps_constructive():
+    a = v2.layer_a({"history_lt_200_sessions": True, "z_score": 1.0, "cmf_20": 0.1})
+    assert v2._resolve_layer_a_final_label("buy", a) == "accumulate"
+    assert v2._resolve_layer_a_final_label("accumulate", a) == "accumulate"
+    assert v2._resolve_layer_a_final_label("hold", a) == "hold"
+
+
 # --------------------------------------------------------------------------- #
 # Layer C — graded evidence
 # --------------------------------------------------------------------------- #
@@ -122,6 +134,11 @@ def test_ramp_is_monotonic_and_clamped():
     assert v2._ramp(60.0, 55.0, 45.0, 3.0) == 0.0  # above zero edge
     assert v2._ramp(50.0, 55.0, 45.0, 3.0) == pytest.approx(1.5)
     assert v2._ramp(40.0, 55.0, 45.0, 3.0) == 3.0  # past full edge -> clamped
+
+
+def test_ramp_nan_and_zero_denominator_safe():
+    assert v2._ramp(float("nan"), 55.0, 45.0, 3.0) == 0.0
+    assert v2._ramp(50.0, 45.0, 45.0, 3.0) == 0.0
 
 
 def test_money_flow_deadband_and_scaling():
@@ -182,6 +199,24 @@ def test_adx_regime_multipliers():
         {},
     )
     assert deadband["mult_momentum"] == 1.3 and deadband["mult_risk"] == 0.8
+
+
+def test_adx_nan_preserves_prior_regime_multipliers():
+    d = v2.layer_d(
+        {
+            "prev_adx_regime_mults": {
+                "mult_money_flow": 1.3,
+                "mult_over_extension": 1.3,
+                "mult_momentum": 0.7,
+                "mult_risk": 1.0,
+            }
+        },
+        {},
+    )
+    assert d["mult_money_flow"] == 1.3
+    assert d["mult_over_extension"] == 1.3
+    assert d["mult_momentum"] == 0.7
+    assert d["mult_risk"] == 1.0
 
 
 def test_divergence_caps_buy_confidence():

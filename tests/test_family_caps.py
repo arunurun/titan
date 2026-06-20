@@ -20,6 +20,7 @@ def test_correlated_price_terms_capped():
     agg = v2._aggregate(c, d, audit)
     assert agg["risk_c"] <= 4.0 + 2.0  # price cap + horizon + intent
     assert audit["family_caps"]["groups"]["price"] <= 4.0 + 1e-9
+    assert audit["family_caps"]["limits"]["price"] == 4.0
 
 
 def test_flow_and_extension_caps():
@@ -32,7 +33,7 @@ def test_flow_and_extension_caps():
         volatility=3.5,
         fundamental=0.0,
     )
-    assert groups["flow"] <= 2.5 + 1e-9
+    assert groups["flow"] <= 2.0 + 1e-9
     assert groups["extension"] <= 2.0 + 1e-9
     assert groups["volatility"] <= 2.0 + 1e-9
 
@@ -57,10 +58,11 @@ def test_correlated_signals_always_capped_before_sum():
     d = {"mult_momentum": 1.0, "mult_money_flow": 1.0, "mult_over_extension": 1.0, "mult_risk": 1.0}
     agg = v2._aggregate(c, d, audit)
     groups = audit["family_caps"]["groups"]
-    uncapped_sum = 3.0 + 2.0 + 1.5 + 2.5 + 3.0 + 2.0 + 1.5
+    uncapped = audit["family_caps"]["uncapped_groups"]
+    uncapped_sum = sum(uncapped.values())
     assert sum(groups.values()) < uncapped_sum
     assert groups["price"] <= 4.0 + 1e-9
-    assert groups["flow"] <= 2.5 + 1e-9
+    assert groups["flow"] <= 2.0 + 1e-9
     assert groups["extension"] <= 2.0 + 1e-9
     assert groups["volatility"] <= 2.0 + 1e-9
     assert agg["risk_c"] == min(10.0, sum(groups.values()))
