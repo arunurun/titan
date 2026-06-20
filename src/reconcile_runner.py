@@ -11,6 +11,7 @@ from analysis_store import (
     build_reconcile_digest_lines,
     enrich_audits_with_stock_reconcile,
     forward_outcomes_persist_enabled,
+    persist_action_label_backfill,
     persist_forward_outcomes,
     persist_reconcile_backfill,
 )
@@ -104,6 +105,24 @@ def run_reconcile_report(
                 f"{backfill_meta.get('persisted', 0)} days={backfill_meta.get('days', 0)} "
                 f"scope={scope_label}"
             )
+            if _env_truthy("TITAN_ACTION_LABEL_BACKFILL"):
+                from datetime import timedelta
+
+                end_d = datetime.now(IST).date()
+                start_d = end_d - timedelta(days=max(7, int(backfill_days) * 2))
+                label_meta = persist_action_label_backfill(
+                    cfg,
+                    start_date=start_d.isoformat(),
+                    end_date=end_d.isoformat(),
+                    sector=None if all_stocks else scope_label,
+                    all_stocks=all_stocks,
+                )
+                backfill_meta["action_labels"] = label_meta
+                print(
+                    "[reconcile] action_label_backfill updated="
+                    f"{label_meta.get('updated', 0)} mismatches={label_meta.get('mismatches', 0)} "
+                    f"scope={scope_label}"
+                )
 
         forward_outcomes_meta: dict[str, Any] = {"enabled": False, "updated": 0}
         if forward_outcomes_persist_enabled():

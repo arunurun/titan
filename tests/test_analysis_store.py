@@ -15,6 +15,7 @@ from analysis_store import (
     compute_forward_outcome_patches,
     enrich_audits_with_stock_reconcile,
     forward_outcomes_persist_enabled,
+    persist_action_label_backfill,
     persist_forward_outcomes,
     quality_checks_for_run,
     update_sector_period_rollups,
@@ -888,3 +889,53 @@ def test_persist_forward_outcomes_disabled_without_env(monkeypatch):
     monkeypatch.delenv("TITAN_FORWARD_OUTCOMES_PERSIST", raising=False)
     out = persist_forward_outcomes(_Cfg(), client=MagicMock(), sector="defence")
     assert out == {"enabled": False, "updated": 0}
+
+
+def test_persist_action_label_backfill_patches_mismatches(monkeypatch):
+    monkeypatch.setenv("TITAN_ENABLE_ANALYSIS_STORE", "1")
+    rows = [
+        {
+            "trade_date": "2026-06-01",
+            "sector": "defence",
+            "symbol": "HAL",
+            "exchange": "NSE",
+            "action_signal": "hold",
+            "effective_intent_score": 80,
+            "next_week_score": 75,
+            "tape_extras": {"sell_signal": "hold", "cmf_20": 0.1},
+        },
+    ]
+    mock_table = MagicMock()
+    mock_client = MagicMock()
+    mock_client.table.return_value = mock_table
+    chain = MagicMock()
+    mock_table.select.return_value = chain
+    chain.gte.return_value = chain
+    chain.lte.return_value = chain
+    chain.order.return_value = chain
+    chain.range.return_value.execute.return_value = MagicMock(data=rows)
+    update_chain = MagicMock()
+    mock_table.update.return_value = update_chain
+    update_chain.eq.return_value = update_chain
+    update_chain.execute.return_value = MagicMock(data=[])
+
+    monkeypatch.setattr(
+        "analysis_store._fetch_feature_rows_for_action_label_backfill",
+        lambda client, **kwargs: rows,
+    )
+    monkeypatch.setattr(
+        "signal_v2_backtest.recompute_label",
+        lambda audit, **kwargs: "trim",
+    )
+    out = persist_action_label_backfill(
+        _Cfg(),
+        start_date="2026-06-01",
+        end_date="2026-06-01",
+        sector="defence",
+        all_stocks=False,
+        client=mock_client,
+    )
+    assert out["enabled"] is True
+    assert out["mismatches"] == 1
+    assert out["updated"] == 1
+    mock_table.update.assert_called_once()

@@ -2365,6 +2365,179 @@ def persist_reconcile_backfill(
     return {"persisted": persisted, "days": len(trade_dates), "samples": samples}
 
 
+_ACTION_LABEL_BACKFILL_SELECT = (
+    "trade_date,sector,symbol,exchange,action_signal,intent_score,effective_intent_score,"
+    "next_day_score,next_week_score,z_score,ema_200_distance_pct,atr_14_pct,return_1d_pct,"
+    "volume_participation_ratio,absorption_ratio,tape_extras"
+)
+
+
+def _fetch_feature_rows_for_action_label_backfill(
+    client: Any,
+    *,
+    start_iso: str,
+    end_iso: str,
+    sector: str | None = None,
+    all_stocks: bool = True,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    offset = 0
+    page = 1000
+    while True:
+        q = (
+            client.table("symbol_daily_features")
+            .select(_ACTION_LABEL_BACKFILL_SELECT)
+            .gte("trade_date", start_iso)
+            .lte("trade_date", end_iso)
+            .order("trade_date")
+        )
+        if not all_stocks and sector:
+            q = q.eq("sector", str(sector).strip().lower())
+        q = q.range(offset, offset + page - 1)
+        batch = list(getattr(q.execute(), "data", None) or [])
+        rows.extend(batch)
+        if len(batch) < page:
+            break
+        offset += page
+    return rows
+
+
+def persist_action_label_backfill(
+    cfg: TitanConfig,
+    *,
+    start_date: date | str,
+    end_date: date | str,
+    sector: str | None = None,
+    all_stocks: bool = True,
+    prior_lookback_days: int = 90,
+    dry_run: bool = False,
+    client: Any | None = None,
+) -> dict[str, Any]:
+    """Recompute signal_v2 action labels from stored feature rows and patch mismatches."""
+    if not analysis_store_enabled():
+        return {"enabled": False, "updated": 0, "reason": "analysis_store_disabled"}
+    start = _parse_date(start_date)
+    end = _parse_date(end_date)
+    if start is None or end is None or start > end:
+        return {"enabled": True, "updated": 0, "reason": "invalid_date_range"}
+
+    import signal_v2_backtest as _sv2bt
+
+    fetch_start = (start - timedelta(days=max(7, int(prior_lookback_days)))).isoformat()
+    end_iso = end.isoformat()
+    start_iso = start.isoformat()
+    client = client or create_client(cfg.supabase_url, cfg.supabase_key)
+    rows = _fetch_feature_rows_for_action_label_backfill(
+        client,
+        start_iso=fetch_start,
+        end_iso=end_iso,
+        sector=sector,
+        all_stocks=all_stocks,
+    )
+    if not rows:
+        return {
+            "enabled": True,
+            "updated": 0,
+            "mismatches": 0,
+            "reason": "no_rows",
+            "scope": "all-stocks" if all_stocks else str(sector or ""),
+            "start": start_iso,
+            "end": end_iso,
+        }
+
+    grouped = _sv2bt.group_rows_by_symbol(rows)
+    updates: list[dict[str, Any]] = []
+    mismatches = 0
+    skipped = 0
+    transition_counts: dict[str, int] = defaultdict(int)
+
+    for _key, sym_rows in grouped.items():
+        prior: str | None = None
+        for row in sym_rows:
+            td = str(row.get("trade_date") or "")[:10]
+            audit = _sv2bt.feature_row_to_audit(row)
+            if audit is None or not _sv2bt.audit_has_signal_inputs(audit):
+                skipped += 1
+                continue
+            if prior:
+                audit["prev_action_signal"] = prior
+            new_label = _sv2bt.recompute_label(audit, use_v2=True, prior_label=prior)
+            prior = new_label
+            if td < start_iso or td > end_iso:
+                continue
+            stored = _normalize_action_signal(row.get("action_signal"))
+            if stored == new_label:
+                continue
+            mismatches += 1
+            transition_counts[f"{stored}->{new_label}"] += 1
+            tape = row.get("tape_extras")
+            tape = dict(tape) if isinstance(tape, dict) else {}
+            if tape.get("sell_signal") != new_label:
+                tape["sell_signal"] = new_label
+            updates.append(
+                sanitize_for_json(
+                    {
+                        "trade_date": td,
+                        "sector": row.get("sector"),
+                        "symbol": row.get("symbol"),
+                        "exchange": str(row.get("exchange") or "NSE").strip().upper() or "NSE",
+                        "action_signal": new_label,
+                        "tape_extras": tape,
+                    }
+                )
+            )
+
+    if dry_run or not updates:
+        return {
+            "enabled": True,
+            "updated": 0,
+            "mismatches": mismatches,
+            "skipped": skipped,
+            "dry_run": dry_run,
+            "scope": "all-stocks" if all_stocks else str(sector or ""),
+            "start": start_iso,
+            "end": end_iso,
+            "transition_counts": dict(sorted(transition_counts.items(), key=lambda x: -x[1])),
+            "samples": updates[:5],
+        }
+
+    written = 0
+    failed = 0
+    for patch in updates:
+        try:
+            (
+                client.table("symbol_daily_features")
+                .update({"action_signal": patch["action_signal"], "tape_extras": patch["tape_extras"]})
+                .eq("trade_date", patch["trade_date"])
+                .eq("sector", patch["sector"])
+                .eq("symbol", patch["symbol"])
+                .eq("exchange", patch["exchange"])
+                .execute()
+            )
+            written += 1
+        except Exception as e:  # pragma: no cover
+            failed += 1
+            if failed <= 5:
+                logger.warning(
+                    "Action label backfill failed for %s/%s/%s: %s",
+                    patch.get("symbol"),
+                    patch.get("trade_date"),
+                    patch.get("sector"),
+                    e,
+                )
+    return {
+        "enabled": True,
+        "updated": written,
+        "mismatches": mismatches,
+        "skipped": skipped,
+        "failed": failed,
+        "scope": "all-stocks" if all_stocks else str(sector or ""),
+        "start": start_iso,
+        "end": end_iso,
+        "transition_counts": dict(sorted(transition_counts.items(), key=lambda x: -x[1])),
+    }
+
+
 def persist_llm_digest_memory(
     cfg: TitanConfig,
     *,
