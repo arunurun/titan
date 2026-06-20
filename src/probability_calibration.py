@@ -1,7 +1,7 @@
-"""Historical score → P(up 5d) calibration layer (flag-gated rollout).
+"""Historical score → P(up 5d) calibration layer (always-on production logic).
 
-``TITAN_ENABLE_PROBABILITY_CALIBRATION``: master enable (default off = legacy).
-``TITAN_PROB_CALIB_MODE``: ``shadow`` (record only) or ``enforce`` (replace confidence).
+Bucket interpolation maps ``next_week_score`` / intent to calibrated probability and
+replaces ``signal_confidence`` on every signal path.
 
 TODO Phase 2: replace bucket interpolation with isotonic regression on walk-forward
 outcomes once sufficient labeled cohort size is available.
@@ -10,10 +10,7 @@ outcomes once sufficient labeled cohort size is available.
 from __future__ import annotations
 
 import math
-import os
 from typing import Any
-
-from titan_rollout import rollout_mode
 
 _DEFAULT_BUCKETS: tuple[tuple[float, float, float], ...] = (
     (0.0, 45.0, 0.28),
@@ -27,14 +24,12 @@ _DEFAULT_BUCKETS: tuple[tuple[float, float, float], ...] = (
 
 
 def calibration_mode() -> str:
-    return rollout_mode(
-        "TITAN_ENABLE_PROBABILITY_CALIBRATION",
-        "TITAN_PROB_CALIB_MODE",
-    )
+    """Production path always applies bucket calibration."""
+    return "enforce"
 
 
 def calibration_enabled() -> bool:
-    return calibration_mode() != "off"
+    return True
 
 
 def _sf(v: Any) -> float:
@@ -92,12 +87,6 @@ def apply_probability_calibration(
     *,
     calibrator: ProbabilityCalibrator | None = None,
 ) -> dict[str, Any]:
-    mode = calibration_mode()
-    if mode == "off":
-        out: dict[str, Any] = {"enabled": False, "mode": "off"}
-        audit["probability_calibration"] = out
-        return out
-
     cal = calibrator or ProbabilityCalibrator()
     score = _sf(audit.get("next_week_score", audit.get("effective_intent_score")))
     sector = audit.get("sector") or audit.get("sector_key")
@@ -106,7 +95,7 @@ def apply_probability_calibration(
 
     out = {
         "enabled": True,
-        "mode": mode,
+        "mode": "enforce",
         "input_score": None if math.isnan(score) else round(score, 2),
         "predicted_probability": None if math.isnan(prob) else prob,
         "predicted_success_probability": None if math.isnan(prob) else prob,
@@ -118,7 +107,7 @@ def apply_probability_calibration(
     audit["predicted_success_probability"] = audit["predicted_probability"]
     audit["signal_probability"] = audit["predicted_probability"]
 
-    if mode == "enforce" and not math.isnan(prob):
+    if not math.isnan(prob):
         audit["signal_confidence"] = round(prob, 3)
 
     return out

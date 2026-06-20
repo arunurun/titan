@@ -22,8 +22,6 @@ import math
 import os
 from typing import Any
 
-from titan_rollout import rollout_mode
-
 # ---------------------------------------------------------------------------
 # config helpers (mirror analysis_store._env_truthy semantics)
 # ---------------------------------------------------------------------------
@@ -126,21 +124,9 @@ def v2_enabled() -> bool:
     return True
 
 
-def _medium_term_momentum_mode() -> str:
-    return rollout_mode("TITAN_MEDIUM_TERM_MOMENTUM", "TITAN_MEDIUM_TERM_MOMENTUM_MODE")
-
-
-def _family_caps_mode() -> str:
-    return rollout_mode("TITAN_ENABLE_FAMILY_CAPS", "TITAN_FAMILY_CAPS_MODE")
-
-
-def _ipo_leader_exception_mode() -> str:
-    return rollout_mode("TITAN_ENABLE_IPO_LEADER_EXCEPTION", "TITAN_IPO_LEADER_EXCEPTION_MODE")
-
-
 _FAMILY_CAP_LIMITS = {
     "price": 4.0,
-    "flow": 2.5,
+    "flow": 2.0,
     "extension": 2.0,
     "volatility": 2.0,
 }
@@ -218,7 +204,9 @@ def _tier2_thresholds(audit: dict[str, Any]) -> tuple[int, int]:
     trim = _env_int("TITAN_SIGV2_B_TIER2_TRIM_COUNT", 2)
     exit_c = _env_int("TITAN_SIGV2_B_TIER2_EXIT_COUNT", 3)
     sector_clean = str(audit.get("sector_key") or audit.get("sector") or "").strip().lower()
-    is_momentum_sector = any(m_sec in sector_clean for m_sec in _MOMENTUM_SECTORS)
+    is_momentum_sector = any(
+        m_sec.lower().strip() in sector_clean for m_sec in _MOMENTUM_SECTORS
+    )
     if is_momentum_sector:
         trim = 3
         exit_c = 4
@@ -261,7 +249,7 @@ _SEVERITY: dict[str, int] = {
 
 _SIGV2_BUY_RISK_MAX = 3.0
 _SIGV2_TRIM_RISK_MIN = 5.0
-_SIGV2_EXIT_RISK_MIN = 7.5
+_SIGV2_EXIT_RISK_MIN = 7.0
 
 
 def _sf(v: Any) -> float:
@@ -373,16 +361,9 @@ def layer_a(audit: dict[str, Any]) -> dict[str, Any]:
         reasons.append(f"NaN census >= {nan_max}: buy withheld")
 
     if bool(audit.get("history_lt_200_sessions")):
-        ipo_mode = _ipo_leader_exception_mode()
-        if ipo_mode == "enforce" and _ipo_leader_precheck(audit):
+        if _ipo_leader_precheck(audit):
             out["label_ceiling"] = None
             reasons.append("short history: IPO leader precheck passed (buy allowed if risk ok)")
-        elif ipo_mode == "shadow" and _ipo_leader_precheck(audit):
-            out["buy_allowed"] = False
-            out["label_ceiling"] = "accumulate"
-            seed *= short_hist_conf
-            reasons.append("short history: would allow IPO leader buy (shadow)")
-            audit["ipo_leader_exception"] = {"mode": "shadow", "would_buy": True, "precheck": True}
         else:
             out["buy_allowed"] = False
             out["label_ceiling"] = "accumulate"
@@ -411,16 +392,13 @@ def _family_points(audit: dict[str, Any]) -> dict[str, Any]:
     next_week = _sf(audit.get("next_week_score"))
     eff = _sf(audit.get("effective_intent_score", audit.get("intent_score")))
     z = _sf(audit.get("z_score"))
-    ret1d = _sf(audit.get("return_1d_pct"))
     ret5d = _sf(audit.get("return_5d_pct"))
-    ret10d = _sf(audit.get("return_10d_pct"))
     ret21d = _sf(audit.get("return_21d_pct"))
     ret63d = _sf(audit.get("return_63d_pct"))
+    ret126d = _sf(audit.get("return_126d_pct"))
     ema_dist = _sf(audit.get("ema_200_distance_pct"))
     atr_pct = _sf(audit.get("atr_14_pct"))
     atr_pi = _sf(audit.get("atr_penalty_input"))
-    extreme_move = bool(audit.get("extreme_price_move_proxy"))
-    ret1d_weight = 0.45 if extreme_move else 1.0
 
     def add(group: str, metric: str, value: float, points: float) -> None:
         if points > 0.05:
@@ -450,31 +428,16 @@ def _family_points(audit: dict[str, Any]) -> dict[str, Any]:
     fam["z"] = min(2.0, zc)
     add("z", "z_score", z, fam["z"])
 
-    mom_mode = _medium_term_momentum_mode()
-    if mom_mode == "enforce":
-        unit = 3.0
-        r1 = _ramp(ret1d, zero_at=-1.0, full_at=-2.0, full_points=unit) * ret1d_weight
-        r5 = _ramp(ret5d, zero_at=-2.0, full_at=-6.0, full_points=unit)
-        r21 = _ramp(ret21d, zero_at=-4.0, full_at=-12.0, full_points=unit)
-        r63 = _ramp(ret63d, zero_at=-8.0, full_at=-20.0, full_points=unit)
-        fam["momentum"] = min(unit, 0.10 * r1 + 0.25 * r5 + 0.30 * r21 + 0.35 * r63)
-        add("momentum", "return_1d/5d/21d/63d_pct", ret1d, fam["momentum"])
-    else:
-        mom = 0.0
-        mom += _ramp(ret1d, zero_at=-1.0, full_at=-2.0, full_points=2.0 * ret1d_weight)
-        mom += _ramp(ret5d, zero_at=-2.0, full_at=-6.0, full_points=2.0)
-        mom += _ramp(ret10d, zero_at=-6.0, full_at=-10.0, full_points=1.5)
-        fam["momentum"] = min(3.0, mom)
-        add("momentum", "return_1d/5d/10d_pct", ret1d, fam["momentum"])
-        if mom_mode == "shadow":
-            unit = 3.0
-            r1 = _ramp(ret1d, zero_at=-1.0, full_at=-2.0, full_points=unit) * ret1d_weight
-            r5 = _ramp(ret5d, zero_at=-2.0, full_at=-6.0, full_points=unit)
-            r21 = _ramp(ret21d, zero_at=-4.0, full_at=-12.0, full_points=unit)
-            r63 = _ramp(ret63d, zero_at=-8.0, full_at=-20.0, full_points=unit)
-            audit["medium_term_momentum_shadow"] = {
-                "would_momentum": round(min(unit, 0.10 * r1 + 0.25 * r5 + 0.30 * r21 + 0.35 * r63), 4),
-            }
+    # Medium-term composite: 1d excluded (reserved for extreme_price_move_proxy / Layer A).
+    unit = 3.0
+    r5 = _ramp(ret5d, zero_at=-2.0, full_at=-6.0, full_points=unit)
+    r21 = _ramp(ret21d, zero_at=-4.0, full_at=-12.0, full_points=unit)
+    r63 = _ramp(ret63d, zero_at=-8.0, full_at=-20.0, full_points=unit)
+    r126 = _ramp(ret126d, zero_at=-12.0, full_at=-30.0, full_points=unit)
+    fam["momentum"] = min(
+        unit, 0.10 * r5 + 0.25 * r21 + 0.35 * r63 + 0.30 * r126
+    )
+    add("momentum", "return_5d/21d/63d/126d_pct", ret5d, fam["momentum"])
 
     # Below-EMA200 trend only (cap 2): ramp -2 -> -6 (over-extension is C-8)
     em = _ramp(ema_dist, zero_at=-2.0, full_at=-6.0, full_points=2.0)
@@ -685,10 +648,14 @@ def layer_d(audit: dict[str, Any], c: dict[str, Any]) -> dict[str, Any]:
                     f"strong ADX {adx:.1f} (+DI={plus_di:.1f}, -DI={minus_di:.1f}): momentum up-weighted (DI tie)"
                 )
         else:
-            out["mult_money_flow"] = float(prev_mults.get("mult_money_flow", 1.0))
-            out["mult_over_extension"] = float(prev_mults.get("mult_over_extension", 1.0))
-            out["mult_momentum"] = float(prev_mults.get("mult_momentum", 1.0))
-            out["mult_risk"] = float(prev_mults.get("mult_risk", 1.0))
+            for key, attr in (
+                ("mult_money_flow", "mult_money_flow"),
+                ("mult_over_extension", "mult_over_extension"),
+                ("mult_momentum", "mult_momentum"),
+                ("mult_risk", "mult_risk"),
+            ):
+                val = _sf(prev_mults.get(key, 1.0))
+                out[attr] = 1.0 if math.isnan(val) else val
             reasons.append(f"ADX deadband {adx:.1f}: persisting prior regime multipliers")
 
     out["adx_regime_mults"] = {
@@ -703,7 +670,7 @@ def layer_d(audit: dict[str, Any], c: dict[str, Any]) -> dict[str, Any]:
     if (
         (not math.isnan(ret1d) and ret1d > divergence_ret1d)
         and (not math.isnan(cmf) and cmf < -0.05)
-        and obv_confirm is not True
+        and obv_confirm is False
     ):
         out["divergence_bump"] = 1.0
         out["buy_confidence_cap"] = 0.5
@@ -728,8 +695,8 @@ def layer_d(audit: dict[str, Any], c: dict[str, Any]) -> dict[str, Any]:
         and (not math.isnan(ret5d) and ret5d >= -3.0)
         and (not math.isnan(ema_dist) and ema_dist >= 0.0)
     ):
-        out["mult_momentum"] = min(out["mult_momentum"], 0.5)
-        out["pullback_bull_bump"] = 0.5
+        out["mult_momentum"] *= 0.5
+        out["pullback_bull_bump"] = max(float(out["pullback_bull_bump"]), 0.5)
         reasons.append("healthy low-volume pullback: momentum penalty halved")
 
     # 4) Stale-flow OBV tiebreaker: neutral flow + over-extended + weak ADX + OBV below EMA.
@@ -874,48 +841,17 @@ def _aggregate(c: dict[str, Any], d: dict[str, Any], audit: dict[str, Any] | Non
     volatility = _sf(fam.get("volatility", 0.0)) * mult_risk
     fundamental = _sf(c.get("fundamental", 0.0))
 
-    caps_mode = _family_caps_mode()
-    if caps_mode == "enforce":
-        risk_c, capped_groups = _apply_family_caps_to_risk(
-            fam=fam,
-            momentum_scaled=momentum_scaled,
-            money_flow_bear=money_flow_bear,
-            over_extension=over_extension,
-            upside_z=upside_z,
-            volatility=volatility,
-            fundamental=0.0,
-        )
-        risk_c += fundamental
-        audit["family_caps"] = {"mode": "enforce", "groups": capped_groups}
-    else:
-        risk_c = (
-            _sf(fam.get("horizon", 0.0))
-            + _sf(fam.get("intent", 0.0))
-            + _sf(fam.get("z", 0.0))
-            + momentum_scaled
-            + _sf(fam.get("trend", 0.0))
-            + volatility
-            + money_flow_bear
-            + over_extension
-            + upside_z
-            + fundamental
-        )
-        if caps_mode == "shadow":
-            _, capped_groups = _apply_family_caps_to_risk(
-                fam=fam,
-                momentum_scaled=momentum_scaled,
-                money_flow_bear=money_flow_bear,
-                over_extension=over_extension,
-                upside_z=upside_z,
-                volatility=volatility,
-                fundamental=0.0,
-            )
-            audit["family_caps"] = {
-                "mode": "shadow",
-                "would_groups": capped_groups,
-                "would_risk_c": round(sum(capped_groups.values()) + fundamental, 4),
-                "published_risk_c": round(risk_c, 4),
-            }
+    risk_c, capped_groups = _apply_family_caps_to_risk(
+        fam=fam,
+        momentum_scaled=momentum_scaled,
+        money_flow_bear=money_flow_bear,
+        over_extension=over_extension,
+        upside_z=upside_z,
+        volatility=volatility,
+        fundamental=0.0,
+    )
+    risk_c += fundamental
+    audit["family_caps"] = {"groups": capped_groups}
 
     risk_c *= layer_c_mult
     risk_c += _sf(d.get("divergence_bump", 0.0))
@@ -1063,18 +999,38 @@ def _prior_label_from_audit(audit: dict[str, Any]) -> str | None:
     return p if p else None
 
 
+def _recovery_allowed_from_defensive(
+    audit: dict[str, Any] | None, risk_net: float
+) -> bool:
+    if audit is None:
+        return False
+    if audit.get("tier2_recovery_deescalation"):
+        return True
+    return _recovery_tape_ok(audit, risk_net, rally=True) or _recovery_tape_ok(
+        audit, risk_net, rally=False
+    )
+
+
 def _apply_prior_defensive_deadband(
-    label: str, risk_net: float, prior_label: str | None
+    label: str,
+    risk_net: float,
+    prior_label: str | None,
+    *,
+    audit: dict[str, Any] | None = None,
 ) -> str:
     """Asymmetric entry deadband after trim/exit-risk: block constructive re-entry."""
     if prior_label not in ("trim", "exit-risk"):
         return label
     buy_max = _buy_risk_ceiling()
     trim_min = _trim_risk_floor()
-    if risk_net >= buy_max:
-        if label in ("buy", "accumulate"):
-            return "hold"
-    if buy_max <= risk_net < trim_min:
+    recovery_ok = _recovery_allowed_from_defensive(audit, risk_net)
+    if label == "buy" and risk_net >= buy_max:
+        return "hold"
+    if label == "accumulate" and risk_net >= buy_max:
+        if buy_max <= risk_net < trim_min and recovery_ok:
+            return "accumulate"
+        return "hold"
+    if buy_max <= risk_net < trim_min and not recovery_ok:
         return "hold"
     return label
 
@@ -1124,7 +1080,7 @@ def _map_label(
             label = "accumulate"
         else:
             label = "hold"
-    return _apply_prior_defensive_deadband(label, risk_net, prior_label)
+    return _apply_prior_defensive_deadband(label, risk_net, prior_label, audit=audit)
 
 
 def _apply_tier2_forced(
@@ -1645,11 +1601,22 @@ def _apply_hysteresis(
 
     # From defensive labels: require strict buy ceiling before constructive upgrade.
     if prior_label in ("trim", "exit-risk") and label in ("hold", "accumulate", "buy"):
+        if label == "buy" and risk_net >= buy_max:
+            return "hold", True
         if buy_max <= risk_net < trim_min:
+            if label in ("buy", "accumulate") and not recovery_ok:
+                return "hold", True
+            if label == "buy":
+                return "hold", True
+            if not recovery_ok:
+                return prior_label, True
+            return label, False
+        if risk_net >= buy_max:
             if label in ("buy", "accumulate"):
                 return "hold", True
-        if risk_net >= buy_max:
-            return prior_label, True
+            if not recovery_ok:
+                return prior_label, True
+            return label, False
         if recovery_ok:
             return label, False
         return prior_label, True
@@ -1741,17 +1708,10 @@ def evaluate_signal_v2(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
     prior_label = _prior_label_from_audit(audit)
     label = _map_label(risk_net, gate, audit, a, prior_label=prior_label)
     if bool(audit.get("history_lt_200_sessions")):
-        ipo_mode = _ipo_leader_exception_mode()
-        if ipo_mode == "enforce" and _ipo_leader_buy_ok(audit, risk_net) and gate.get("clean_buy"):
+        if _ipo_leader_buy_ok(audit, risk_net) and gate.get("clean_buy"):
             label = "buy"
             a["label_ceiling"] = None
-            audit["ipo_leader_exception"] = {"mode": "enforce", "applied_buy": True}
-        elif ipo_mode == "shadow" and _ipo_leader_buy_ok(audit, risk_net):
-            audit["ipo_leader_exception"] = {
-                "mode": "shadow",
-                "would_buy": True,
-                "published_label": label,
-            }
+            audit["ipo_leader_exception"] = {"applied_buy": True}
         elif label in ("buy", "accumulate") and not _short_history_accumulate_ok(audit, risk_net):
             label = "hold"
     # STEP 2b: over-extension ceiling (shadow-first). Compute the would-be cap always;
@@ -1814,7 +1774,7 @@ def evaluate_signal_v2(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
         staleflow_downgrade=bool(d.get("staleflow_downgrade")),
     )
     label = _apply_tier2_forced(label, b.get("forced_label"), forced_label)
-    label = _apply_prior_defensive_deadband(label, risk_net, prior_label)
+    label = _apply_prior_defensive_deadband(label, risk_net, prior_label, audit=audit)
 
     bypass = bool(b.get("bypass_hysteresis"))
     label, _hyst = _apply_hysteresis(
