@@ -29,6 +29,13 @@ from tape_metrics import percentile_rank_0_100
 logger = logging.getLogger(__name__)
 
 _SECTOR_RELATIVE_RANK_WEIGHTS = (0.30, 0.25, 0.20, 0.15, 0.10)
+_SECTOR_RELATIVE_RANK_FEATURE_KEYS = (
+    "sector_pctile_return_1m",
+    "sector_pctile_return_3m",
+    "sector_pctile_rel_strength",
+    "sector_pctile_intent",
+    "sector_pctile_next_week",
+)
 _SECTOR_RELATIVE_MOMENTUM_WEIGHTS = (0.35, 0.25, 0.20, 0.10, 0.10)
 IST = ZoneInfo("Asia/Kolkata")
 _NSE_HOME_URL = "https://www.nseindia.com"
@@ -2055,6 +2062,40 @@ def compute_sector_relative_rank_score(
     )
 
 
+def compute_sector_relative_rank_components(
+    *,
+    sector_pctile_return_1m: float,
+    sector_pctile_return_3m: float,
+    sector_pctile_rel_strength: float,
+    sector_pctile_intent: float,
+    sector_pctile_next_week: float,
+) -> dict[str, Any]:
+    """Expose weighted sector-relative rank terms for ranking meta transparency."""
+    raw_inputs = (
+        sector_pctile_return_1m,
+        sector_pctile_return_3m,
+        sector_pctile_rel_strength,
+        sector_pctile_intent,
+        sector_pctile_next_week,
+    )
+    components: dict[str, dict[str, float]] = {}
+    score = 0.0
+    for key, weight, raw in zip(_SECTOR_RELATIVE_RANK_FEATURE_KEYS, _SECTOR_RELATIVE_RANK_WEIGHTS, raw_inputs):
+        pctile = 50.0 if math.isnan(_safe_float(raw)) else _clamp(float(raw), 0.0, 100.0)
+        weighted = weight * pctile
+        score += weighted
+        components[key] = {
+            "pctile": round(pctile, 4),
+            "weight": weight,
+            "weighted": round(weighted, 4),
+        }
+    return {
+        "score": round(_clamp(score, 0.0, 100.0), 4),
+        "weights": _SECTOR_RELATIVE_RANK_WEIGHTS,
+        "components": components,
+    }
+
+
 def compute_sector_relative_momentum_score(
     *,
     sector_pctile_return_1m: float,
@@ -2346,19 +2387,34 @@ def _score_from_features(
     percentile_1w: float = 50.0,
     percentile_1m: float = 50.0,
     sector_relative_rank_score: float | None = None,
+    sector_pctile_return_1m: float | None = None,
+    sector_pctile_return_3m: float | None = None,
+    sector_pctile_rel_strength: float | None = None,
+    sector_pctile_intent: float | None = None,
+    sector_pctile_next_week: float | None = None,
 ) -> float:
     ref_1w = _env_float("TITAN_RANK_PCTILE_1W_REF", _PCTILE_1W_REF_RETURN)
     ref_1m = _env_float("TITAN_RANK_PCTILE_1M_REF", _PCTILE_1M_REF_RETURN)
-    pct_1w = 50.0 if math.isnan(percentile_1w) else percentile_1w
-    pct_1m = 50.0 if math.isnan(percentile_1m) else percentile_1m
-    ret_1w_term = 1.1 * (pct_1w / 100.0) * ref_1w
-    ret_1m_term = 0.45 * (pct_1m / 100.0) * ref_1m
     absorption_term = _absorption_term(absorption, session_move)["value"]
     ref_total = _env_float("TITAN_SRM_REF_POINTS", ref_1w + ref_1m)
-    if sector_relative_rank_score is not None:
-        momentum_term = (float(sector_relative_rank_score) / 100.0) * ref_total
-    else:
-        momentum_term = ret_1w_term + ret_1m_term
+    srr = sector_relative_rank_score
+    if srr is None:
+        srr = compute_sector_relative_rank_score(
+            sector_pctile_return_1m=sector_pctile_return_1m
+            if sector_pctile_return_1m is not None
+            else percentile_1m,
+            sector_pctile_return_3m=sector_pctile_return_3m
+            if sector_pctile_return_3m is not None
+            else 50.0,
+            sector_pctile_rel_strength=sector_pctile_rel_strength
+            if sector_pctile_rel_strength is not None
+            else 50.0,
+            sector_pctile_intent=sector_pctile_intent if sector_pctile_intent is not None else 50.0,
+            sector_pctile_next_week=sector_pctile_next_week
+            if sector_pctile_next_week is not None
+            else 50.0,
+        )
+    momentum_term = (float(srr) / 100.0) * ref_total
     score = _cap_bias(bucket) + momentum_term + absorption_term
     # Fix A: down-rank statistically extended winners (smooth, env-tunable; STEP 2a
     # gates the penalty behind momentum/regime confirmation).
@@ -3487,6 +3543,7 @@ def build_sector_rankings(
         }
         srm_score = compute_sector_relative_momentum_score(**pct_inputs)
         srr_score = compute_sector_relative_rank_score(**pct_inputs)
+        srr_components = compute_sector_relative_rank_components(**pct_inputs)
         overext = _overextension_penalty(
             ret_1w=ret_1w,
             ret_1m=ret_1m,
@@ -3508,6 +3565,11 @@ def build_sector_rankings(
             percentile_1w=pct_1w,
             percentile_1m=pct_1m,
             sector_relative_rank_score=srr_score,
+            sector_pctile_return_1m=pct_1m,
+            sector_pctile_return_3m=_safe_float(p.get("percentile_3m")),
+            sector_pctile_rel_strength=_safe_float(p.get("percentile_rel_strength")),
+            sector_pctile_intent=_safe_float(p.get("percentile_intent")),
+            sector_pctile_next_week=_safe_float(p.get("percentile_next_week")),
         )
         pre_gate_score = round(base_score + blend_points, 4)
         v2_signal = _resolve_v2_signal(symbol_u, eod_ctx)
@@ -3584,6 +3646,7 @@ def build_sector_rankings(
                     ),
                     "sector_relative_momentum_score": srm_score,
                     "sector_relative_rank_score": srr_score,
+                    "sector_relative_rank_components": srr_components,
                     "overextension_penalty": overext.get("penalty", 0.0),
                     "overextension_components": overext.get("components", {}),
                     "absorption_term": absorption_bd,

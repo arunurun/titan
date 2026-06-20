@@ -378,6 +378,7 @@ _SYMBOL_FEATURE_OPTIONAL_COLUMNS = frozenset(
         "signal_confidence",
         "technical_confidence",
         "predicted_probability",
+        "position_confidence",
         "position_score",
         "signal_reason_trace",
         "signal_engine_version",
@@ -848,7 +849,8 @@ def build_symbol_daily_feature(
         "sell_signal_risk_score": audit.get("sell_signal_risk_score"),
         "technical_confidence": audit.get("technical_confidence"),
         "predicted_probability": audit.get("predicted_probability"),
-        "position_score": audit.get("position_score"),
+        "position_confidence": audit.get("position_confidence", audit.get("position_score")),
+        "position_score": audit.get("position_score", audit.get("position_confidence")),
         "market_regime": audit.get("market_regime"),
         "market_regime_label": (audit.get("market_regime") or {}).get("regime")
         if isinstance(audit.get("market_regime"), dict)

@@ -67,14 +67,38 @@ def test_calibration_preserves_technical_confidence():
     assert audit["predicted_probability"] == 0.48
     assert audit["predicted_success_probability"] == 0.48
     assert audit["signal_probability"] == 0.48
-    assert audit["position_score"] == 0.6 * 0.48 + 0.4 * 0.55
+    assert audit["position_confidence"] == 0.6 * 0.48 + 0.4 * 0.55
+    assert audit["position_score"] == audit["position_confidence"]
     assert ProbabilityCalibrator().predict(70.0) == 0.48
 
 
+def test_enforce_mode_never_overwrites_signal_confidence():
+    """Production enforce path must leave engine signal_confidence untouched."""
+    from probability_calibration import IsotonicCalibrator, ProbabilityCalibrator, apply_probability_calibration
+
+    original_conf = 0.73
+    audit = {"next_week_score": 70.0, "signal_confidence": original_conf}
+    apply_probability_calibration(audit)
+    assert audit["signal_confidence"] == original_conf
+    assert audit["technical_confidence"] == original_conf
+    assert audit["predicted_probability"] != original_conf
+
+    rows, outcomes = _labeled_cohort(35)
+    iso = IsotonicCalibrator(min_train=30)
+    iso.fit_walk_forward(rows, outcomes)
+    cal = ProbabilityCalibrator(isotonic=iso)
+    audit_iso = dict(rows[20])
+    audit_iso["signal_confidence"] = original_conf
+    apply_probability_calibration(audit_iso, calibrator=cal)
+    assert audit_iso["signal_confidence"] == original_conf
+    assert audit_iso["technical_confidence"] == original_conf
+
+
 def test_compute_position_score():
-    from probability_calibration import compute_position_score
+    from probability_calibration import compute_position_confidence, compute_position_score
 
     assert compute_position_score(0.6, 0.4) == 0.52
+    assert compute_position_confidence(0.6, 0.4) == 0.52
     assert compute_position_score(None, 0.7) == 0.7
 
 

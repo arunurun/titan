@@ -4,8 +4,9 @@ Walk-forward isotonic regression on labeled cohort features maps audit inputs to
 ``predicted_probability``. When labeled data is insufficient, bucket interpolation
 on ``next_week_score`` / intent is used as fallback.
 
-``technical_confidence`` from the signal engine is preserved separately on
-``signal_confidence``; it is not overwritten by calibration output.
+``signal_confidence`` from the engine is copied to ``technical_confidence`` and
+never overwritten; calibration writes ``predicted_probability`` and
+``position_confidence`` (0.6×P + 0.4×technical).
 """
 
 from __future__ import annotations
@@ -41,6 +42,11 @@ _ISOTONIC_FEATURE_KEYS: tuple[str, ...] = (
 )
 
 MIN_ISOTONIC_SAMPLES: int = 30
+
+# Phase 2 (future): when labeled cohorts are large enough per slice, replace the
+# composite-score PAV isotonic fit with sklearn IsotonicRegression on the full
+# feature vector (sector, regime, risk_net, intent, next_week, CMF, VPR) without
+# collapsing to a scalar. Until then, bucket / composite isotonic remain production.
 
 _REGIME_SCORE_ADJ: dict[str, float] = {
     "STRONG_BULL": 3.0,
@@ -209,7 +215,10 @@ def compute_position_score(
     prob_weight: float = 0.6,
     conf_weight: float = 0.4,
 ) -> float | None:
-    """Blend calibrated probability with engine technical confidence for sizing."""
+    """Blend calibrated probability with engine technical confidence for sizing.
+
+    Canonical audit field: ``position_confidence`` (``position_score`` kept as alias).
+    """
     p = _sf(predicted_probability) if predicted_probability is not None else float("nan")
     c = _sf(technical_confidence) if technical_confidence is not None else float("nan")
     if math.isnan(p) and math.isnan(c):
@@ -411,8 +420,8 @@ def apply_probability_calibration(
     score = _sf(audit.get("next_week_score", audit.get("effective_intent_score")))
     sector = audit.get("sector") or audit.get("sector_key")
     label = str(audit.get("action_signal") or audit.get("sell_signal") or "")
+    # Capture engine confidence before calibration; never overwrite signal_confidence.
     tech_conf = _sf(audit.get("signal_confidence"))
-
     if not math.isnan(tech_conf):
         audit["technical_confidence"] = round(tech_conf, 3)
 
@@ -443,10 +452,16 @@ def apply_probability_calibration(
 
     pos = compute_position_score(audit["predicted_probability"], audit.get("technical_confidence"))
     if pos is not None:
-        audit["position_score"] = pos
+        audit["position_confidence"] = pos
+        audit["position_score"] = pos  # backward-compatible alias
+        out["position_confidence"] = pos
         out["position_score"] = pos
 
     return out
+
+
+# Alias for callers expecting the canonical sizing field name.
+compute_position_confidence = compute_position_score
 
 
 def brier_score(predictions: list[float], outcomes: list[int]) -> float:

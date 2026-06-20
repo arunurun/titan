@@ -655,9 +655,9 @@ production logic (no feature flags).
 
 | Component | Module | Behaviour (always-on) |
 |---|---|---|
-| Sector-relative ranking | `sector_priority.py` | Weighted sector-relative rank score drives momentum term in `rank_score`. |
+| Sector-relative ranking | `sector_priority.py` | Weighted sector-relative rank score (0.30×1m + 0.25×3m + 0.20×rel_strength + 0.15×intent + 0.10×next_week) drives momentum term in `rank_score`; components exposed in ranking meta. |
 | Medium-term momentum | `signal_v2.py`, `sector_audit.py` | `return_21d/63d/126d_pct` in audit; Layer-C momentum bear uses weighted 5d/21d/63d/126d (10/25/35/30%) plus sector-relative strength (`rel_return_20d_vs_nifty_pct`); horizon cap reduced to 2.0; 1d excluded. |
-| Probability calibration | `probability_calibration.py` | Walk-forward **isotonic regression** on composite features (`next_week_score`, intent, `risk_net`, sector, `market_regime`, VPR, CMF) writes `predicted_probability` when labeled cohort ≥30; **bucket interpolation fallback** when insufficient data; preserves engine confidence as `technical_confidence` (does **not** overwrite `signal_confidence`); `position_score = 0.6×P + 0.4×technical_confidence`. Always-on (no flags). |
+| Probability calibration | `probability_calibration.py` | Walk-forward **isotonic regression** on composite features (`next_week_score`, intent, `risk_net`, sector, `market_regime`, VPR, CMF) writes `predicted_probability` when labeled cohort ≥30; **bucket interpolation fallback** when insufficient data; preserves engine confidence as `technical_confidence` (does **not** overwrite `signal_confidence`); `position_confidence = 0.6×P + 0.4×technical_confidence` (`position_score` alias). Always-on (no flags). |
 | Family risk caps | `signal_v2.py` | PRICE (4.0) / FLOW (2.0) / EXTENSION (2.0) / VOLATILITY (2.0) caps in `_aggregate` before `risk_net`; `audit["family_caps"]` exposes limits + uncapped groups. |
 | IPO leader exception | `signal_v2.py` | Short history may **buy** when intent≥75, nw≥70, VPR≥2, CMF>0.05, risk_net<2, not thin liquidity; else accumulate ceiling. |
 | Layer D audit messages | `signal_v2.py` | `strong ADX X (+DI=…, -DI=…)` format (always on — no flag). |
@@ -715,7 +715,9 @@ expanding-window folds (min 30 train rows per fold), then fits on the full label
 
 **Confidence split.** `predicted_probability` comes from isotonic (when trained) or bucket;
 `technical_confidence` mirrors `signal_confidence` for sizing via
-`position_score = 0.6 * predicted_probability + 0.4 * technical_confidence`.
+`position_confidence = 0.6 * predicted_probability + 0.4 * technical_confidence`
+(`position_score` retained as alias). Phase 2 will move to sklearn
+`IsotonicRegression` on the full feature vector when per-slice sample counts are sufficient.
 
 ---
 
