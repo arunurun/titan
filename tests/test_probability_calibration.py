@@ -32,7 +32,7 @@ def test_calibration_improves_brier_vs_raw_confidence():
 def test_calibration_preserves_technical_confidence():
     from probability_calibration import ProbabilityCalibrator, apply_probability_calibration
 
-    audit = {"next_week_score": 67.0, "signal_confidence": 0.55}
+    audit = {"next_week_score": 70.0, "signal_confidence": 0.55}
     out = apply_probability_calibration(audit)
     assert out["enabled"] is True
     assert audit["technical_confidence"] == 0.55
@@ -40,7 +40,28 @@ def test_calibration_preserves_technical_confidence():
     assert audit["predicted_probability"] == 0.48
     assert audit["predicted_success_probability"] == 0.48
     assert audit["signal_probability"] == 0.48
-    assert ProbabilityCalibrator().predict(67.0) == 0.48
+    assert audit["position_score"] == 0.6 * 0.48 + 0.4 * 0.55
+    assert ProbabilityCalibrator().predict(70.0) == 0.48
+
+
+def test_compute_position_score():
+    from probability_calibration import compute_position_score
+
+    assert compute_position_score(0.6, 0.4) == 0.52
+    assert compute_position_score(None, 0.7) == 0.7
+
+
+def test_isotonic_stub_not_trained():
+    from probability_calibration import IsotonicCalibrator
+
+    cal = IsotonicCalibrator()
+    assert cal.feature_keys
+    try:
+        cal.predict({})
+    except NotImplementedError:
+        pass
+    else:
+        raise AssertionError("expected NotImplementedError")
 
 
 def test_exit_risk_bypass_returns_absolute_confidence():

@@ -14,12 +14,27 @@ from typing import Any
 
 _DEFAULT_BUCKETS: tuple[tuple[float, float, float], ...] = (
     (0.0, 45.0, 0.28),
-    (45.0, 52.0, 0.32),
-    (52.0, 58.0, 0.36),
-    (58.0, 65.0, 0.42),
-    (65.0, 72.0, 0.48),
-    (72.0, 80.0, 0.55),
+    (45.0, 49.0, 0.30),
+    (49.0, 52.0, 0.32),
+    (52.0, 55.0, 0.34),
+    (55.0, 58.0, 0.36),
+    (58.0, 62.0, 0.39),
+    (62.0, 65.0, 0.42),
+    (65.0, 68.0, 0.45),
+    (68.0, 72.0, 0.48),
+    (72.0, 76.0, 0.52),
+    (76.0, 80.0, 0.55),
     (80.0, 100.0, 0.62),
+)
+
+_ISOTONIC_FEATURE_KEYS: tuple[str, ...] = (
+    "next_week_score",
+    "effective_intent_score",
+    "risk_net",
+    "sector",
+    "market_regime",
+    "volume_participation_ratio",
+    "cmf_20",
 )
 
 
@@ -44,6 +59,25 @@ def _clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
 
+def compute_position_score(
+    predicted_probability: float | None,
+    technical_confidence: float | None,
+    *,
+    prob_weight: float = 0.6,
+    conf_weight: float = 0.4,
+) -> float | None:
+    """Blend calibrated probability with engine technical confidence for sizing."""
+    p = _sf(predicted_probability) if predicted_probability is not None else float("nan")
+    c = _sf(technical_confidence) if technical_confidence is not None else float("nan")
+    if math.isnan(p) and math.isnan(c):
+        return None
+    if math.isnan(p):
+        return round(_clamp(c, 0.0, 1.0), 4)
+    if math.isnan(c):
+        return round(_clamp(p, 0.0, 1.0), 4)
+    return round(_clamp(prob_weight * p + conf_weight * c, 0.0, 1.0), 4)
+
+
 def calibrate_probability(
     score: float,
     *,
@@ -65,6 +99,25 @@ def calibrate_probability(
         if lo <= s < hi or (hi == table[-1][1] and s >= lo):
             return round(_clamp(prob + sector_adj, 0.0, 1.0), 4)
     return round(_clamp(table[-1][2] + sector_adj, 0.0, 1.0), 4)
+
+
+class IsotonicCalibrator:
+    """Phase 2 stub: sklearn IsotonicRegression on walk-forward labeled cohort."""
+
+    feature_keys: tuple[str, ...] = _ISOTONIC_FEATURE_KEYS
+
+    def __init__(self) -> None:
+        self._fitted = False
+
+    def fit(self, rows: list[dict[str, Any]], outcomes: list[int]) -> None:
+        _ = rows, outcomes
+        raise NotImplementedError("IsotonicCalibrator.fit pending labeled cohort (Phase 2)")
+
+    def predict(self, audit: dict[str, Any]) -> float:
+        if not self._fitted:
+            raise NotImplementedError("IsotonicCalibrator not trained; use bucket calibrator")
+        _ = audit
+        return float("nan")
 
 
 class ProbabilityCalibrator:
@@ -119,11 +172,13 @@ def apply_probability_calibration(
     out = {
         "enabled": True,
         "mode": "enforce",
+        "method": "bucket",
         "input_score": None if math.isnan(score) else round(score, 2),
         "predicted_probability": None if math.isnan(prob) else prob,
         "predicted_success_probability": None if math.isnan(prob) else prob,
         "signal_probability": None if math.isnan(prob) else prob,
         "technical_confidence": audit.get("technical_confidence"),
+        "isotonic_phase2_features": list(_ISOTONIC_FEATURE_KEYS),
         "exit_risk_bypass": prob == 1.0 and (
             (audit.get("forced_label") or (audit.get("signal_reason_trace") or {}).get("forced_label"))
             == "exit-risk"
@@ -133,6 +188,11 @@ def apply_probability_calibration(
     audit["predicted_probability"] = prob if not math.isnan(prob) else None
     audit["predicted_success_probability"] = audit["predicted_probability"]
     audit["signal_probability"] = audit["predicted_probability"]
+
+    pos = compute_position_score(audit["predicted_probability"], audit.get("technical_confidence"))
+    if pos is not None:
+        audit["position_score"] = pos
+        out["position_score"] = pos
 
     return out
 
