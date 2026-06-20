@@ -657,7 +657,7 @@ production logic (no feature flags).
 |---|---|---|
 | Sector-relative ranking | `sector_priority.py` | Weighted sector-relative rank score drives momentum term in `rank_score`. |
 | Medium-term momentum | `signal_v2.py`, `sector_audit.py` | `return_21d/63d/126d_pct` in audit; Layer-C momentum bear uses weighted 5d/21d/63d/126d (10/25/35/30%) plus sector-relative strength (`rel_return_20d_vs_nifty_pct`); horizon cap reduced to 2.0; 1d excluded. |
-| Probability calibration | `probability_calibration.py` | Bucket interpolation writes `predicted_probability`; preserves engine confidence as `technical_confidence` (does **not** overwrite `signal_confidence`); `position_score = 0.6×P + 0.4×technical_confidence`; finer intermediate buckets; `IsotonicCalibrator` stub for Phase 2. |
+| Probability calibration | `probability_calibration.py` | Walk-forward **isotonic regression** on composite features (`next_week_score`, intent, `risk_net`, sector, `market_regime`, VPR, CMF) writes `predicted_probability` when labeled cohort ≥30; **bucket interpolation fallback** when insufficient data; preserves engine confidence as `technical_confidence` (does **not** overwrite `signal_confidence`); `position_score = 0.6×P + 0.4×technical_confidence`. Always-on (no flags). |
 | Family risk caps | `signal_v2.py` | PRICE (4.0) / FLOW (2.0) / EXTENSION (2.0) / VOLATILITY (2.0) caps in `_aggregate` before `risk_net`; `audit["family_caps"]` exposes limits + uncapped groups. |
 | IPO leader exception | `signal_v2.py` | Short history may **buy** when intent≥75, nw≥70, VPR≥2, CMF>0.05, risk_net<2, not thin liquidity; else accumulate ceiling. |
 | Layer D audit messages | `signal_v2.py` | `strong ADX X (+DI=…, -DI=…)` format (always on — no flag). |
@@ -685,15 +685,16 @@ operational rollout; default shadow leaves published ranks and action labels unc
 | Analysis store | `TITAN_ENABLE_ANALYSIS_STORE` | Persistence toggle (not core signal logic) |
 
 **Always-on Phase 1 (no flags):** sector-relative ranking, medium-term momentum (5d/21d/63d/126d),
-probability calibration (bucket → `predicted_probability`, `technical_confidence` preserved),
-family risk caps, IPO leader exception, Layer D healthy-pullback halving
-(`mult_momentum *= 0.5`). `compute_sector_relative_momentum_score()` (2de00ac weights) is always
-computed in ranking meta for analytics but is distinct from the rank-score path.
+probability calibration (isotonic with bucket fallback → `predicted_probability`,
+`technical_confidence` preserved), family risk caps, IPO leader exception, Layer D healthy-pullback
+halving (`mult_momentum *= 0.5`). `compute_sector_relative_momentum_score()` (2de00ac weights) is
+always computed in ranking meta for analytics but is distinct from the rank-score path.
 
-### Phase 2 calibration plan (isotonic regression)
+### Phase 2 calibration (isotonic regression — implemented)
 
-Production today uses finer bucket interpolation in `probability_calibration.py`. Phase 2 replaces
-buckets with walk-forward **IsotonicRegression** once labeled cohort size is sufficient:
+Production uses walk-forward **isotonic regression** in `probability_calibration.py` when a labeled
+cohort of at least **30** matured +5d outcomes is available; otherwise bucket interpolation on
+`next_week_score` / intent is the automatic fallback. No feature flags — calibration is always-on.
 
 | Feature | Audit field |
 |---|---|
@@ -705,9 +706,16 @@ buckets with walk-forward **IsotonicRegression** once labeled cohort size is suf
 | Volume participation | `volume_participation_ratio` |
 | Money flow | `cmf_20` |
 
-Stub: `IsotonicCalibrator` in `probability_calibration.py` (raises until trained). Until then,
-`position_score = 0.6 * predicted_probability + 0.4 * technical_confidence` blends calibrated P(up)
-with engine corroborator confidence for sizing / audit transparency.
+**Composite score.** Features are combined into a single calibration input (score + intent blend,
+risk penalty, sector/regime/VPR/CMF adjustments) before PAV isotonic fit/predict.
+
+**Walk-forward.** `IsotonicCalibrator.fit_walk_forward()` sorts rows by `trade_date`, validates
+expanding-window folds (min 30 train rows per fold), then fits on the full labeled cohort.
+`ProbabilityCalibrator.calibration_method()` reports `"isotonic"` or `"bucket"` on each audit.
+
+**Confidence split.** `predicted_probability` comes from isotonic (when trained) or bucket;
+`technical_confidence` mirrors `signal_confidence` for sizing via
+`position_score = 0.6 * predicted_probability + 0.4 * technical_confidence`.
 
 ---
 
