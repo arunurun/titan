@@ -132,26 +132,19 @@ _MOMENTUM_SECTORS = frozenset({
 })
 
 
-def _sector_aware_tier2_enabled() -> bool:
-    return _env_truthy("TITAN_SECTOR_AWARE_TIER2", default=False)
-
-
 def _tier2_thresholds(audit: dict[str, Any]) -> tuple[int, int]:
     trim = _env_int("TITAN_SIGV2_B_TIER2_TRIM_COUNT", 2)
     exit_c = _env_int("TITAN_SIGV2_B_TIER2_EXIT_COUNT", 3)
-    if _sector_aware_tier2_enabled():
-        sector = str(audit.get("sector_key") or audit.get("sector") or "").strip().lower()
-        if sector in _MOMENTUM_SECTORS:
-            trim = 3
-            exit_c = 4
+    sector = str(audit.get("sector_key") or audit.get("sector") or "").strip().lower()
+    if sector in _MOMENTUM_SECTORS:
+        trim = 3
+        exit_c = 4
     return trim, exit_c
 
 
 def _overext_counts_as_corroborator(audit: dict[str, Any], c: dict[str, Any]) -> bool:
     if not bool(c.get("over_extension_hot")):
         return False
-    if not _sector_aware_tier2_enabled():
-        return True
     cmf = _sf(audit.get("cmf_20"))
     distribution = (not math.isnan(cmf)) and cmf < -0.05
     rel5 = _sf(audit.get("rel_return_5d_vs_nifty_pct"))

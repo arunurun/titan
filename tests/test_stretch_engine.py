@@ -5,7 +5,6 @@ from __future__ import annotations
 import math
 
 import pandas as pd
-import pytest
 
 
 def _rising_df(n: int = 120) -> pd.DataFrame:
@@ -42,22 +41,18 @@ def test_parabolic_move_detected():
     assert comp > 4.0
 
 
-def test_legacy_ema200_when_flag_off(monkeypatch):
-    from stretch_engine import effective_stretch_atr, new_stretch_engine_enabled
+def test_composite_preferred_over_ema200():
+    from stretch_engine import effective_stretch_atr
 
-    monkeypatch.delenv("TITAN_NEW_STRETCH_ENGINE", raising=False)
-    assert not new_stretch_engine_enabled()
-    audit = {"ema200_stretch_atr": 4.2, "stretch_composite": 1.0}
-    assert effective_stretch_atr(audit) == 4.2
-
-
-def test_composite_used_when_flag_on(monkeypatch):
-    from stretch_engine import effective_stretch_atr, new_stretch_engine_enabled
-
-    monkeypatch.setenv("TITAN_NEW_STRETCH_ENGINE", "true")
-    assert new_stretch_engine_enabled()
     audit = {"ema200_stretch_atr": 8.0, "stretch_composite": 2.5}
     assert effective_stretch_atr(audit) == 2.5
+
+
+def test_falls_back_to_ema200_when_composite_missing():
+    from stretch_engine import effective_stretch_atr
+
+    audit = {"ema200_stretch_atr": 4.2}
+    assert effective_stretch_atr(audit) == 4.2
 
 
 def test_compute_stretch_metrics_from_df():

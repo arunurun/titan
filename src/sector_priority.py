@@ -1971,18 +1971,6 @@ def _load_previous_market_caps(
     return out
 
 
-def _env_truthy(name: str, *, default: bool = False) -> bool:
-    raw = (str(os.environ.get(name, "")) or "").strip().lower()
-    if raw == "":
-        return default
-    return raw in ("1", "true", "yes", "on")
-
-
-def use_sector_relative_ranking() -> bool:
-    """When true, rank_score uses ``compute_sector_relative_momentum_score`` instead of 1w/1m terms."""
-    return _env_truthy("TITAN_USE_SECTOR_RELATIVE_RANKING", default=False)
-
-
 def compute_sector_relative_momentum_score(
     *,
     sector_pctile_return_1m: float,
@@ -2287,7 +2275,7 @@ def _score_from_features(
     ret_1w_term = 1.1 * (pct_1w / 100.0) * ref_1w
     ret_1m_term = 0.45 * (pct_1m / 100.0) * ref_1m
     absorption_term = _absorption_term(absorption, session_move)["value"]
-    if use_sector_relative_ranking() and sector_relative_score is not None:
+    if sector_relative_score is not None:
         ref_total = _env_float("TITAN_SRM_REF_POINTS", ref_1w + ref_1m)
         momentum_term = (float(sector_relative_score) / 100.0) * ref_total
     else:
@@ -3318,15 +3306,13 @@ def build_sector_rankings(
         bucket = p["bucket"]
         pct_1w = _safe_float(p.get("percentile_1w"))
         pct_1m = _safe_float(p.get("percentile_1m"))
-        srm_score: float | None = None
-        if use_sector_relative_ranking():
-            srm_score = compute_sector_relative_momentum_score(
-                sector_pctile_return_1m=pct_1m,
-                sector_pctile_return_3m=_safe_float(p.get("percentile_3m")),
-                sector_pctile_rel_strength=_safe_float(p.get("percentile_rel_strength")),
-                sector_pctile_intent=_safe_float(p.get("percentile_intent")),
-                sector_pctile_next_week=_safe_float(p.get("percentile_next_week")),
-            )
+        srm_score = compute_sector_relative_momentum_score(
+            sector_pctile_return_1m=pct_1m,
+            sector_pctile_return_3m=_safe_float(p.get("percentile_3m")),
+            sector_pctile_rel_strength=_safe_float(p.get("percentile_rel_strength")),
+            sector_pctile_intent=_safe_float(p.get("percentile_intent")),
+            sector_pctile_next_week=_safe_float(p.get("percentile_next_week")),
+        )
         overext = _overextension_penalty(
             ret_1w=ret_1w,
             ret_1m=ret_1m,
@@ -3423,7 +3409,6 @@ def build_sector_rankings(
                         _safe_float(p.get("percentile_next_week")), digits=2
                     ),
                     "sector_relative_momentum_score": srm_score,
-                    "sector_relative_ranking": use_sector_relative_ranking(),
                     "overextension_penalty": overext.get("penalty", 0.0),
                     "overextension_components": overext.get("components", {}),
                     "absorption_term": absorption_bd,

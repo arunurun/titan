@@ -1,29 +1,17 @@
 """Multi-horizon stretch metrics (Phase 5).
 
-When ``TITAN_NEW_STRETCH_ENGINE=True``, composite stretch replaces EMA200-only stretch
-in over-extension scoring paths. Legacy behaviour preserved when flag is off.
+Composite stretch (0.5×ema20 + 0.3×ema50 + 0.2×52w) is used in over-extension scoring;
+falls back to EMA200 stretch when composite is unavailable.
 """
 
 from __future__ import annotations
 
 import math
-import os
 from typing import Any
 
 import pandas as pd
 
 from titan_engine import calculate_atr, calculate_ema
-
-
-def _env_truthy(name: str, *, default: bool = False) -> bool:
-    raw = os.environ.get(name, "").strip().lower()
-    if raw == "":
-        return default
-    return raw in ("1", "true", "yes", "on")
-
-
-def new_stretch_engine_enabled() -> bool:
-    return _env_truthy("TITAN_NEW_STRETCH_ENGINE", default=False)
 
 
 def _sf(v: Any) -> float:
@@ -114,9 +102,8 @@ def compute_stretch_composite(
 
 
 def effective_stretch_atr(audit: dict[str, Any]) -> float:
-    """Return stretch input for over-extension scoring (legacy or composite)."""
-    if new_stretch_engine_enabled():
-        comp = _sf(audit.get("stretch_composite"))
-        if not math.isnan(comp):
-            return comp
+    """Return stretch input for over-extension scoring (composite, else EMA200)."""
+    comp = _sf(audit.get("stretch_composite"))
+    if not math.isnan(comp):
+        return comp
     return _sf(audit.get("ema200_stretch_atr"))

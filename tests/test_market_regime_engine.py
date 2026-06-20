@@ -2,15 +2,7 @@
 
 from __future__ import annotations
 
-import os
-
 import pytest
-
-
-@pytest.fixture(autouse=True)
-def _clear_regime_env(monkeypatch):
-    monkeypatch.delenv("TITAN_ENABLE_REGIME_ENGINE", raising=False)
-    monkeypatch.delenv("TITAN_REGIME_ENGINE_MODE", raising=False)
 
 
 def test_strong_bull_classification():
@@ -34,15 +26,13 @@ def test_defensive_on_low_breadth():
     assert out["regime"] == "DEFENSIVE"
 
 
-def test_buy_threshold_relax_in_strong_bull_enforce(monkeypatch):
+def test_buy_threshold_relax_in_strong_bull_enforce():
     from market_regime import apply_regime_to_audit, regime_adaptations
     from signal_v2 import _buy_gate, layer_a, layer_c
 
     adapts = regime_adaptations("STRONG_BULL")
     assert adapts["buy_threshold_delta"] == -5.0
 
-    monkeypatch.setenv("TITAN_ENABLE_REGIME_ENGINE", "true")
-    monkeypatch.setenv("TITAN_REGIME_ENGINE_MODE", "enforce")
     audit = {
         "nifty_above_ema200": True,
         "market_breadth_pct": 65.0,
@@ -68,10 +58,32 @@ def test_bear_raises_defensive_multiplier():
     assert adapts["buy_threshold_delta"] == 5.0
 
 
-def test_flag_off_preserves_legacy_audit(monkeypatch):
+def test_regime_always_applied(monkeypatch):
     from market_regime import apply_regime_to_audit
 
-    audit: dict = {"next_week_score": 70.0}
+    monkeypatch.delenv("TITAN_REGIME_ENGINE_MODE", raising=False)
+    audit: dict = {
+        "nifty_above_ema200": True,
+        "market_breadth_pct": 65.0,
+        "india_vix": 15.0,
+        "next_week_score": 70.0,
+    }
     apply_regime_to_audit(audit)
-    assert audit["market_regime"]["enabled"] is False
-    assert "regime_buy_threshold_delta" not in audit
+    assert audit["market_regime"]["enabled"] is True
+    assert audit["market_regime"]["mode"] == "enforce"
+    assert audit["regime_buy_threshold_delta"] == -5.0
+
+
+def test_shadow_mode_records_without_applying(monkeypatch):
+    from market_regime import apply_regime_to_audit
+
+    monkeypatch.setenv("TITAN_REGIME_ENGINE_MODE", "shadow")
+    audit = {
+        "nifty_above_ema200": True,
+        "market_breadth_pct": 65.0,
+        "india_vix": 15.0,
+    }
+    apply_regime_to_audit(audit)
+    assert audit["market_regime"]["mode"] == "shadow"
+    assert audit["market_regime"]["applied"] is False
+    assert audit["regime_buy_threshold_delta"] == 0.0

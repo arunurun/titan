@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 
 def test_probability_monotonic_in_score():
     from probability_calibration import calibrate_probability
@@ -31,11 +29,23 @@ def test_calibration_improves_brier_vs_raw_confidence():
     assert brier_score(calibrated, outcomes) < brier_score(raw_conf, outcomes)
 
 
-def test_flag_off_skips_audit_write(monkeypatch):
+def test_calibration_always_writes_audit():
     from probability_calibration import apply_probability_calibration
 
-    monkeypatch.delenv("TITAN_ENABLE_PROBABILITY_CALIBRATION", raising=False)
     audit = {"next_week_score": 67.0, "signal_confidence": 0.55}
     out = apply_probability_calibration(audit)
-    assert out["enabled"] is False
-    assert "predicted_probability" not in audit or audit.get("predicted_probability") is None
+    assert out["enabled"] is True
+    assert out["mode"] == "enforce"
+    assert audit["predicted_probability"] == 0.48
+    assert audit["signal_confidence"] == 0.48
+
+
+def test_shadow_mode_preserves_raw_confidence(monkeypatch):
+    from probability_calibration import apply_probability_calibration
+
+    monkeypatch.setenv("TITAN_PROB_CALIB_MODE", "shadow")
+    audit = {"next_week_score": 67.0, "signal_confidence": 0.55}
+    out = apply_probability_calibration(audit)
+    assert out["mode"] == "shadow"
+    assert audit["predicted_probability"] == 0.48
+    assert audit["signal_confidence"] == 0.55

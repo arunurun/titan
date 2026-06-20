@@ -3549,10 +3549,9 @@ def build_equity_live_audit(
     )
     stretch_fields: dict[str, float] = {}
     try:
-        from stretch_engine import compute_stretch_metrics, new_stretch_engine_enabled
+        from stretch_engine import compute_stretch_metrics
 
-        if new_stretch_engine_enabled():
-            stretch_fields = compute_stretch_metrics(df)
+        stretch_fields = compute_stretch_metrics(df)
     except ImportError:
         pass
     # Gap-down proxy: latest session opens materially below the prior close.

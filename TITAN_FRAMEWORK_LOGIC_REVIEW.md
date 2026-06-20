@@ -634,25 +634,21 @@ Walk-forward labels feed `prev_action_signal` so v2 hysteresis is exercised in b
 
 ---
 
-## 7b. Seven-phase framework improvements (Jun 2026, feature-flagged)
+## 7b. Seven-phase framework improvements (Jun 2026, core logic)
 
-All flags default **OFF** (or **shadow** for regime/calibration). Legacy behaviour when disabled.
 Re-architecture **682657a** (OBV EMA, directional ADX, percentile 1w/1m rank terms, vol de-dup,
-hysteresis 3.0/5.0, 400-day lookback) remains baseline; flags below extend it.
+hysteresis 3.0/5.0, 400-day lookback) is baseline; the items below are always-on production logic.
 
-| Flag | Module | When enabled |
+| Component | Module | Behaviour |
 |---|---|---|
-| `TITAN_USE_SECTOR_RELATIVE_RANKING` | `sector_priority.py` | `compute_sector_relative_momentum_score()` replaces 1w/1m return terms (0.35×1m + 0.25×3m + 0.20×rel_strength + 0.10×intent + 0.10×next_week). |
-| `TITAN_ENABLE_REGIME_ENGINE` | `market_regime.py` | STRONG_BULL / BULL / NEUTRAL / DEFENSIVE / BEAR on `audit["market_regime"]`. |
-| `TITAN_REGIME_ENGINE_MODE` | `market_regime.py` | `shadow` (default) or `enforce` for buy-threshold / Tier-2 / defensive adaptations. |
-| `TITAN_SECTOR_AWARE_TIER2` | `signal_v2.py` | Momentum sectors: trim=3, exit=4; overextension alone never trims. |
-| `TITAN_V2_RANK_PENALTY_MAX` | `sector_priority.py` | Default **−3.0**; `TITAN_V2_RANK_PENALTY_FAMILY_CAP` (0.30) caps single-family share. |
-| `TITAN_NEW_STRETCH_ENGINE` | `stretch_engine.py` | Composite stretch (0.5×ema20 + 0.3×ema50 + 0.2×52w) in v2 C-8. |
-| `TITAN_ENABLE_PROBABILITY_CALIBRATION` | `probability_calibration.py` | Bucket map → `predicted_probability`. |
-| `TITAN_PROB_CALIB_MODE` | `probability_calibration.py` | `shadow` / `enforce` for confidence replacement. |
+| Sector-relative ranking | `sector_priority.py` | `compute_sector_relative_momentum_score()` replaces 1w/1m return terms (0.35×1m + 0.25×3m + 0.20×rel_strength + 0.10×intent + 0.10×next_week). |
+| Market regime engine | `market_regime.py` | STRONG_BULL / BULL / NEUTRAL / DEFENSIVE / BEAR on `audit["market_regime"]`; adaptations applied by default (`enforce`). Optional `TITAN_REGIME_ENGINE_MODE=shadow\|off` for rollout observation. |
+| Sector-aware Tier-2 | `signal_v2.py` | Momentum sectors: trim=3, exit=4; overextension alone never trims. |
+| V2 rank penalty cap | `sector_priority.py` | Default **−3.0**; `TITAN_V2_RANK_PENALTY_FAMILY_CAP` (0.30) caps single-family share. |
+| Multi-horizon stretch | `stretch_engine.py` | Composite stretch (0.5×ema20 + 0.3×ema50 + 0.2×52w) in v2 C-8. |
+| Probability calibration | `probability_calibration.py` | Bucket map → `predicted_probability`; confidence replaced by default (`enforce`). Optional `TITAN_PROB_CALIB_MODE=shadow\|off` for rollout observation. |
 
-Validation: **legacy** (off) / **shadow** (log) / **enforce** (apply). Analytics:
-`analytics/performance_metrics.py` — profit factor, expectancy, Sharpe, drawdown.
+Analytics: `analytics/performance_metrics.py` — profit factor, expectancy, Sharpe, drawdown.
 
 ---
 

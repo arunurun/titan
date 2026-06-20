@@ -1,11 +1,9 @@
 """Market-wide regime detection and threshold adaptations.
 
-Validation modes (legacy / shadow / enforce) apply via ``TITAN_REGIME_ENGINE_MODE``:
-  - ``off`` or unset: classify only when ``TITAN_ENABLE_REGIME_ENGINE`` is true; no adaptations.
-  - ``shadow``: record would-be adaptations on the audit without changing labels/scores.
-  - ``enforce``: apply adaptations to buy thresholds and Tier-2 / defensive scaling.
-
-Feature flag ``TITAN_ENABLE_REGIME_ENGINE`` must be true for any regime logic to run.
+Regime classification and adaptations always run. Optional ``TITAN_REGIME_ENGINE_MODE``:
+  - ``enforce`` (default): apply buy-threshold / Tier-2 / defensive adaptations.
+  - ``shadow``: record would-be adaptations without changing labels/scores.
+  - ``off``: classify and record regime only; no adaptations applied.
 """
 
 from __future__ import annotations
@@ -22,13 +20,6 @@ _TIER2_PENALTY_MULT_STRONG_BULL = 0.75
 _DEFENSIVE_PENALTY_MULT_BEAR = 1.20
 
 
-def _env_truthy(name: str, *, default: bool = False) -> bool:
-    raw = os.environ.get(name, "").strip().lower()
-    if raw == "":
-        return default
-    return raw in ("1", "true", "yes", "on")
-
-
 def _env_float(name: str, default: float) -> float:
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -39,13 +30,9 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-def regime_engine_enabled() -> bool:
-    return _env_truthy("TITAN_ENABLE_REGIME_ENGINE", default=False)
-
-
 def regime_engine_mode() -> str:
     raw = os.environ.get("TITAN_REGIME_ENGINE_MODE", "").strip().lower()
-    return raw if raw in ("off", "shadow", "enforce") else "shadow"
+    return raw if raw in ("off", "shadow", "enforce") else "enforce"
 
 
 def _sf(v: Any) -> float:
@@ -134,11 +121,7 @@ def regime_adaptations(regime: str) -> dict[str, Any]:
 
 
 def apply_regime_to_audit(audit: dict[str, Any]) -> dict[str, Any]:
-    """Detect regime from audit fields, store on audit, optionally apply adaptations."""
-    if not regime_engine_enabled():
-        audit["market_regime"] = {"enabled": False}
-        return {"enabled": False}
-
+    """Detect regime from audit fields, store on audit, and apply adaptations."""
     above_raw = audit.get("nifty_above_ema200")
     if above_raw is None:
         ema_dist = _sf(audit.get("nifty_ema200_distance_pct", audit.get("benchmark_ema200_distance_pct")))

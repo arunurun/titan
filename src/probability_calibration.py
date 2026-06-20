@@ -1,8 +1,8 @@
 """Historical score → P(up 5d) calibration layer.
 
-``TITAN_ENABLE_PROBABILITY_CALIBRATION`` gates whether ``predicted_probability`` is written
-onto the audit. Mode ``TITAN_PROB_CALIB_MODE`` supports legacy/off, shadow (record only),
-and enforce (replace raw confidence downstream when wired).
+``predicted_probability`` is always computed and written onto the audit. Optional
+``TITAN_PROB_CALIB_MODE``: ``enforce`` (default) replaces ``signal_confidence``;
+``shadow`` records only; ``off`` skips confidence replacement.
 
 Default buckets use isotonic-style monotonic mapping from next_week_score deciles.
 """
@@ -25,20 +25,9 @@ _DEFAULT_BUCKETS: tuple[tuple[float, float, float], ...] = (
 )
 
 
-def _env_truthy(name: str, *, default: bool = False) -> bool:
-    raw = os.environ.get(name, "").strip().lower()
-    if raw == "":
-        return default
-    return raw in ("1", "true", "yes", "on")
-
-
-def calibration_enabled() -> bool:
-    return _env_truthy("TITAN_ENABLE_PROBABILITY_CALIBRATION", default=False)
-
-
 def calibration_mode() -> str:
     raw = os.environ.get("TITAN_PROB_CALIB_MODE", "").strip().lower()
-    return raw if raw in ("off", "shadow", "enforce") else "shadow"
+    return raw if raw in ("off", "shadow", "enforce") else "enforce"
 
 
 def _sf(v: Any) -> float:
@@ -80,9 +69,6 @@ def calibrate_probability(
 
 def apply_probability_calibration(audit: dict[str, Any]) -> dict[str, Any]:
     """Write ``predicted_probability`` and calibration metadata onto the audit."""
-    if not calibration_enabled():
-        return {"enabled": False}
-
     score = _sf(audit.get("next_week_score", audit.get("effective_intent_score")))
     sector = audit.get("sector") or audit.get("sector_key")
     prob = calibrate_probability(score, sector=str(sector) if sector else None)

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 
 def _base_audit(**overrides):
     audit = {
@@ -28,37 +26,26 @@ def _empty_d() -> dict:
     return {"staleflow_downgrade": False}
 
 
-def test_overextension_only_no_trim_when_sector_aware(monkeypatch):
+def test_overextension_only_no_trim():
     from signal_v2 import layer_b
 
-    monkeypatch.setenv("TITAN_SECTOR_AWARE_TIER2", "true")
     b = layer_b(_base_audit(), _hot_c(True), _empty_d())
     assert b["forced_label"] is None
 
 
-def test_overextension_plus_distribution_trims(monkeypatch):
+def test_overextension_plus_distribution_trims():
     from signal_v2 import layer_b
 
-    monkeypatch.setenv("TITAN_SECTOR_AWARE_TIER2", "true")
     b = layer_b(_base_audit(cmf_20=-0.1), _hot_c(True), _empty_d())
     assert b["forced_label"] == "trim"
 
 
-def test_momentum_sector_requires_higher_corroboration(monkeypatch):
+def test_momentum_sector_requires_higher_corroboration():
     from signal_v2 import _tier2_thresholds
 
-    monkeypatch.setenv("TITAN_SECTOR_AWARE_TIER2", "true")
     trim, exit_c = _tier2_thresholds({"sector_key": "defence"})
     assert trim == 3
     assert exit_c == 4
     trim2, exit2 = _tier2_thresholds({"sector_key": "pharma_healthcare"})
     assert trim2 == 2
     assert exit2 == 3
-
-
-def test_legacy_overextension_alone_needs_two_corroborators(monkeypatch):
-    from signal_v2 import layer_b
-
-    monkeypatch.delenv("TITAN_SECTOR_AWARE_TIER2", raising=False)
-    b = layer_b(_base_audit(), _hot_c(True), _empty_d())
-    assert b["forced_label"] is None
