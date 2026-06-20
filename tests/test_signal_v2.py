@@ -503,6 +503,53 @@ def test_short_history_strong_vpr_accumulates():
     assert label == "accumulate"
 
 
+def test_tier2_e2e_intent_led_deescalates_trim_to_accumulate():
+    """E2E Jun 15-class: Tier-2 trim + strong intent/VPR + rally day -> accumulate."""
+    audit = {
+        "next_week_score": 65.49,
+        "effective_intent_score": 73.96,
+        "z_score": 1.0,
+        "return_1d_pct": 4.72,
+        "return_5d_pct": -14.68,
+        "return_10d_pct": -1.5,
+        "rel_return_5d_vs_nifty_pct": 2.0,
+        "cmf_20": -0.063,
+        "obv_slope_20": 5.0,
+        "ema_200_distance_pct": 15.0,
+        "ema200_stretch_atr": 4.84,
+        "atr_14_pct": 3.0,
+        "adx_14": 37.7,
+        "volume_participation_ratio": 3.88,
+        "prev_action_signal": "trim",
+    }
+    label, risk, reasons = v2.evaluate_signal_v2(audit)
+    assert "Tier-2" in " ".join(reasons)
+    assert 4.0 <= risk < 5.0
+    assert label in ("hold", "accumulate")
+    assert label != "trim"
+
+
+def test_tier2_netweb_overext_cmf_rally_recovers_to_hold_or_accumulate():
+    """NETWEB-class: overextension + CMF distribution but rally tape recovers."""
+    audit = {
+        "next_week_score": 58.0,
+        "effective_intent_score": 66.0,
+        "z_score": 0.8,
+        "return_1d_pct": 2.0,
+        "return_5d_pct": 3.5,
+        "cmf_20": -0.07,
+        "ema_200_distance_pct": 10.0,
+        "ema200_stretch_atr": 3.83,
+        "atr_14_pct": 2.8,
+        "adx_14": 22.0,
+        "volume_participation_ratio": 1.25,
+        "prev_action_signal": "trim",
+    }
+    label, risk, _ = v2.evaluate_signal_v2(audit)
+    assert risk < 5.0
+    assert label in ("hold", "accumulate")
+
+
 def test_leader_participation_floor():
     audit = {
         "next_week_score": 58.0,
