@@ -3149,7 +3149,12 @@ def _apply_sector_cross_section(
 
             mn = _safe_float(a.get("median_notional_inr_20d"))
             sp = _safe_float(a.get("sector_pctile_median_notional_20d"))
-            thin_peer = not math.isnan(sp) and sp <= 15.0
+            peer_pctile_raw = (os.environ.get("TITAN_THIN_LIQUIDITY_PEER_PCTILE") or "").strip()
+            try:
+                peer_pctile = float(peer_pctile_raw) if peer_pctile_raw else 12.0
+            except ValueError:
+                peer_pctile = 12.0
+            thin_peer = not math.isnan(sp) and sp <= peer_pctile
             thin_hard = not math.isnan(mn) and mn > 0 and mn < floor
             a["liquidity_thin_proxy"] = bool(thin_hard or thin_peer)
             if thin_peer:

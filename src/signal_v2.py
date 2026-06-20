@@ -611,6 +611,24 @@ def _participation_vpr(audit: dict[str, Any]) -> float:
     )
 
 
+def _constructive_allowed(a: dict[str, Any], audit: dict[str, Any]) -> bool:
+    """Layer-A buy_allowed, or thin-liquidity exception for accumulate-only paths."""
+    if bool(a.get("buy_allowed")):
+        return True
+    if not bool(audit.get("liquidity_thin_proxy")):
+        return False
+    intent_min = _env_float("TITAN_SIGV2_THIN_LIQ_INTENT_MIN", _THIN_LIQ_INTENT_MIN)
+    nw_min = _env_float("TITAN_SIGV2_THIN_LIQ_NW_MIN", _THIN_LIQ_NW_MIN)
+    eff = _sf(audit.get("effective_intent_score", audit.get("intent_score")))
+    nw = _sf(audit.get("next_week_score"))
+    return (
+        not math.isnan(eff)
+        and eff >= intent_min
+        and not math.isnan(nw)
+        and nw >= nw_min
+    )
+
+
 def _buy_gate(audit: dict[str, Any], a: dict[str, Any], c: dict[str, Any]) -> dict[str, bool]:
     """Ported legacy BUY gate + money-flow / over-extension constructive checks.
 
@@ -657,8 +675,8 @@ def _accumulate_band(audit: dict[str, Any], risk_net: float, *, buy_allowed: boo
     """Lower-bar accumulate when scores are decent and risk is low."""
     if not buy_allowed or risk_net >= 4.0:
         return False
-    nw_min = _env_float("TITAN_SIGV2_ACCUM_NEXT_WEEK_MIN", 60.0)
-    intent_min = _env_float("TITAN_SIGV2_ACCUM_INTENT_MIN", 60.0)
+    nw_min = _env_float("TITAN_SIGV2_ACCUM_NEXT_WEEK_MIN", _ACCUM_NEXT_WEEK_MIN)
+    intent_min = _env_float("TITAN_SIGV2_ACCUM_INTENT_MIN", _ACCUM_INTENT_MIN)
     next_week = _sf(audit.get("next_week_score"))
     eff = _sf(audit.get("effective_intent_score", audit.get("intent_score")))
     return (
@@ -704,6 +722,7 @@ def _short_history_accumulate_ok(audit: dict[str, Any], risk_net: float) -> bool
 def _map_label(risk_net: float, gate: dict[str, bool], audit: dict[str, Any], a: dict[str, Any]) -> str:
     """Score -> label (before forced overrides / hysteresis)."""
     buy_allowed = bool(a.get("buy_allowed"))
+    constructive_ok = _constructive_allowed(a, audit)
     if risk_net >= 7.0:
         return "exit-risk"
     if risk_net >= 4.0:
@@ -715,16 +734,16 @@ def _map_label(risk_net: float, gate: dict[str, bool], audit: dict[str, Any], a:
         return "accumulate"
     accum_pref_max = _env_float("TITAN_SIGV2_ACCUM_PREF_RISK_MAX", 3.5)
     if (
-        buy_allowed
+        constructive_ok
         and gate.get("constructive_scores")
         and risk_net < accum_pref_max
     ):
         return "accumulate"
-    if _accumulate_band(audit, risk_net, buy_allowed=buy_allowed):
+    if _accumulate_band(audit, risk_net, buy_allowed=constructive_ok):
         return "accumulate"
-    if _leader_participation_floor(audit, risk_net, buy_allowed=buy_allowed):
+    if _leader_participation_floor(audit, risk_net, buy_allowed=constructive_ok):
         return "accumulate"
-    if _participation_accumulate_ok(audit, risk_net, buy_allowed=buy_allowed):
+    if _participation_accumulate_ok(audit, risk_net, buy_allowed=constructive_ok):
         return "accumulate"
     if (
         bool(audit.get("history_lt_200_sessions"))
@@ -970,12 +989,17 @@ _RECOVERY_INTENT_MIN = 60.0
 _RECOVERY_NW_MIN = 55.0
 _RALLY_INTENT_MIN = 65.0
 _RALLY_NW_MIN = 60.0
-_PARTICIPATION_INTENT_MIN = 70.0
-_PARTICIPATION_NW_MIN = 65.0
+_PARTICIPATION_INTENT_MIN = 65.0
+_PARTICIPATION_NW_MIN = 62.0
 _PARTICIPATION_VPR_MIN = 1.2
+_ACCUM_NEXT_WEEK_MIN = 58.0
+_ACCUM_INTENT_MIN = 58.0
+_THIN_LIQ_INTENT_MIN = 65.0
+_THIN_LIQ_NW_MIN = 60.0
+_RECOVERY_RISK_MAX = 5.0
 # Tier-2 post-overextension / intent-led de-escalation (tunable via TITAN_SIGV2_TIER2_* env).
 _TIER2_RECOVERY_INTENT_MIN = 65.0
-_TIER2_RECOVERY_NW_MIN = 58.0
+_TIER2_RECOVERY_NW_MIN = 55.0
 _TIER2_RECOVERY_RISK_MAX = 5.0
 _TIER2_INTENT_LED_INTENT_MIN = 70.0
 _TIER2_INTENT_LED_VPR_MIN = 1.2
@@ -994,7 +1018,8 @@ def _prior_defensive_streak(audit: dict[str, Any]) -> int:
 
 
 def _recovery_tape_ok(audit: dict[str, Any], risk_net: float, *, rally: bool) -> bool:
-    if risk_net >= 4.0:
+    risk_max = _env_float("TITAN_SIGV2_RECOVERY_RISK_MAX", _RECOVERY_RISK_MAX)
+    if risk_net >= risk_max:
         return False
     eff = _sf(audit.get("effective_intent_score", audit.get("intent_score")))
     nw = _sf(audit.get("next_week_score"))
@@ -1380,7 +1405,7 @@ def evaluate_signal_v2(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
         bypass=bool(b.get("bypass_hysteresis")),
         corroborators=int(b.get("corroborators", 0)),
         gate=gate,
-        buy_allowed=bool(a.get("buy_allowed")),
+        buy_allowed=_constructive_allowed(a, audit),
         c=c,
         b_reasons=b.get("reasons", []),
         staleflow_downgrade=bool(d.get("staleflow_downgrade")),

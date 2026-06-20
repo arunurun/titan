@@ -589,3 +589,57 @@ def test_gap_guard_session_move_proxy_when_flagged(monkeypatch):
     gap_pct, source = v2._derive_next_open_gap_pct(audit)
     assert gap_pct == pytest.approx(3.2)
     assert source == "session_move_vs_prev_close_pct"
+
+
+def test_constructive_allowed_thin_liquidity_strong_scores():
+    a = v2.layer_a({"liquidity_thin_proxy": True, "z_score": 1.0, "cmf_20": 0.1})
+    audit = {
+        "liquidity_thin_proxy": True,
+        "effective_intent_score": 68.0,
+        "next_week_score": 62.0,
+    }
+    assert a["buy_allowed"] is False
+    assert v2._constructive_allowed(a, audit) is True
+
+
+def test_thin_liquidity_accumulate_not_buy():
+    """Thin liquidity: strong scores may accumulate but never buy."""
+    audit = {
+        "liquidity_thin_proxy": True,
+        "next_week_score": 66.0,
+        "effective_intent_score": 68.0,
+        "z_score": 1.2,
+        "return_1d_pct": 1.0,
+        "return_5d_pct": 2.0,
+        "return_10d_pct": 3.0,
+        "rel_return_5d_vs_nifty_pct": 1.0,
+        "cmf_20": 0.08,
+        "ema_200_distance_pct": 5.0,
+        "ema200_stretch_atr": 1.8,
+        "atr_14_pct": 2.5,
+        "adx_14": 25.0,
+        "volume_participation_ratio": 1.4,
+    }
+    label, risk, _ = v2.evaluate_signal_v2(audit)
+    assert label in ("accumulate", "hold")
+    assert label != "buy"
+    assert risk < 4.0
+
+
+def test_accumulate_band_uses_loosened_defaults():
+    """Scores 58/58 should pass accumulate band (post sector-gap fix defaults)."""
+    assert v2._accumulate_band(
+        {"next_week_score": 58.0, "effective_intent_score": 58.0},
+        3.0,
+        buy_allowed=True,
+    )
+
+
+def test_recovery_tape_ok_allows_risk_below_recovery_max():
+    audit = {
+        "effective_intent_score": 62.0,
+        "next_week_score": 58.0,
+        "return_5d_pct": 1.5,
+    }
+    assert v2._recovery_tape_ok(audit, 4.5, rally=False) is True
+    assert v2._recovery_tape_ok(audit, 5.5, rally=False) is False
