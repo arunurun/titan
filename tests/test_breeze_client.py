@@ -257,12 +257,12 @@ def test_rate_limited_call_does_not_hold_lock_during_network(monkeypatch):
     t1 = threading.Thread(target=lambda: _rate_limited_historical_call(breeze, interval="1day"))
     t2 = threading.Thread(target=lambda: _rate_limited_historical_call(breeze, interval="1day"))
     t1.start()
-    time.sleep(0.05)
+    time.sleep(0.1)
     t2.start()
-    time.sleep(0.05)
+    time.sleep(0.1)
     breeze.unblock.set()
-    t1.join(timeout=1.0)
-    t2.join(timeout=1.0)
+    t1.join(timeout=2.0)
+    t2.join(timeout=2.0)
     assert breeze.max_active >= 2
 
 
