@@ -94,6 +94,7 @@ def test_fetch_news_from_newsapi_rate_limit_trips_circuit(monkeypatch):
 def test_fetch_all_news_for_symbol_fail_open_rss_only(monkeypatch):
     reset_paid_api_circuit()
     monkeypatch.setenv("TITAN_NEWS_SKIP_PAID_APIS", "1")
+    recent = datetime.now(timezone.utc).isoformat()
     monkeypatch.setattr(
         "news_client.fetch_news_from_rss_feeds",
         lambda **kwargs: [
@@ -103,7 +104,7 @@ def test_fetch_all_news_for_symbol_fail_open_rss_only(monkeypatch):
                 "title": "HAL wins major order",
                 "url": "https://example.com/hal-order",
                 "source": "rss:moneycontrol",
-                "published_at": "2026-05-31T10:00:00+00:00",
+                "published_at": recent,
                 "summary": "HAL contract update",
                 "relevance_score": 0.9,
             }
@@ -128,7 +129,7 @@ def test_fetch_all_news_for_symbol_logs_source_summary(caplog, monkeypatch):
                 "title": "HAL wins major order",
                 "url": "https://example.com/hal-order",
                 "source": "rss:moneycontrol",
-                "published_at": "2026-05-31T10:00:00+00:00",
+                "published_at": datetime.now(timezone.utc).isoformat(),
                 "summary": "HAL contract update",
                 "relevance_score": 0.9,
             }

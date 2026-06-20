@@ -3181,6 +3181,78 @@ def _institutional_context(
     }
 
 
+def rehydrate_persisted_gate_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Re-apply current gate env modes to a persisted ranking gate record.
+
+    Weekend ranking refresh often stores ``mode=shadow`` with multiplier 1.0 even when
+    production CI runs with damp/skip. Digest bridging uses this so Context lines reflect
+    the active runtime policy without recomputing full rankings.
+    """
+    if not isinstance(record, dict) or not bool(record.get("triggered")):
+        return record
+    out = dict(record)
+    gate = str(out.get("gate") or "").strip().lower()
+    if gate == "fno_ban":
+        mode = _gate_mode("TITAN_BAN_GATE_MODE")
+        if mode in ("off", "shadow"):
+            mult, withhold = 1.0, False
+        elif mode == "damp":
+            mult, withhold = _env_float("TITAN_BAN_GATE_DAMP_MULT", 0.5), False
+        else:
+            mult, withhold = 0.0, True
+    else:
+        spec = {
+            "sector_regime": ("TITAN_REGIME_GATE_MODE", "TITAN_REGIME_GATE_DAMP_MULT", _REGIME_DAMP_MULT),
+            "delivery_churn": ("TITAN_DELIVERY_GATE_MODE", "TITAN_DELIVERY_GATE_DAMP_MULT", _DELIVERY_DAMP_MULT),
+            "institutional": (
+                "TITAN_INSTITUTIONAL_GATE_MODE",
+                "TITAN_INSTITUTIONAL_GATE_DAMP_MULT",
+                _INSTITUTIONAL_DAMP_MULT,
+            ),
+            "futures_oi": ("TITAN_FUTURES_GATE_MODE", "TITAN_FUTURES_GATE_DAMP_MULT", 0.75),
+            "v2_risk": ("TITAN_V2_RISK_GATE_MODE", "TITAN_V2_RISK_DAMP_MULT", _V2_RISK_DAMP_MULT),
+            "calendar_event": ("TITAN_CALENDAR_GATE_MODE", "TITAN_CALENDAR_GATE_DAMP_MULT", _CALENDAR_DAMP_MULT),
+            "breeze_freshness": ("TITAN_BREEZE_FRESHNESS_GATE_MODE", "TITAN_BREEZE_FRESHNESS_GATE_DAMP_MULT", 0.5),
+            "data_freshness": ("TITAN_BREEZE_FRESHNESS_GATE_MODE", "TITAN_BREEZE_FRESHNESS_GATE_DAMP_MULT", 0.5),
+        }.get(gate)
+        if not spec:
+            return out
+        env_mode, env_damp, default_damp = spec
+        mode = _gate_mode(env_mode)
+        damp = _env_float(env_damp, default_damp)
+        mult, withhold = _gate_effect(mode, True, damp)
+    out["mode"] = mode
+    out["score_multiplier"] = round(mult, 4)
+    out["withhold"] = withhold
+    return out
+
+
+def rehydrate_persisted_gate_records(records: list[Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for item in records or []:
+        if isinstance(item, dict):
+            out.append(rehydrate_persisted_gate_record(item))
+    return out
+
+
+def rehydrate_institutional_context(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Refresh institutional gate mode/effect from current env for digest bridging."""
+    if not isinstance(ctx, dict) or not bool(ctx.get("risk_off")):
+        return ctx
+    out = dict(ctx)
+    gate = _institutional_gate(
+        {
+            "institutional": {
+                "fii_net_crs": out.get("fii_net_crs"),
+                "dii_net_crs": out.get("dii_net_crs"),
+            }
+        }
+    )
+    out["mode"] = gate.get("mode")
+    out["gate_applied"] = _gate_record_applied(gate)
+    return out
+
+
 def build_sector_rankings(
     cfg: TitanConfig,
     *,

@@ -1105,6 +1105,41 @@ def test_gates_default_enforce_bumps_shadow_default(monkeypatch):
     assert _gate_mode("TITAN_DELIVERY_GATE_MODE") == "damp"
 
 
+def test_rehydrate_persisted_gate_record_applies_runtime_mode(monkeypatch):
+    from sector_priority import rehydrate_persisted_gate_record
+
+    monkeypatch.setenv("TITAN_DELIVERY_GATE_MODE", "damp")
+    shadow = {
+        "gate": "delivery_churn",
+        "mode": "shadow",
+        "triggered": True,
+        "would": "damp/withhold (churn)",
+        "reasons": ["avg delivery 13% < floor 35%"],
+        "score_multiplier": 1.0,
+        "withhold": False,
+    }
+    refreshed = rehydrate_persisted_gate_record(shadow)
+    assert refreshed["mode"] == "damp"
+    assert refreshed["score_multiplier"] == 0.5
+    assert refreshed["withhold"] is False
+
+
+def test_rehydrate_institutional_context_applies_runtime_mode(monkeypatch):
+    from sector_priority import rehydrate_institutional_context
+
+    monkeypatch.setenv("TITAN_INSTITUTIONAL_GATE_MODE", "damp")
+    ctx = {
+        "risk_off": True,
+        "mode": "shadow",
+        "fii_net_crs": -1082.0,
+        "dii_net_crs": 5341.0,
+        "gate_applied": False,
+    }
+    refreshed = rehydrate_institutional_context(ctx)
+    assert refreshed["mode"] == "damp"
+    assert refreshed["gate_applied"] is True
+
+
 def test_pledge_slb_gate_off_by_default(monkeypatch):
     from sector_priority import _pledge_slb_gate
 

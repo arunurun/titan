@@ -1109,6 +1109,8 @@ def _bridge_priority_shadow_context(
         for r in ok_results
     ]
     meta_by_key = _load_priority_ranking_meta(cfg, sector_key=sector_key, symbol_keys=symbol_keys)
+    from sector_priority import rehydrate_institutional_context, rehydrate_persisted_gate_records
+
     for r in ok_results:
         audit = r.get("audit")
         if not isinstance(audit, dict):
@@ -1119,11 +1121,13 @@ def _bridge_priority_shadow_context(
             audit["sector_key"] = sector_key
         meta = meta_by_key.get((sym, ex)) or {}
         if isinstance(meta.get("shadow_gates"), list) and not audit.get("shadow_gates"):
-            audit["shadow_gates"] = meta["shadow_gates"]
+            audit["shadow_gates"] = rehydrate_persisted_gate_records(meta["shadow_gates"])
         if isinstance(meta.get("absorption_term"), dict) and not audit.get("absorption_term_shadow"):
             audit["absorption_term_shadow"] = meta["absorption_term"]
         if isinstance(meta.get("institutional_context"), dict) and not audit.get("institutional_context"):
-            audit["institutional_context"] = meta["institutional_context"]
+            audit["institutional_context"] = rehydrate_institutional_context(
+                meta["institutional_context"]
+            )
 
 
 def _format_sector_options_context_block(ctx: dict[str, Any]) -> list[str]:

@@ -1,6 +1,7 @@
 """Sector equity audit (cash metrics, mocked Breeze/Gemini)."""
 
 import math
+import os
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -19,6 +20,11 @@ def make_cfg() -> TitanConfig:
         supabase_url="https://x.supabase.co",
         supabase_key="sk",
     )
+
+
+@pytest.fixture(autouse=True)
+def _patch_sector_audit_load_config(monkeypatch):
+    monkeypatch.setattr("sector_audit.load_config", lambda **kwargs: make_cfg())
 
 
 @pytest.fixture(autouse=True)
@@ -1210,23 +1216,24 @@ def test_digest_action_summary_counts_accumulate_separately(mock_load, mock_metr
         return preset, 3.0, ["preset signal"]
 
     with patch("breeze_client.create_breeze_session", return_value=MagicMock()):
-        with patch("sector_audit._derive_sell_signal", side_effect=_preserve_preset_sell_signal):
-            with patch("brain.generate_sector_digest_narrative", return_value="Action mix post"):
-                with patch("supabase_log.save_audit_log"):
-                    with patch(
-                        "analysis_store.persist_sector_run_analytics",
-                        return_value={"persisted": True, "run_id": "test-action-summary"},
-                    ):
-                        with patch("analysis_store.update_sector_period_rollups"):
-                            with patch(
-                                "analysis_store.build_comparison_payload",
-                                return_value={"enabled": False},
-                            ):
+        with patch("sector_audit.load_config", return_value=make_cfg()):
+            with patch("sector_audit._derive_sell_signal", side_effect=_preserve_preset_sell_signal):
+                with patch("brain.generate_sector_digest_narrative", return_value="Action mix post"):
+                    with patch("supabase_log.save_audit_log"):
+                        with patch(
+                            "analysis_store.persist_sector_run_analytics",
+                            return_value={"persisted": True, "run_id": "test-action-summary"},
+                        ):
+                            with patch("analysis_store.update_sector_period_rollups"):
                                 with patch(
-                                    "analysis_store.persist_llm_digest_memory",
-                                    return_value={"persisted": True},
+                                    "analysis_store.build_comparison_payload",
+                                    return_value={"enabled": False},
                                 ):
-                                    run_sector_live("defence", max_workers=4, digest=True)
+                                    with patch(
+                                        "analysis_store.persist_llm_digest_memory",
+                                        return_value={"persisted": True},
+                                    ):
+                                        run_sector_live("defence", max_workers=4, digest=True)
 
     body = mock_email.call_args[0][0]
     assert "--- Action summary ---" in body
@@ -2160,3 +2167,59 @@ def test_digest_applied_gate_notes_in_context(monkeypatch):
     assert "• Applied: delivery/churn gate — rank damped (×0.50)" in text
     assert "• Applied: institutional gate — rank damped (×0.85)" in text
     assert "• Applied: overext ceiling gate — label capped to hold" in text
+
+
+def test_bridge_priority_shadow_context_rehydrates_persisted_modes(monkeypatch):
+    monkeypatch.setenv("TITAN_DELIVERY_GATE_MODE", "damp")
+    monkeypatch.setenv("TITAN_INSTITUTIONAL_GATE_MODE", "damp")
+    from sector_audit import _bridge_priority_shadow_context, _digest_shadow_gate_notes
+
+    class _Cfg:
+        supabase_url = "http://example"
+        supabase_key = "key"
+
+    meta = {
+        ("NETWEB", "NSE"): {
+            "shadow_gates": [
+                {
+                    "gate": "delivery_churn",
+                    "mode": "shadow",
+                    "triggered": True,
+                    "would": "damp/withhold (churn)",
+                    "reasons": ["avg delivery 13% < floor 35%"],
+                    "delivery_avg": 13.0,
+                    "score_multiplier": 1.0,
+                    "withhold": False,
+                },
+                {
+                    "gate": "institutional",
+                    "mode": "shadow",
+                    "triggered": True,
+                    "would": "damp (institutional backdrop)",
+                    "reasons": ["FII net -1082 Cr", "DII net +5341 Cr"],
+                    "score_multiplier": 1.0,
+                    "withhold": False,
+                },
+            ],
+            "institutional_context": {
+                "risk_off": True,
+                "mode": "shadow",
+                "fii_net_crs": -1082.0,
+                "dii_net_crs": 5341.0,
+                "gate_applied": False,
+            },
+        }
+    }
+
+    monkeypatch.setattr(
+        "sector_audit._load_priority_ranking_meta",
+        lambda cfg, sector_key, symbol_keys: meta,
+    )
+
+    ok_results = [{"symbol": "NETWEB", "exchange": "NSE", "audit": {}}]
+    _bridge_priority_shadow_context(_Cfg(), "ai", ok_results)
+    notes = _digest_shadow_gate_notes(ok_results[0]["audit"])
+    assert any("Applied: delivery/churn gate" in n for n in notes)
+    assert any("Applied: institutional gate" in n for n in notes)
+    assert not any("Shadow (not enforced): delivery/churn gate" in n for n in notes)
+    assert not any("Shadow (not enforced): institutional gate" in n for n in notes)

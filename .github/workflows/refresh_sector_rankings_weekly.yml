@@ -55,6 +55,12 @@ jobs:
           GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
           BREEZE_HIST_CALL_INTERVAL_SECONDS: "0.35"
           PYTHONUNBUFFERED: "1"
+          # Persist damp/enforce gate decisions into ranking meta (not shadow-only).
+          TITAN_GATES_DEFAULT_ENFORCE: "true"
+          TITAN_DELIVERY_GATE_MODE: damp
+          TITAN_REGIME_GATE_MODE: damp
+          TITAN_INSTITUTIONAL_GATE_MODE: damp
+          TITAN_FUTURES_GATE_MODE: damp
         run: |
           TOPN="${{ github.event.inputs.top_n || '10' }}"
           if [ -z "$TOPN" ]; then TOPN=10; fi

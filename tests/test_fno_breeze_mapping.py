@@ -66,7 +66,7 @@ def test_mapping_file_has_entry_for_every_sector_fno_symbol():
     sector_fno = _sector_fno_symbols()
     missing = sorted(sector_fno - set(mapping))
     assert not missing, f"sector F&O symbols missing from mapping: {missing}"
-    assert len(sector_fno) == 142
+    assert len(sector_fno) == 143
 
 
 def test_every_mapping_entry_is_in_fo_mktlots():
