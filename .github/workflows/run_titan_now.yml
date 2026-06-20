@@ -377,6 +377,12 @@ jobs:
           TITAN_NEWS_FETCH_LIMIT: "40"
           TITAN_NEWS_DRIVER_LIMIT: "3"
           TITAN_STOCK_NEWS_COVERAGE_TOP_N: "5"
+          # Buy-suppression gates: enforce in production emails (shadow -> damp/enforce rollout).
+          TITAN_DELIVERY_GATE_MODE: damp
+          TITAN_SIGV2_OVEREXT_CEILING_MODE: enforce
+          TITAN_REGIME_GATE_MODE: damp
+          TITAN_INSTITUTIONAL_GATE_MODE: damp
+          TITAN_ABS_TERM_MODE: damp
         run: |
           MODE="${{ steps.params.outputs.mode }}"
           SCOPE="${{ steps.params.outputs.titan_scope }}"

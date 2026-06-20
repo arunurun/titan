@@ -834,6 +834,55 @@ def _shadow_gate_reason_brief(record: dict[str, Any], audit: dict[str, Any]) -> 
     return would if would and would.lower() != "allow" else "shadow trigger"
 
 
+def _gate_record_applied(record: dict[str, Any]) -> bool:
+    """True when a gate record is triggered and its mode is actively enforced."""
+    if bool(record.get("applied")):
+        return True
+    if not bool(record.get("triggered")):
+        return False
+    mode = str(record.get("mode") or "shadow").strip().lower()
+    gate = str(record.get("gate") or "").strip().lower()
+    if gate == "signal_overext_ceiling" and mode in ("enforce", "damp") and record.get("applied_ceiling"):
+        return True
+    if gate == "absorption" and mode in ("damp", "enforce"):
+        return True
+    if mode in ("off", "shadow"):
+        return False
+    if bool(record.get("withhold")):
+        return True
+    try:
+        mult = float(record.get("score_multiplier", 1.0) or 1.0)
+    except (TypeError, ValueError):
+        mult = 1.0
+    return mult < 1.0 - 1e-9
+
+
+def _format_applied_gate_note(record: dict[str, Any], audit: dict[str, Any]) -> str:
+    gate_name = _shadow_gate_display_name(str(record.get("gate") or ""))
+    reason = _shadow_gate_reason_brief(record, audit)
+    gate = str(record.get("gate") or "").strip().lower()
+    if bool(record.get("withhold")):
+        return f"Applied: {gate_name} — withheld from priority — {reason}"
+    if gate == "signal_overext_ceiling":
+        ceiling = record.get("applied_ceiling") or record.get("would_ceiling")
+        return f"Applied: {gate_name} — label capped to {ceiling} — {reason}"
+    try:
+        mult = float(record.get("score_multiplier", 1.0) or 1.0)
+    except (TypeError, ValueError):
+        mult = 1.0
+    if mult < 1.0 - 1e-9:
+        mult_txt = f"×{mult:.2f}" if mult > 0 else "×0"
+        return f"Applied: {gate_name} — rank damped ({mult_txt}) — {reason}"
+    action = _shadow_gate_would_action(record)
+    return f"Applied: {gate_name} — {action} — {reason}"
+
+
+def _format_gate_digest_note(record: dict[str, Any], audit: dict[str, Any]) -> str:
+    if _gate_record_applied(record):
+        return _format_applied_gate_note(record, audit)
+    return _format_shadow_gate_note(record, audit)
+
+
 def _format_shadow_gate_note(record: dict[str, Any], audit: dict[str, Any]) -> str:
     gate_name = _shadow_gate_display_name(str(record.get("gate") or ""))
     action = _shadow_gate_would_action(record)
@@ -841,28 +890,30 @@ def _format_shadow_gate_note(record: dict[str, Any], audit: dict[str, Any]) -> s
     return f"Shadow (not enforced): {gate_name} would {action} — {reason}"
 
 
+def _overext_digest_should_show(oe: dict[str, Any]) -> bool:
+    return bool(oe.get("would_ceiling"))
+
+
 def _overext_ceiling_shadow_triggered(oe: dict[str, Any]) -> bool:
-    would = oe.get("would_ceiling")
-    if not would:
-        return False
-    mode = str(oe.get("mode") or "shadow").strip().lower()
-    if mode in ("shadow", "off"):
-        return True
-    applied = oe.get("applied_ceiling")
-    return applied != would
+    return _overext_digest_should_show(oe)
 
 
-def _absorption_shadow_triggered(abs_term: dict[str, Any]) -> bool:
+def _absorption_digest_should_show(abs_term: dict[str, Any]) -> bool:
     mode = str(abs_term.get("mode") or "shadow").strip().lower()
-    if mode not in ("shadow", "off", "damp"):
-        return False
     legacy = _safe_float(abs_term.get("legacy"))
     gated = _safe_float(abs_term.get("gated"))
+    value = _safe_float(abs_term.get("value"))
     if bool(abs_term.get("down_day")) and legacy > 0.0:
         return True
     if bool(abs_term.get("capped")) and not math.isclose(legacy, gated, rel_tol=0.0, abs_tol=0.05):
         return True
+    if mode in ("damp", "enforce") and not math.isclose(legacy, value, rel_tol=0.0, abs_tol=0.05):
+        return True
     return False
+
+
+def _absorption_shadow_triggered(abs_term: dict[str, Any]) -> bool:
+    return _absorption_digest_should_show(abs_term)
 
 
 def _absorption_shadow_record(abs_term: dict[str, Any]) -> dict[str, Any]:
@@ -874,15 +925,19 @@ def _absorption_shadow_record(abs_term: dict[str, Any]) -> dict[str, Any]:
     elif bool(abs_term.get("capped")):
         reasons.append(f"uncapped bonus {legacy:+.1f} pts would cap to {gated:+.1f}")
     mode = str(abs_term.get("mode") or "shadow").strip().lower()
-    would = "damp (sign-gated absorption)" if mode == "damp" else "cap (sign-gated absorption)"
-    return {
+    would = "damp (sign-gated absorption)" if mode in ("damp", "enforce") else "cap (sign-gated absorption)"
+    record: dict[str, Any] = {
         "gate": "absorption",
+        "mode": mode,
         "triggered": True,
         "would": would,
         "reasons": reasons,
         "score_multiplier": 0.5 if mode == "damp" else 1.0,
         "withhold": False,
     }
+    if mode in ("damp", "enforce"):
+        record["applied"] = True
+    return record
 
 
 def _institutional_shadow_triggered(ctx: dict[str, Any]) -> bool:
@@ -898,18 +953,27 @@ def _institutional_shadow_record(ctx: dict[str, Any]) -> dict[str, Any]:
     if dii is not None:
         parts.append(f"DII net {float(dii):+.0f} Cr")
     reason = ", ".join(parts) if parts else "risk-off institutional backdrop"
+    mode = str(ctx.get("mode") or "shadow").strip().lower()
+    mult = 1.0
+    withhold = False
+    if mode == "damp":
+        mult = 0.85
+    elif mode == "skip":
+        mult = 0.85
+        withhold = True
     return {
         "gate": "institutional",
+        "mode": mode,
         "triggered": True,
         "would": "damp (institutional backdrop)",
         "reasons": [reason],
-        "score_multiplier": 1.0,
-        "withhold": False,
+        "score_multiplier": mult,
+        "withhold": withhold,
     }
 
 
 def _digest_shadow_gate_notes(audit: dict[str, Any]) -> list[str]:
-    """Per-stock shadow gate lines for digest Context (not enforced; informational only)."""
+    """Per-stock gate lines for digest Context (shadow preview or applied enforcement)."""
     notes: list[str] = []
     seen: set[str] = set()
 
@@ -920,22 +984,28 @@ def _digest_shadow_gate_notes(audit: dict[str, Any]) -> list[str]:
         if not bool(record.get("triggered")):
             return
         seen.add(gate)
-        notes.append(_format_shadow_gate_note(record, audit))
+        notes.append(_format_gate_digest_note(record, audit))
 
     for record in audit.get("shadow_gates") or []:
         if isinstance(record, dict):
             _append(record)
 
     oe = audit.get("signal_overext_ceiling")
-    if isinstance(oe, dict) and _overext_ceiling_shadow_triggered(oe):
+    if isinstance(oe, dict) and _overext_digest_should_show(oe):
+        mode = str(oe.get("mode") or "shadow").strip().lower()
+        applied = oe.get("applied_ceiling")
+        would = oe.get("would_ceiling")
         _append(
             {
                 "gate": "signal_overext_ceiling",
+                "mode": mode,
                 "triggered": True,
-                "would": f"cap to {oe.get('would_ceiling')}",
-                "would_ceiling": oe.get("would_ceiling"),
+                "would": f"cap to {would}",
+                "would_ceiling": would,
+                "applied_ceiling": applied,
                 "hot": oe.get("hot"),
-                "withhold": oe.get("would_ceiling") == "hold",
+                "withhold": False,
+                "applied": bool(mode in ("enforce", "damp") and applied),
             }
         )
 
@@ -2439,6 +2509,12 @@ def _attach_prior_action_signals(
 
 
 def _refresh_symbol_scoring_outputs(audit: dict[str, Any]) -> None:
+    try:
+        from market_regime import apply_regime_to_audit
+
+        apply_regime_to_audit(audit)
+    except ImportError:
+        pass
     _apply_contemporaneous_dampener(audit)  # Fix C: de-bias same-day pop before scoring
     next_day_score, next_week_score, prediction_breakdown = _predictive_scores(audit)
     audit["next_day_score"] = next_day_score
@@ -2453,6 +2529,12 @@ def _refresh_symbol_scoring_outputs(audit: dict[str, Any]) -> None:
     audit["action_signal"] = action_signal
     audit["sell_signal_risk_score"] = sell_risk_score
     audit["sell_signal_reasons"] = sell_reasons
+    try:
+        from probability_calibration import apply_probability_calibration
+
+        apply_probability_calibration(audit)
+    except ImportError:
+        pass
 
 
 def _enrich_audit_with_symbol_news(
@@ -3465,6 +3547,14 @@ def build_equity_live_audit(
         )
         else float("nan")
     )
+    stretch_fields: dict[str, float] = {}
+    try:
+        from stretch_engine import compute_stretch_metrics, new_stretch_engine_enabled
+
+        if new_stretch_engine_enabled():
+            stretch_fields = compute_stretch_metrics(df)
+    except ImportError:
+        pass
     # Gap-down proxy: latest session opens materially below the prior close.
     # Threshold is a tunable default (open <= -1.5% vs prior close). Requires a usable
     # 'open' column; otherwise stays False (no fabricated data). Trailing data only.
@@ -3608,6 +3698,8 @@ def build_equity_live_audit(
     audit["fundamental_status"] = fundamental.get("status", "unavailable")
     audit["fundamental_score"] = fundamental.get("score")
     audit["fundamental_reasons"] = fundamental.get("reasons", [])
+    if stretch_fields:
+        audit.update(stretch_fields)
     _refresh_symbol_scoring_outputs(audit)
     if not with_narrative:
         return audit, ""

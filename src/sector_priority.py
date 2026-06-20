@@ -2273,9 +2273,18 @@ def _score_from_features(
 _GATE_MODES = ("off", "shadow", "damp", "skip")
 
 
+def _gates_default_enforce_active() -> bool:
+    raw = (str(os.environ.get("TITAN_GATES_DEFAULT_ENFORCE", "")) or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 def _gate_mode(env_name: str, default: str = "shadow") -> str:
     raw = (str(os.environ.get(env_name, "")) or "").strip().lower()
-    return raw if raw in _GATE_MODES else default
+    if raw in _GATE_MODES:
+        return raw
+    if default == "shadow" and _gates_default_enforce_active():
+        return "damp"
+    return default
 
 
 def _gate_effect(mode: str, triggered: bool, damp_mult: float) -> tuple[float, bool]:
@@ -2993,12 +3002,64 @@ def _futures_oi_gate(symbol: str, eod_ctx: dict[str, Any], *, session_move: floa
     }
 
 
-def _institutional_context(eod_ctx: dict[str, Any]) -> dict[str, Any]:
+def _gate_record_applied(record: dict[str, Any]) -> bool:
+    """True when a gate record is triggered and its mode is actively enforced."""
+    if not bool(record.get("triggered")):
+        return False
+    mode = str(record.get("mode") or "shadow").strip().lower()
+    if mode in ("off", "shadow"):
+        return False
+    if bool(record.get("withhold")):
+        return True
+    try:
+        mult = float(record.get("score_multiplier", 1.0) or 1.0)
+    except (TypeError, ValueError):
+        mult = 1.0
+    return mult < 1.0 - 1e-9
+
+
+_INSTITUTIONAL_DAMP_MULT = 0.85
+
+
+def _institutional_gate(eod_ctx: dict[str, Any]) -> dict[str, Any]:
+    """Market-level FII risk-off backdrop gate (STEP 4d enforce path).
+
+    Triggered when FII net flow is negative; damp/skip modes affect rank_score via
+    ``TITAN_INSTITUTIONAL_GATE_MODE``. NaN-safe: missing FII -> no-op.
+    """
+    mode = _gate_mode("TITAN_INSTITUTIONAL_GATE_MODE")
+    damp = _env_float("TITAN_INSTITUTIONAL_GATE_DAMP_MULT", _INSTITUTIONAL_DAMP_MULT)
+    inst = eod_ctx.get("institutional") or {}
+    fii = _safe_float(inst.get("fii_net_crs"))
+    dii = _safe_float(inst.get("dii_net_crs"))
+    triggered = (not math.isnan(fii)) and fii < 0.0
+    reasons: list[str] = []
+    if triggered:
+        reasons.append(f"FII net {fii:+.0f} Cr")
+        if not math.isnan(dii):
+            reasons.append(f"DII net {dii:+.0f} Cr")
+    mult, withhold = _gate_effect(mode, triggered, damp)
+    return {
+        "gate": "institutional",
+        "mode": mode,
+        "triggered": triggered,
+        "would": "damp (institutional backdrop)" if triggered else "allow",
+        "reasons": reasons,
+        "fii_net_crs": _round_or_none(fii, 2),
+        "dii_net_crs": _round_or_none(dii, 2),
+        "score_multiplier": round(mult, 4),
+        "withhold": withhold,
+    }
+
+
+def _institutional_context(
+    eod_ctx: dict[str, Any], *, gate: dict[str, Any] | None = None
+) -> dict[str, Any]:
     """Market-level FII/DII net flow as a separate institutional_score input (STEP 4d).
 
-    Informational/contextual (not a per-name withhold): a strongly FII-negative tape is a
-    risk-off backdrop. NaN-safe.
+    Includes the institutional gate decision for digest/ranking meta. NaN-safe.
     """
+    gate = gate or _institutional_gate(eod_ctx)
     inst = eod_ctx.get("institutional") or {}
     fii = _safe_float(inst.get("fii_net_crs"))
     dii = _safe_float(inst.get("dii_net_crs"))
@@ -3007,10 +3068,12 @@ def _institutional_context(eod_ctx: dict[str, Any]) -> dict[str, Any]:
         score = (0.0 if math.isnan(fii) else fii) + (0.0 if math.isnan(dii) else dii)
     return {
         "as_of_date": inst.get("as_of_date"),
-        "fii_net_crs": _round_or_none(fii, 2),
-        "dii_net_crs": _round_or_none(dii, 2),
+        "fii_net_crs": gate.get("fii_net_crs"),
+        "dii_net_crs": gate.get("dii_net_crs"),
         "institutional_score": _round_or_none(score, 2),
-        "risk_off": (not math.isnan(fii)) and fii < 0.0,
+        "risk_off": bool(gate.get("triggered")),
+        "mode": gate.get("mode"),
+        "gate_applied": _gate_record_applied(gate),
     }
 
 
@@ -3063,7 +3126,8 @@ def build_sector_rankings(
         symbols=[inst.symbol for inst in instruments],
         as_of_date=as_of_date,
     )
-    institutional_ctx = _institutional_context(eod_ctx)
+    institutional_gate = _institutional_gate(eod_ctx)
+    institutional_ctx = _institutional_context(eod_ctx, gate=institutional_gate)
     pending: list[dict[str, Any]] = []
     rank_lookback = int(_env_float("TITAN_RANK_LOOKBACK_DAYS", float(_RANK_LOOKBACK_CALENDAR_DAYS)))
     for inst in instruments:
@@ -3195,7 +3259,7 @@ def build_sector_rankings(
             session_move=ret_1d,
             absorption=absorption,
         )
-        gate_records = [regime, freshness_gate] + symbol_gates
+        gate_records = [regime, freshness_gate, institutional_gate] + symbol_gates
         gate_mult, gate_withhold = _combine_gate_effects(gate_records)
         score = round(pre_gate_score * gate_mult, 4)
         news_meta: dict[str, Any] = {

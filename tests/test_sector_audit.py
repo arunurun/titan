@@ -2095,3 +2095,58 @@ def test_digest_shadow_gate_notes_in_context(monkeypatch):
     assert "• Shadow (not enforced): regime gate would damp — breadth 33% < floor 40%" in text
     assert "• Shadow (not enforced): overext ceiling gate would cap — stretch 3.8, z 2.4" in text
     assert "hold" in text.splitlines()[0].lower()
+
+
+def test_digest_applied_gate_notes_in_context(monkeypatch):
+    monkeypatch.delenv("TITAN_DIGEST_VERBOSE_SYMBOLS", raising=False)
+    from sector_audit import _digest_shadow_gate_notes, _format_symbol_metrics_line
+
+    audit = {
+        "sector_key": "telecom",
+        "effective_intent_score": 52.0,
+        "z_score": 2.1,
+        "volume_participation_ratio": 1.2,
+        "return_1d_pct": -0.4,
+        "atr_14_pct": 2.4,
+        "next_week_score": 51.0,
+        "sell_signal": "hold",
+        "sell_signal_reasons": ["overextended"],
+        "prediction_breakdown": {"week": {}, "day": {}, "penalties": []},
+        "shadow_gates": [
+            {
+                "gate": "delivery_churn",
+                "mode": "damp",
+                "triggered": True,
+                "would": "damp/withhold (churn)",
+                "reasons": ["avg delivery 13% < floor 20%"],
+                "delivery_avg": 13.0,
+                "delivery_latest": 11.0,
+                "score_multiplier": 0.5,
+                "withhold": False,
+            },
+            {
+                "gate": "institutional",
+                "mode": "damp",
+                "triggered": True,
+                "would": "damp (institutional backdrop)",
+                "reasons": ["FII net -1082 Cr"],
+                "score_multiplier": 0.85,
+                "withhold": False,
+            },
+        ],
+        "signal_overext_ceiling": {
+            "mode": "enforce",
+            "would_ceiling": "hold",
+            "applied_ceiling": "hold",
+            "hot": ["stretch 4.57"],
+        },
+    }
+    notes = _digest_shadow_gate_notes(audit)
+    assert any("Applied: delivery/churn gate" in n for n in notes)
+    assert any("Applied: institutional gate" in n for n in notes)
+    assert any("Applied: overext ceiling gate" in n for n in notes)
+
+    text = _format_symbol_metrics_line({"symbol": "NETWEB", "exchange": "NSE", "audit": audit})
+    assert "• Applied: delivery/churn gate — rank damped (×0.50)" in text
+    assert "• Applied: institutional gate — rank damped (×0.85)" in text
+    assert "• Applied: overext ceiling gate — label capped to hold" in text

@@ -1074,6 +1074,37 @@ def test_calendar_event_gate_noop_when_empty():
     assert gate["n_events"] == 0
 
 
+def test_institutional_gate_damp_when_fii_negative(monkeypatch):
+    from sector_priority import _institutional_gate
+
+    monkeypatch.setenv("TITAN_INSTITUTIONAL_GATE_MODE", "damp")
+    ctx = {"institutional": {"as_of_date": "2026-06-12", "fii_net_crs": -1082.0, "dii_net_crs": 500.0}}
+    gate = _institutional_gate(ctx)
+    assert gate["gate"] == "institutional"
+    assert gate["triggered"] is True
+    assert gate["score_multiplier"] == 0.85
+    assert gate["withhold"] is False
+    assert any("FII net" in r for r in gate["reasons"])
+
+
+def test_institutional_gate_shadow_no_effect(monkeypatch):
+    from sector_priority import _institutional_gate
+
+    monkeypatch.setenv("TITAN_INSTITUTIONAL_GATE_MODE", "shadow")
+    ctx = {"institutional": {"fii_net_crs": -500.0}}
+    gate = _institutional_gate(ctx)
+    assert gate["triggered"] is True
+    assert gate["score_multiplier"] == 1.0
+
+
+def test_gates_default_enforce_bumps_shadow_default(monkeypatch):
+    from sector_priority import _gate_mode
+
+    monkeypatch.delenv("TITAN_DELIVERY_GATE_MODE", raising=False)
+    monkeypatch.setenv("TITAN_GATES_DEFAULT_ENFORCE", "true")
+    assert _gate_mode("TITAN_DELIVERY_GATE_MODE") == "damp"
+
+
 def test_pledge_slb_gate_off_by_default(monkeypatch):
     from sector_priority import _pledge_slb_gate
 
