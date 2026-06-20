@@ -17,6 +17,12 @@ from supabase import create_client
 
 from config_loader import TitanConfig
 from json_util import sanitize_for_json
+from signal_v2_backtest import (
+    audit_has_signal_inputs,
+    feature_row_to_audit,
+    group_rows_by_symbol,
+    recompute_label,
+)
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -2421,8 +2427,6 @@ def persist_action_label_backfill(
     if start is None or end is None or start > end:
         return {"enabled": True, "updated": 0, "reason": "invalid_date_range"}
 
-    import signal_v2_backtest as _sv2bt
-
     fetch_start = (start - timedelta(days=max(7, int(prior_lookback_days)))).isoformat()
     end_iso = end.isoformat()
     start_iso = start.isoformat()
@@ -2445,7 +2449,7 @@ def persist_action_label_backfill(
             "end": end_iso,
         }
 
-    grouped = _sv2bt.group_rows_by_symbol(rows)
+    grouped = group_rows_by_symbol(rows)
     updates: list[dict[str, Any]] = []
     mismatches = 0
     skipped = 0
@@ -2455,13 +2459,13 @@ def persist_action_label_backfill(
         prior: str | None = None
         for row in sym_rows:
             td = str(row.get("trade_date") or "")[:10]
-            audit = _sv2bt.feature_row_to_audit(row)
-            if audit is None or not _sv2bt.audit_has_signal_inputs(audit):
+            audit = feature_row_to_audit(row)
+            if audit is None or not audit_has_signal_inputs(audit):
                 skipped += 1
                 continue
             if prior:
                 audit["prev_action_signal"] = prior
-            new_label = _sv2bt.recompute_label(audit, use_v2=True, prior_label=prior)
+            new_label = recompute_label(audit, use_v2=True, prior_label=prior)
             prior = new_label
             if td < start_iso or td > end_iso:
                 continue

@@ -924,7 +924,7 @@ def test_persist_action_label_backfill_patches_mismatches(monkeypatch):
         lambda client, **kwargs: rows,
     )
     monkeypatch.setattr(
-        "signal_v2_backtest.recompute_label",
+        "analysis_store.recompute_label",
         lambda audit, **kwargs: "trim",
     )
     out = persist_action_label_backfill(
@@ -939,3 +939,6 @@ def test_persist_action_label_backfill_patches_mismatches(monkeypatch):
     assert out["mismatches"] == 1
     assert out["updated"] == 1
     mock_table.update.assert_called_once()
+    update_payload = mock_table.update.call_args[0][0]
+    assert update_payload["action_signal"] == "trim"
+    assert update_payload["tape_extras"]["sell_signal"] == "trim"

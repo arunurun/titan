@@ -246,6 +246,8 @@ def _tier2_thresholds(audit: dict[str, Any]) -> tuple[int, int]:
 def _overext_counts_as_corroborator(audit: dict[str, Any], c: dict[str, Any]) -> bool:
     if not bool(c.get("over_extension_hot")):
         return False
+    if _strong_rally_tape(audit):
+        return False
     cmf = _sf(audit.get("cmf_20"))
     distribution = (not math.isnan(cmf)) and cmf < -0.05
     rel5 = _sf(audit.get("rel_return_5d_vs_nifty_pct"))
@@ -973,8 +975,12 @@ def _buy_gate(audit: dict[str, Any], a: dict[str, Any], c: dict[str, Any]) -> di
     cmf = _sf(audit.get("cmf_20"))
     extreme_move = bool(audit.get("extreme_price_move_proxy"))
 
-    buy_nw_min = _env_float("TITAN_SIGV2_BUY_NEXT_WEEK_MIN", 65.0)
-    buy_intent_min = _env_float("TITAN_SIGV2_BUY_INTENT_MIN", 60.0)
+    buy_nw_min = _profile_float(
+        audit, "buy_nw_min", _env_float("TITAN_SIGV2_BUY_NEXT_WEEK_MIN", 65.0)
+    )
+    buy_intent_min = _profile_float(
+        audit, "buy_intent_min", _env_float("TITAN_SIGV2_BUY_INTENT_MIN", 60.0)
+    )
     buy_delta = _sf(audit.get("regime_buy_threshold_delta"))
     if not math.isnan(buy_delta) and buy_delta != 0.0:
         buy_nw_min += buy_delta
@@ -1035,6 +1041,41 @@ def _leader_participation_floor(audit: dict[str, Any], risk_net: float, *, buy_a
         and eff >= intent_min
         and not math.isnan(vpr)
         and vpr >= vpr_min
+    )
+
+
+def _mid_band_accumulate_ok(
+    audit: dict[str, Any], risk_net: float, *, buy_allowed: bool
+) -> bool:
+    """Scores in the 55-64 buy-gate gap with participation/flow support -> accumulate."""
+    if not buy_allowed or risk_net >= _buy_risk_ceiling():
+        return False
+    nw = _sf(audit.get("next_week_score"))
+    eff = _sf(audit.get("effective_intent_score", audit.get("intent_score")))
+    if math.isnan(nw) or math.isnan(eff):
+        return False
+    score_min = _env_float("TITAN_SIGV2_MID_BAND_SCORE_MIN", _MID_BAND_SCORE_MIN)
+    score_max = _env_float("TITAN_SIGV2_MID_BAND_SCORE_MAX", _MID_BAND_SCORE_MAX)
+    buy_nw = _env_float("TITAN_SIGV2_BUY_NEXT_WEEK_MIN", 65.0)
+    buy_intent = _env_float("TITAN_SIGV2_BUY_INTENT_MIN", 60.0)
+    if nw < score_min or eff < score_min:
+        return False
+    if nw >= buy_nw and eff >= buy_intent:
+        return False
+    if nw > score_max and eff > score_max:
+        return False
+    vpr_min = _env_float("TITAN_SIGV2_MID_BAND_VPR_MIN", _MID_BAND_VPR_MIN)
+    vpr_strong = _env_float("TITAN_SIGV2_MID_BAND_VPR_STRONG", _MID_BAND_VPR_STRONG)
+    cmf_min = _env_float("TITAN_SIGV2_MID_BAND_CMF_MIN", _MID_BAND_CMF_MIN)
+    vpr = _participation_vpr(audit)
+    cmf = _sf(audit.get("cmf_20"))
+    if not math.isnan(vpr) and vpr >= vpr_strong:
+        return True
+    return (
+        not math.isnan(vpr)
+        and vpr >= vpr_min
+        and not math.isnan(cmf)
+        and cmf >= cmf_min
     )
 
 
@@ -1137,6 +1178,8 @@ def _map_label(
             label = "accumulate"
         elif _participation_accumulate_ok(audit, risk_net, buy_allowed=constructive_ok):
             label = "accumulate"
+        elif _mid_band_accumulate_ok(audit, risk_net, buy_allowed=constructive_ok):
+            label = "accumulate"
         elif (
             bool(audit.get("history_lt_200_sessions"))
             and _short_history_accumulate_ok(audit, risk_net)
@@ -1203,7 +1246,21 @@ _SIGV2_CEIL_NEAR_HIGH_PCT = 1.0    # within this % of the 20d high = pinned to h
 
 def _overextension_ceiling_mode() -> str:
     raw = os.environ.get("TITAN_SIGV2_OVEREXT_CEILING_MODE", "").strip().lower()
-    return raw if raw in ("off", "shadow", "damp", "enforce") else "shadow"
+    return raw if raw in ("off", "shadow", "damp", "enforce") else "damp"
+
+
+def _resolve_overext_applied_ceiling(
+    audit: dict[str, Any], oe_ceiling: str | None, oe_mode: str
+) -> str | None:
+    """Apply over-extension ceiling; rally leaders damp hold -> accumulate."""
+    if oe_mode in ("off", "shadow") or oe_ceiling is None:
+        return None
+    rally_damp = oe_ceiling == "hold" and _strong_rally_tape(audit)
+    if oe_mode == "enforce":
+        return "accumulate" if rally_damp else oe_ceiling
+    if oe_mode == "damp":
+        return "accumulate"
+    return None
 
 
 def _overextension_ceiling(audit: dict[str, Any]) -> dict[str, Any]:
@@ -1404,7 +1461,7 @@ _PARTICIPATION_VPR_MIN = 1.2
 _ACCUM_NEXT_WEEK_MIN = 58.0
 _ACCUM_INTENT_MIN = 58.0
 _MID_BAND_SCORE_MIN = 55.0
-_MID_BAND_SCORE_MAX = 65.0
+_MID_BAND_SCORE_MAX = 64.0
 _MID_BAND_VPR_MIN = 1.0
 _MID_BAND_CMF_MIN = 0.0
 _MID_BAND_VPR_STRONG = 1.3
@@ -1581,7 +1638,7 @@ def _tier2_recovery_constructive_cap(
     risk_max = _env_float("TITAN_SIGV2_TIER2_RECOVERY_RISK_MAX", _TIER2_RECOVERY_RISK_MAX)
     intent_min = _tier2_intent_led_intent_min(audit)
     vpr_min = _env_float("TITAN_SIGV2_TIER2_INTENT_LED_VPR_MIN", _TIER2_INTENT_LED_VPR_MIN)
-    nw_min = _env_float("TITAN_SIGV2_TIER2_RECOVERY_NW_MIN", _TIER2_RECOVERY_NW_MIN)
+    nw_min = _tier2_recovery_nw_min(audit)
     eff = _sf(audit.get("effective_intent_score", audit.get("intent_score")))
     nw = _sf(audit.get("next_week_score"))
     vpr = _participation_vpr(audit)
@@ -1631,9 +1688,21 @@ def _participation_accumulate_ok(
     """DATAMATICS-class: strong intent + decent horizon + supportive VPR → accumulate."""
     if not buy_allowed or risk_net >= _buy_risk_ceiling():
         return False
-    intent_min = _env_float("TITAN_SIGV2_PARTICIPATION_INTENT_MIN", _PARTICIPATION_INTENT_MIN)
-    nw_min = _env_float("TITAN_SIGV2_PARTICIPATION_NW_MIN", _PARTICIPATION_NW_MIN)
-    vpr_min = _env_float("TITAN_SIGV2_PARTICIPATION_VPR_MIN", _PARTICIPATION_VPR_MIN)
+    intent_min = _profile_float(
+        audit,
+        "participation_intent_min",
+        _env_float("TITAN_SIGV2_PARTICIPATION_INTENT_MIN", _PARTICIPATION_INTENT_MIN),
+    )
+    nw_min = _profile_float(
+        audit,
+        "participation_nw_min",
+        _env_float("TITAN_SIGV2_PARTICIPATION_NW_MIN", _PARTICIPATION_NW_MIN),
+    )
+    vpr_min = _profile_float(
+        audit,
+        "participation_vpr_min",
+        _env_float("TITAN_SIGV2_PARTICIPATION_VPR_MIN", _PARTICIPATION_VPR_MIN),
+    )
     eff = _sf(audit.get("effective_intent_score", audit.get("intent_score")))
     nw = _sf(audit.get("next_week_score"))
     vpr = _participation_vpr(audit)
@@ -1665,8 +1734,7 @@ def _cap_tier2_for_recovery(
         return forced_label
     c = c or {}
     b_reasons = b_reasons or []
-    exit_count = _env_int("TITAN_SIGV2_B_TIER2_EXIT_COUNT", 3)
-    trim_count = _env_int("TITAN_SIGV2_B_TIER2_TRIM_COUNT", 2)
+    trim_count, exit_count = _tier2_thresholds(audit)
     rally_ok = _recovery_tape_ok(audit, risk_net, rally=True)
     recovery_ok = rally_ok or _recovery_tape_ok(audit, risk_net, rally=False)
     if staleflow_downgrade and not rally_ok:
@@ -1679,6 +1747,16 @@ def _cap_tier2_for_recovery(
             audit["tier2_recovery_deescalation"] = True
             return cap
         return forced_label
+    if (
+        _is_momentum_sector(audit)
+        and rally_ok
+        and forced_label in ("trim", "exit-risk")
+        and _tier2_risk_ok_for_recovery(audit, risk_net)
+    ):
+        cap = _tier2_recovery_constructive_cap(gate, audit, risk_net, buy_allowed=buy_allowed)
+        if _SEVERITY[cap] < _SEVERITY.get(forced_label, 0):
+            audit["tier2_recovery_deescalation"] = True
+            return cap
     if rally_ok:
         cap = _recovery_constructive_cap(gate, audit, risk_net, buy_allowed=buy_allowed)
         if _SEVERITY[cap] < _SEVERITY.get(forced_label, 0):
@@ -1817,6 +1895,7 @@ def evaluate_signal_v2(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
     and writes ``signal_confidence`` / ``signal_reason_trace`` / ``signal_engine_version``
     onto the audit dict in place.
     """
+    _ensure_sector_profile(audit)
     a = layer_a(audit)
     c = layer_c(audit)
     d = layer_d(audit, c)
@@ -1846,11 +1925,7 @@ def evaluate_signal_v2(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
     oe_mode = _overextension_ceiling_mode()
     oe = _overextension_ceiling(audit)
     oe_ceiling = oe.get("ceiling")
-    applied_oe_ceiling: str | None = None
-    if oe_mode == "enforce":
-        applied_oe_ceiling = oe_ceiling
-    elif oe_mode == "damp" and oe_ceiling is not None:
-        applied_oe_ceiling = "accumulate"
+    applied_oe_ceiling = _resolve_overext_applied_ceiling(audit, oe_ceiling, oe_mode)
     label_before_oe = label
     label = _apply_ceiling(label, _combine_ceilings(a.get("label_ceiling"), applied_oe_ceiling))
     audit["signal_overext_ceiling"] = {

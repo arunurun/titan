@@ -107,6 +107,8 @@ _SECTOR_THEME_KEYWORDS: dict[str, tuple[str, ...]] = {
 # P1: sector-tuned constructive thresholds consumed by signal_v2 (always-on, no flags).
 _SECTOR_SIGNAL_PROFILES: dict[str, dict[str, float]] = {
     "ai": {
+        "buy_nw_min": 68.0,
+        "buy_intent_min": 63.0,
         "accum_intent_min": 62.0,
         "accum_nw_min": 60.0,
         "participation_intent_min": 68.0,
