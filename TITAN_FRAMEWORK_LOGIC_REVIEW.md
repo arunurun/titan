@@ -321,7 +321,9 @@ Defaults: `TITAN_SIGV2_A_NAN_MAX = 3` (`:178`), `TITAN_SIGV2_A_SHORT_HISTORY_CON
 nan_count = #{m in CORE_METRICS : isnan(audit[m])}
 if nan_count > 0:   seed *= max(0, 1 - 0.05*nan_count)        # each NaN shaves 5%
 if nan_count >= 3:  buy_allowed=False; seed *= 0.5
-if history_lt_200_sessions: buy_allowed=False; label_ceiling="hold"; seed *= 0.6
+if history_lt_200_sessions:
+    if IPO leader precheck (intent≥75, nw≥70, VPR≥2, CMF>0.05): label_ceiling=None (buy allowed if risk ok)
+    else: buy_allowed=False; label_ceiling="accumulate"; seed *= 0.6
 if liquidity_thin_proxy:    buy_allowed=False
 confidence_seed = clamp(seed, 0, 1)
 ```
@@ -338,9 +340,10 @@ Layer-D multipliers are **not** applied here (applied in E) so raw terms stay in
 | horizon | `next_week_score` | 55 → 45, 3.0 | 3.0 | `:245-247` |
 | intent | `effective_intent_score` | 52 → 45, 2.0 | 2.0 | `:250-252` |
 | z (downside only) | `z_score` | −1 → −2, 2.0 | 2.0 | `:255-257` |
-| momentum | `return_1d_pct` | −1 → −2, `2.0*ret1d_weight` | (sum capped 3.0) | `:261` |
-| momentum | `return_5d_pct` | −2 → −6, 2.0 | | `:262` |
-| momentum | `return_10d_pct` | −6 → −10, 1.5 | | `:263` |
+| momentum | `return_5d_pct` | −2 → −6, ramp×0.10 | (composite cap 3.0) | |
+| momentum | `return_21d_pct` | −4 → −12, ramp×0.25 | | |
+| momentum | `return_63d_pct` | −8 → −20, ramp×0.35 | | |
+| momentum | `return_126d_pct` | −12 → −30, ramp×0.30 | | |
 | trend (below only) | `ema_200_distance_pct` | −2 → −6, 2.0 | 2.0 | `:268` |
 | volatility (preferred) | `atr_penalty_input` | 1.25 → 2.2, 2.0 | 2.0 | `:274` |
 | volatility (fallback) | `atr_14_pct` | 4.0 → 6.0, 2.0 | 2.0 | `:277` |
@@ -349,8 +352,9 @@ Volatility family is **suppressed** when `adx ≥ 25 AND +DI > -DI` (strong bull
 avoid double-count with stretch/over-extension. In that regime C-8 stretch deadband is widened
 ×1.5 (`TITAN_SIGV2_C_STRETCH_DEADBAND_BULL_MULT`).
 
-`ret1d_weight = 0.45 if extreme_price_move_proxy else 1.0` (`:229`). Momentum sub-terms are summed
-then `min(3.0, …)` (`:264`).
+`return_1d_pct` is **excluded** from Layer-C momentum (reserved for
+`extreme_price_move_proxy` / Layer-A anomaly gates). Per-horizon ramps are weighted
+`0.10×5d + 0.25×21d + 0.35×63d + 0.30×126d`, then `min(3.0, …)`.
 
 **C-7 money flow** (`:315-341`) — dead-band ±0.05, scaled by magnitude. Defaults
 `TITAN_SIGV2_C_CMF_K = 10.0` (`:301`), `TITAN_SIGV2_C_CMF_CAP = 2.0` (`:302`):
@@ -403,8 +407,8 @@ Produces multipliers/bumps/flags; **never returns a label**. Defaults: `TITAN_SI
    True` → `pullback_bull_bump = +0.75` and `layer_c_risk_mult = 0.5` (halves Layer-C bear risk
    in `_aggregate` before the divergence bump is added).
 3. **Healthy-pullback rescue** (`:452-461`): `ret1d < 0 AND vpr < 1.0 AND cmf > 0.05 AND ret5d ≥
-   -3.0 AND ema_200_distance_pct ≥ 0` → `mult_momentum = min(mult_momentum, 0.5)` and
-   `pullback_bull_bump = +0.5`.
+   -3.0 AND ema_200_distance_pct ≥ 0` → `mult_momentum *= 0.5` (halves existing multiplier;
+   does **not** floor at 0.5) and `pullback_bull_bump = +0.5`.
 4. **Stale-flow OBV tiebreaker (GREAVESCOT rule)** (`:465-472`): `-0.05 ≤ cmf ≤ 0.05 (neutral) AND
    over_extension_hot AND adx < 20 AND obv_trend_confirm is not True` → `staleflow_downgrade = True`
    (forces TRIM in B and counts as a Tier-2 corroborator).
@@ -499,7 +503,8 @@ forced to `hold` regardless of constructive gates.
 
 Then applied in order inside `evaluate_signal_v2` (`:743-752`):
 1. **`_apply_ceiling`** (`:650-654`): if `label_ceiling == "hold"` and label ∈ {buy, accumulate} →
-   `hold`. (Caps the constructive side only — e.g. `history_lt_200_sessions` forces ceiling=hold.)
+   `hold`. (Caps the constructive side only — e.g. short history without IPO precheck forces
+   ceiling=accumulate.)
 2. **`_escalate`** (`:657-660`): Layer-B `forced_label` overrides **only if strictly more severe**
    per `_SEVERITY` — bearish disqualifiers win ties; constructive labels can never be upgraded.
 3. **`_apply_hysteresis`** (`:663-694`, `TITAN_SIGV2_E_HYST_BUFFER = 0.5`, `:738`): asymmetric
@@ -645,18 +650,17 @@ Walk-forward labels feed `prev_action_signal` so v2 hysteresis is exercised in b
 
 Re-architecture **682657a** (OBV EMA, directional ADX, percentile 1w/1m rank terms, vol de-dup,
 hysteresis 3.0/5.0, 400-day lookback) is baseline. **2de00ac** promoted seven-phase items to
-default production logic. The **June 2026 v2 review** priorities below ship behind feature flags
-(§9) so legacy behaviour is preserved when flags are off; `compute_sector_relative_momentum_score()`
-from 2de00ac remains computed for meta comparison but does not drive `rank_score` unless the
-sector-relative **ranking** flag is enforced.
+default production logic. The **June 2026 v2 review Phase 1** items below are **always-on**
+production logic (no feature flags); sector-relative **ranking** and probability calibration
+remain flag-gated (§9).
 
-| Component | Module | Behaviour (when flag enforced) |
+| Component | Module | Behaviour (always-on unless noted) |
 |---|---|---|
-| Sector-relative ranking | `sector_priority.py` | `compute_sector_relative_rank_score()` replaces 1w/1m return terms (0.30×1m + 0.25×3m + 0.20×rel_strength + 0.15×intent + 0.10×next_week). |
-| Medium-term momentum | `signal_v2.py`, `sector_audit.py` | `return_21d_pct` / `return_63d_pct` / `sector_relative_strength_pctile` in audit; Layer-C momentum bear uses weighted 1d/5d/21d/63d (10/25/30/35%). |
-| Probability calibration | `probability_calibration.py` | Writes `predicted_success_probability` / `signal_probability`; optional confidence replace. |
+| Sector-relative ranking | `sector_priority.py` | **Flag-gated** — see §9. |
+| Medium-term momentum | `signal_v2.py`, `sector_audit.py` | `return_21d/63d/126d_pct` in audit; Layer-C momentum bear uses weighted 5d/21d/63d/126d (10/25/35/30%); 1d excluded. |
+| Probability calibration | `probability_calibration.py` | **Flag-gated** — bucket interpolation; TODO isotonic Phase 2. |
 | Family risk caps | `signal_v2.py` | PRICE (4.0) / FLOW (2.5) / EXTENSION (2.0) / VOLATILITY (2.0) caps in `_aggregate` before `risk_net`. |
-| IPO leader exception | `signal_v2.py` | Short history may **buy** when intent≥75, nw≥70, VPR≥2, CMF>0.05, risk_net<2; else accumulate ceiling. |
+| IPO leader exception | `signal_v2.py` | Short history may **buy** when intent≥75, nw≥70, VPR≥2, CMF>0.05, risk_net<2, not thin liquidity; else accumulate ceiling. |
 | Layer D audit messages | `signal_v2.py` | `strong ADX X (+DI=…, -DI=…)` format (always on — no flag). |
 | Market regime engine | `market_regime.py` | STRONG_BULL / BULL / NEUTRAL / DEFENSIVE / BEAR on `audit["market_regime"]`; adaptations applied by default (`enforce`). Optional `TITAN_REGIME_ENGINE_MODE=shadow\|off` for rollout observation. |
 | Sector-aware Tier-2 | `signal_v2.py` | Momentum sectors (substring match on `sector_key`): trim=3, exit=4; overextension alone never trims. |
@@ -670,17 +674,18 @@ Analytics: `analytics/performance_metrics.py` — profit factor, expectancy, Sha
 ## 9. V2 review rollout flags (Jun 2026)
 
 Shared helper: `src/titan_rollout.py` — `rollout_mode(enable_env, mode_env)` returns
-`off` | `shadow` | `enforce`. Master enable env must be truthy (`1`, `true`, `yes`, `on`);
-when unset/false the mode is **off** (legacy). Sub-mode env defaults to **shadow** when enabled
-but not explicitly set.
+`off` | `shadow` | `enforce`. Used for **remaining** flag-gated items only.
+
+**Always-on (Phase 1, no flags):** medium-term momentum (5d/21d/63d/126d composite),
+family risk caps, IPO leader exception, Layer D healthy-pullback halving (`mult_momentum *= 0.5`).
 
 | Priority | Master flag (default) | Mode env (default when enabled) | Legacy (`off`) | Shadow | Enforce |
 |---|---|---|---|---|---|
-| 1 Sector-relative ranking | `TITAN_ENABLE_SECTOR_RELATIVE_RANKING` (off) | `TITAN_SECTOR_RELATIVE_RANKING_MODE` (shadow) | 1w/1m percentile rank terms | Log `sector_relative_rank_score_shadow`; rank unchanged | `rank_score` uses weighted rank score |
-| 2 Medium-term momentum | `TITAN_MEDIUM_TERM_MOMENTUM` (off) | `TITAN_MEDIUM_TERM_MOMENTUM_MODE` (shadow) | 1d/5d/10d momentum bear | Log `medium_term_momentum_shadow` | Weighted 1d/5d/21d/63d (10/25/30/35%) |
+| 1 Sector-relative ranking | `TITAN_ENABLE_SECTOR_RELATIVE_RANKING` (off) | `TITAN_SECTOR_RELATIVE_RANKING_MODE` (shadow) | 1w/1m percentile rank terms | Log shadow rank | `rank_score` uses weighted rank score |
+| 2 Medium-term momentum | *(always on — no flag)* | — | — | — | Weighted 5d/21d/63d/126d (10/25/35/30%) |
 | 3 Probability calibration | `TITAN_ENABLE_PROBABILITY_CALIBRATION` (off) | `TITAN_PROB_CALIB_MODE` (shadow) | No calibration fields | Write probabilities; keep raw confidence | Replace `signal_confidence` |
-| 4 Family risk caps | `TITAN_ENABLE_FAMILY_CAPS` (off) | `TITAN_FAMILY_CAPS_MODE` (shadow) | Uncapped family sum | Log would-be caps under `family_caps` | Apply PRICE/FLOW/EXTENSION/VOL caps |
-| 5 IPO leader exception | `TITAN_ENABLE_IPO_LEADER_EXCEPTION` (off) | `TITAN_IPO_LEADER_EXCEPTION_MODE` (shadow) | Short history → accumulate ceiling only | Log eligible buy; no label change | Allow buy when precheck + risk ok |
+| 4 Family risk caps | *(always on — no flag)* | — | — | — | Apply PRICE/FLOW/EXTENSION/VOL caps |
+| 5 IPO leader exception | *(always on — no flag)* | — | — | — | Allow buy when precheck + risk ok |
 | 6 Layer D ADX messages | *(none — always on)* | — | — | — | `strong ADX X (+DI=…, -DI=…)` |
 
 **Dual-path note:** With all flags off, behaviour matches pre-review legacy paths. With flags on

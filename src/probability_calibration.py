@@ -2,6 +2,9 @@
 
 ``TITAN_ENABLE_PROBABILITY_CALIBRATION``: master enable (default off = legacy).
 ``TITAN_PROB_CALIB_MODE``: ``shadow`` (record only) or ``enforce`` (replace confidence).
+
+TODO Phase 2: replace bucket interpolation with isotonic regression on walk-forward
+outcomes once sufficient labeled cohort size is available.
 """
 
 from __future__ import annotations

@@ -25,6 +25,9 @@ def _clean_buy_audit() -> dict:
         "return_1d_pct": 2.0,
         "return_5d_pct": 2.0,
         "return_10d_pct": 3.0,
+        "return_21d_pct": 4.0,
+        "return_63d_pct": 6.0,
+        "return_126d_pct": 8.0,
         "rel_return_5d_vs_nifty_pct": 1.0,
         "cmf_20": 0.10,
         "obv_slope_20": 10.0,
@@ -243,6 +246,25 @@ def test_healthy_pullback_rescue():
         {},
     )
     assert d["mult_momentum"] == 0.5
+    assert d["pullback_bull_bump"] > 0.0
+
+
+def test_healthy_pullback_halves_not_caps_momentum_mult():
+    """Halving (×0.5) must not floor a strong-trend mult at 0.5."""
+    d = v2.layer_d(
+        {
+            "return_1d_pct": -1.0,
+            "volume_participation_ratio": 0.8,
+            "cmf_20": 0.12,
+            "return_5d_pct": 2.0,
+            "ema_200_distance_pct": 5.0,
+            "adx_14": 28.0,
+            "adx_plus_di_14": 30.0,
+            "adx_minus_di_14": 12.0,
+        },
+        {},
+    )
+    assert d["mult_momentum"] == pytest.approx(0.65, abs=0.01)
     assert d["pullback_bull_bump"] > 0.0
 
 

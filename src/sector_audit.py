@@ -3214,6 +3214,7 @@ def _apply_sector_cross_section(
         assign_percentile("return_5d_pct", "sector_pctile_return_5d_pct")
         assign_percentile("return_21d_pct", "sector_pctile_return_21d_pct")
         assign_percentile("return_63d_pct", "sector_pctile_return_63d_pct")
+        assign_percentile("return_126d_pct", "sector_pctile_return_126d_pct")
         assign_percentile(
             "rel_return_20d_vs_nifty_pct", "sector_relative_strength_pctile"
         )
@@ -3417,6 +3418,7 @@ def build_equity_live_audit(
             "return_20d_pct": float("nan"),
             "return_21d_pct": float("nan"),
             "return_63d_pct": float("nan"),
+            "return_126d_pct": float("nan"),
             "median_notional_inr_20d": float("nan"),
             "rel_return_5d_vs_nifty_pct": float("nan"),
             "rel_return_10d_vs_nifty_pct": float("nan"),
@@ -3459,6 +3461,7 @@ def build_equity_live_audit(
     ret20d = pct_return_n_sessions_back(series_non_na, 20)
     ret21d = pct_return_n_sessions_back(series_non_na, 21)
     ret63d = pct_return_n_sessions_back(series_non_na, 63)
+    ret126d = pct_return_n_sessions_back(series_non_na, 126)
     med_notional = median_notional_inr_20d(df, close_col)
     bench = getattr(_THREAD_LOCAL, "sector_benchmark_ohlc", None)
     rel_map = benchmark_relative_returns(df, bench, close_col, horizons=(5, 10, 20))
@@ -3635,6 +3638,7 @@ def build_equity_live_audit(
         "return_20d_pct": ret20d,
         "return_21d_pct": ret21d,
         "return_63d_pct": ret63d,
+        "return_126d_pct": ret126d,
         "median_notional_inr_20d": med_notional,
         "extreme_price_move_proxy": extreme_move,
         "rel_return_5d_vs_nifty_pct": rel_map.get("rel_return_5d_vs_nifty_pct", float("nan")),
