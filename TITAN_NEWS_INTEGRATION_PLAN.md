@@ -160,7 +160,7 @@ External Sources (NewsAPI, Finnhub, RSS, Web)
 | `sector_audit.py` | Enrichment hook after technical audit | Non-blocking; news failures don't halt analysis |
 | `brain.py` | Include news in JSON payload to Gemini; update system prompt | Automatic via JSON serialization |
 | `analysis_store.py` | Store `news_correlation` field in `symbol_daily_features` | Enables post-hoc analysis of news impact |
-| CI/CD (GitHub Actions) | Add `news_fetch.yml` workflow on separate schedule | Independent from market_audit.yml |
+| CI/CD (GitHub Actions) | Add `news_fetch.yml` workflow on separate schedule | Independent from run_titan_now.yml |
 
 ---
 

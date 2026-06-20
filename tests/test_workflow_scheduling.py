@@ -18,14 +18,6 @@ def test_run_titan_now_scheduled_630am_ist_weekdays() -> None:
     assert "breeze-token-updator" in text
 
 
-def test_market_audit_is_deprecated_wrapper() -> None:
-    path = ROOT / ".github" / "workflows" / "market_audit.yml"
-    text = path.read_text(encoding="utf-8")
-    assert "deprecated" in text.lower()
-    assert "uses: ./.github/workflows/run_titan_now.yml" in text
-    assert 'cron: "0 1 * * 1-5"' not in text
-
-
 def test_run_titan_now_no_default_symbol_cap() -> None:
     path = ROOT / ".github" / "workflows" / "run_titan_now.yml"
     text = path.read_text(encoding="utf-8")

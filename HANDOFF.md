@@ -35,8 +35,6 @@ Set these repository secrets to enable email alerts for that workflow:
 
 **Run Titan Now** (`run_titan_now.yml`) is the single scheduled workflow: **weekdays 06:30 IST** (`cron: 0 1 * * 1-5` UTC). Scheduled runs use `mode=all_sectors`, `titan_scope=full`, `all_sector_workers=1`, `workers=4`, exclude `unknown,non_equity`, news flags off. Includes market-open guard (IST) and Breeze token-updator fallback on inject failure.
 
-**Market audit** (`market_audit.yml`) is a deprecated manual wrapper — use **Run Titan Now** instead.
-
 Other schedules: post-market reconcile (`daily_post_market_reconcile.yml`, 11:05 IST). ICICI session tokens still expire independently.
 
 ### If a scheduled run does not appear

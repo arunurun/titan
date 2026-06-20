@@ -73,7 +73,6 @@ Protocol scheduling logic:
 Primary workflows:
 
 - [`run_titan_now.yml`](https://github.com/arunurun/titan/blob/main/.github/workflows/run_titan_now.yml)
-- [`market_audit.yml`](https://github.com/arunurun/titan/blob/main/.github/workflows/market_audit.yml)
 - [`refresh_sector_rankings_weekly.yml`](https://github.com/arunurun/titan/blob/main/.github/workflows/refresh_sector_rankings_weekly.yml)
 - [`validate_breeze_token_manual.yml`](https://github.com/arunurun/titan/blob/main/.github/workflows/validate_breeze_token_manual.yml)
 - [`persist_breeze_token_manual.yml`](https://github.com/arunurun/titan/blob/main/.github/workflows/persist_breeze_token_manual.yml)
@@ -171,8 +170,7 @@ Persistence and retrieval glue:
 
 ## 5.5 `.github/workflows/`
 
-- [`run_titan_now.yml`](https://github.com/arunurun/titan/blob/main/.github/workflows/run_titan_now.yml): manual mode dispatch.
-- [`market_audit.yml`](https://github.com/arunurun/titan/blob/main/.github/workflows/market_audit.yml): scheduled audits and token-failure handling.
+- [`run_titan_now.yml`](https://github.com/arunurun/titan/blob/main/.github/workflows/run_titan_now.yml): manual dispatch and scheduled weekday runs (06:30 IST); token-failure handling.
 - [`refresh_sector_rankings_weekly.yml`](https://github.com/arunurun/titan/blob/main/.github/workflows/refresh_sector_rankings_weekly.yml): weekly rankings.
 - [`persist_breeze_token_manual.yml`](https://github.com/arunurun/titan/blob/main/.github/workflows/persist_breeze_token_manual.yml): manual token persist.
 - [`validate_breeze_token_manual.yml`](https://github.com/arunurun/titan/blob/main/.github/workflows/validate_breeze_token_manual.yml): manual token check.
@@ -255,7 +253,7 @@ Provisioning order recommendation:
 | `GEMINI_API_KEY` (+ `_2..5`, list) | env secret | LLM generation | `src/brain.py` | rotate for quota/auth events |
 | `GITHUB_PAT` | proxy secret | workflow dispatch/read | proxy worker | use minimal scopes, rotate periodically |
 | `SMTP_*`, `EMAIL_*` | env secrets | alerts and run notifications | `src/email_notify.py` | rotate mailbox creds and test after updates |
-| `BREEZE_TOKEN_UPDATOR_PAT` | workflow secret | trigger external updater repo | `market_audit.yml` | keep repo dispatch rights current |
+| `BREEZE_TOKEN_UPDATOR_PAT` | workflow secret | trigger external updater repo | `run_titan_now.yml` | keep repo dispatch rights current |
 
 Key precedence rules:
 
@@ -297,7 +295,7 @@ Key precedence rules:
 
 - Validator script: [`scripts/validate_breeze_token_from_supabase.py`](https://github.com/arunurun/titan/blob/main/scripts/validate_breeze_token_from_supabase.py)
 - If invalid, alert email path is triggered.
-- `market_audit.yml` has fallback dispatch path to external updater repo.
+- `run_titan_now.yml` has fallback dispatch path to external updater repo.
 
 Breeze troubleshooting checklist:
 

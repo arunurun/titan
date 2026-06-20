@@ -463,7 +463,7 @@
   - [x] `if: always()`
   - [x] Echo completion + check `news_feed`, `symbol_news_snapshots` (and macro `global_news_snapshots`)
 
-- [x] **Independence from `market_audit.yml`**
+- [x] **Independence from `run_titan_now.yml`**
   - [x] Separate schedule; no coupling to sector audit workflow
 
 ### 4.2 `scripts/fetch_news_batch.py`
