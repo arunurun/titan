@@ -1,9 +1,17 @@
-"""IPO / short-history leader buy exception (always-on)."""
+"""IPO / short-history leader buy exception (flag-gated rollout)."""
 
 from __future__ import annotations
 
+import pytest
+
 from action_signals import derive_action_signal
 import signal_v2 as v2
+
+
+@pytest.fixture(autouse=True)
+def _enforce_ipo(monkeypatch):
+    monkeypatch.setenv("TITAN_ENABLE_IPO_LEADER_EXCEPTION", "1")
+    monkeypatch.setenv("TITAN_IPO_LEADER_EXCEPTION_MODE", "enforce")
 
 
 def _ipo_leader_audit() -> dict:
@@ -55,3 +63,11 @@ def test_thin_liquidity_blocks_ipo_buy():
     audit["liquidity_thin_proxy"] = True
     label, _, _ = derive_action_signal(audit)
     assert label != "buy"
+
+
+def test_legacy_mode_accumulate_ceiling_only(monkeypatch):
+    monkeypatch.delenv("TITAN_ENABLE_IPO_LEADER_EXCEPTION", raising=False)
+    audit = _ipo_leader_audit()
+    a = v2.layer_a(audit)
+    assert a["buy_allowed"] is False
+    assert a["label_ceiling"] == "accumulate"

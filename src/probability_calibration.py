@@ -1,5 +1,6 @@
-"""Historical score → P(up 5d) calibration layer (always-on).
+"""Historical score → P(up 5d) calibration layer (flag-gated rollout).
 
+``TITAN_ENABLE_PROBABILITY_CALIBRATION``: master enable (default off = legacy).
 ``TITAN_PROB_CALIB_MODE``: ``shadow`` (record only) or ``enforce`` (replace confidence).
 """
 
@@ -8,6 +9,8 @@ from __future__ import annotations
 import math
 import os
 from typing import Any
+
+from titan_rollout import rollout_mode
 
 _DEFAULT_BUCKETS: tuple[tuple[float, float, float], ...] = (
     (0.0, 45.0, 0.28),
@@ -20,9 +23,15 @@ _DEFAULT_BUCKETS: tuple[tuple[float, float, float], ...] = (
 )
 
 
-def _calibration_mode() -> str:
-    raw = os.environ.get("TITAN_PROB_CALIB_MODE", "enforce").strip().lower()
-    return raw if raw in ("shadow", "enforce") else "enforce"
+def calibration_mode() -> str:
+    return rollout_mode(
+        "TITAN_ENABLE_PROBABILITY_CALIBRATION",
+        "TITAN_PROB_CALIB_MODE",
+    )
+
+
+def calibration_enabled() -> bool:
+    return calibration_mode() != "off"
 
 
 def _sf(v: Any) -> float:
@@ -80,14 +89,19 @@ def apply_probability_calibration(
     *,
     calibrator: ProbabilityCalibrator | None = None,
 ) -> dict[str, Any]:
+    mode = calibration_mode()
+    if mode == "off":
+        out: dict[str, Any] = {"enabled": False, "mode": "off"}
+        audit["probability_calibration"] = out
+        return out
+
     cal = calibrator or ProbabilityCalibrator()
     score = _sf(audit.get("next_week_score", audit.get("effective_intent_score")))
     sector = audit.get("sector") or audit.get("sector_key")
     prob = cal.predict(score, sector=str(sector) if sector else None)
-    mode = _calibration_mode()
     raw_conf = _sf(audit.get("signal_confidence"))
 
-    out: dict[str, Any] = {
+    out = {
         "enabled": True,
         "mode": mode,
         "input_score": None if math.isnan(score) else round(score, 2),

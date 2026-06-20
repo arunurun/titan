@@ -641,26 +641,53 @@ Walk-forward labels feed `prev_action_signal` so v2 hysteresis is exercised in b
 
 ---
 
-## 7b. Seven-phase + v2 review improvements (Jun 2026, always-on core logic)
+## 7b. Seven-phase + v2 review improvements (Jun 2026)
 
 Re-architecture **682657a** (OBV EMA, directional ADX, percentile 1w/1m rank terms, vol de-dup,
-hysteresis 3.0/5.0, 400-day lookback) is baseline; the items below are always-on production logic
-(no feature flags).
+hysteresis 3.0/5.0, 400-day lookback) is baseline. **2de00ac** promoted seven-phase items to
+default production logic. The **June 2026 v2 review** priorities below ship behind feature flags
+(§9) so legacy behaviour is preserved when flags are off; `compute_sector_relative_momentum_score()`
+from 2de00ac remains computed for meta comparison but does not drive `rank_score` unless the
+sector-relative **ranking** flag is enforced.
 
-| Component | Module | Behaviour |
+| Component | Module | Behaviour (when flag enforced) |
 |---|---|---|
 | Sector-relative ranking | `sector_priority.py` | `compute_sector_relative_rank_score()` replaces 1w/1m return terms (0.30×1m + 0.25×3m + 0.20×rel_strength + 0.15×intent + 0.10×next_week). |
-| Medium-term momentum | `signal_v2.py`, `sector_audit.py` | `return_21d_pct` / `return_63d_pct` in audit; Layer-C momentum bear uses weighted 1d/5d/21d/63d (10/25/30/35%). |
-| Probability calibration | `probability_calibration.py` | Always writes `predicted_probability`, `predicted_success_probability`, `signal_probability`; confidence replaced by default (`enforce`). Optional `TITAN_PROB_CALIB_MODE=shadow\|off` for confidence-only observation. |
+| Medium-term momentum | `signal_v2.py`, `sector_audit.py` | `return_21d_pct` / `return_63d_pct` / `sector_relative_strength_pctile` in audit; Layer-C momentum bear uses weighted 1d/5d/21d/63d (10/25/30/35%). |
+| Probability calibration | `probability_calibration.py` | Writes `predicted_success_probability` / `signal_probability`; optional confidence replace. |
 | Family risk caps | `signal_v2.py` | PRICE (4.0) / FLOW (2.5) / EXTENSION (2.0) / VOLATILITY (2.0) caps in `_aggregate` before `risk_net`. |
 | IPO leader exception | `signal_v2.py` | Short history may **buy** when intent≥75, nw≥70, VPR≥2, CMF>0.05, risk_net<2; else accumulate ceiling. |
-| Layer D audit messages | `signal_v2.py` | `strong ADX X (+DI=…, -DI=…)` format for directional ADX reasons. |
+| Layer D audit messages | `signal_v2.py` | `strong ADX X (+DI=…, -DI=…)` format (always on — no flag). |
 | Market regime engine | `market_regime.py` | STRONG_BULL / BULL / NEUTRAL / DEFENSIVE / BEAR on `audit["market_regime"]`; adaptations applied by default (`enforce`). Optional `TITAN_REGIME_ENGINE_MODE=shadow\|off` for rollout observation. |
 | Sector-aware Tier-2 | `signal_v2.py` | Momentum sectors (substring match on `sector_key`): trim=3, exit=4; overextension alone never trims. |
 | V2 rank penalty cap | `sector_priority.py` | Default **−3.0**; `TITAN_V2_RANK_PENALTY_FAMILY_CAP` (0.30) caps single-family share. |
 | Multi-horizon stretch | `stretch_engine.py` | Composite stretch (0.5×ema20 + 0.3×ema50 + 0.2×52w) in v2 C-8. |
 
 Analytics: `analytics/performance_metrics.py` — profit factor, expectancy, Sharpe, drawdown.
+
+---
+
+## 9. V2 review rollout flags (Jun 2026)
+
+Shared helper: `src/titan_rollout.py` — `rollout_mode(enable_env, mode_env)` returns
+`off` | `shadow` | `enforce`. Master enable env must be truthy (`1`, `true`, `yes`, `on`);
+when unset/false the mode is **off** (legacy). Sub-mode env defaults to **shadow** when enabled
+but not explicitly set.
+
+| Priority | Master flag (default) | Mode env (default when enabled) | Legacy (`off`) | Shadow | Enforce |
+|---|---|---|---|---|---|
+| 1 Sector-relative ranking | `TITAN_ENABLE_SECTOR_RELATIVE_RANKING` (off) | `TITAN_SECTOR_RELATIVE_RANKING_MODE` (shadow) | 1w/1m percentile rank terms | Log `sector_relative_rank_score_shadow`; rank unchanged | `rank_score` uses weighted rank score |
+| 2 Medium-term momentum | `TITAN_MEDIUM_TERM_MOMENTUM` (off) | `TITAN_MEDIUM_TERM_MOMENTUM_MODE` (shadow) | 1d/5d/10d momentum bear | Log `medium_term_momentum_shadow` | Weighted 1d/5d/21d/63d (10/25/30/35%) |
+| 3 Probability calibration | `TITAN_ENABLE_PROBABILITY_CALIBRATION` (off) | `TITAN_PROB_CALIB_MODE` (shadow) | No calibration fields | Write probabilities; keep raw confidence | Replace `signal_confidence` |
+| 4 Family risk caps | `TITAN_ENABLE_FAMILY_CAPS` (off) | `TITAN_FAMILY_CAPS_MODE` (shadow) | Uncapped family sum | Log would-be caps under `family_caps` | Apply PRICE/FLOW/EXTENSION/VOL caps |
+| 5 IPO leader exception | `TITAN_ENABLE_IPO_LEADER_EXCEPTION` (off) | `TITAN_IPO_LEADER_EXCEPTION_MODE` (shadow) | Short history → accumulate ceiling only | Log eligible buy; no label change | Allow buy when precheck + risk ok |
+| 6 Layer D ADX messages | *(none — always on)* | — | — | — | `strong ADX X (+DI=…, -DI=…)` |
+
+**Dual-path note:** With all flags off, behaviour matches pre-review legacy paths. With flags on
+in shadow, audit/meta records show would-be v2 outcomes without changing published ranks or
+action labels. Enforce applies the v2 review logic. `compute_sector_relative_momentum_score()`
+(2de00ac weights) is always computed in ranking meta for analytics but is distinct from the
+rank-score path gated by priority 1.
 
 ---
 
@@ -709,20 +736,3 @@ caveats and stale-doc points found by diffing code against the in-repo docs.
    `sector_priority.py:2197-2208`), news RSS, and yfinance macro are best-effort with graceful
    `NaN`/fallback handling; missing data degrades scores rather than failing, which a reviewer
    should keep in mind when interpreting any single run.
-
----
-
-## 9. V2 review priorities (always-on, June 2026)
-
-All six review priorities below are **always-on production logic** (no master enable flags).
-Operational sub-modes remain only where noted (e.g. confidence replacement for probability
-calibration).
-
-| Priority | Behaviour | Notes |
-|---|---|---|
-| 1 Sector-relative rank | `compute_sector_relative_rank_score()` weights 30/25/20/15/10 drives `rank_score`; `compute_sector_relative_momentum_score()` is an alias | Replaces legacy percentile 1w/1m momentum term |
-| 2 Medium-term momentum | Layer-C weighted 1d/5d/21d/63d (10/25/30/35%); audit includes `return_21d_pct`, `return_63d_pct` | `extreme_price_move_proxy` dampens 1d only |
-| 3 Probability calibration | Always writes `predicted_success_probability` / `signal_probability` | `TITAN_PROB_CALIB_MODE`: `shadow` (record only) or `enforce` (replace `signal_confidence`) |
-| 4 Family risk caps | Cap PRICE=4.0, FLOW=2.5, EXT=2.0, VOL=2.0 before `risk_net`; horizon/intent outside caps | Audit `family_caps.groups` |
-| 5 IPO leader exception | Short history → accumulate ceiling; BUY when intent≥75, nw≥70, VPR≥2.0, CMF>0.05, risk_net<2.0 | Audit `ipo_leader_exception.applied_buy` |
-| 6 Audit messages | Layer-D ADX reasons show `(+DI=x, -DI=y)` | Always on |

@@ -22,6 +22,8 @@ import math
 import os
 from typing import Any
 
+from titan_rollout import rollout_mode
+
 # ---------------------------------------------------------------------------
 # config helpers (mirror analysis_store._env_truthy semantics)
 # ---------------------------------------------------------------------------
@@ -122,6 +124,18 @@ def _suppress_volatility_penalty(audit: dict[str, Any]) -> bool:
 def v2_enabled() -> bool:
     """V2 is always the production signal path."""
     return True
+
+
+def _medium_term_momentum_mode() -> str:
+    return rollout_mode("TITAN_MEDIUM_TERM_MOMENTUM", "TITAN_MEDIUM_TERM_MOMENTUM_MODE")
+
+
+def _family_caps_mode() -> str:
+    return rollout_mode("TITAN_ENABLE_FAMILY_CAPS", "TITAN_FAMILY_CAPS_MODE")
+
+
+def _ipo_leader_exception_mode() -> str:
+    return rollout_mode("TITAN_ENABLE_IPO_LEADER_EXCEPTION", "TITAN_IPO_LEADER_EXCEPTION_MODE")
 
 
 _FAMILY_CAP_LIMITS = {
@@ -359,9 +373,16 @@ def layer_a(audit: dict[str, Any]) -> dict[str, Any]:
         reasons.append(f"NaN census >= {nan_max}: buy withheld")
 
     if bool(audit.get("history_lt_200_sessions")):
-        if _ipo_leader_precheck(audit):
-            out["label_ceiling"] = "accumulate"
+        ipo_mode = _ipo_leader_exception_mode()
+        if ipo_mode == "enforce" and _ipo_leader_precheck(audit):
+            out["label_ceiling"] = None
             reasons.append("short history: IPO leader precheck passed (buy allowed if risk ok)")
+        elif ipo_mode == "shadow" and _ipo_leader_precheck(audit):
+            out["buy_allowed"] = False
+            out["label_ceiling"] = "accumulate"
+            seed *= short_hist_conf
+            reasons.append("short history: would allow IPO leader buy (shadow)")
+            audit["ipo_leader_exception"] = {"mode": "shadow", "would_buy": True, "precheck": True}
         else:
             out["buy_allowed"] = False
             out["label_ceiling"] = "accumulate"
@@ -392,6 +413,7 @@ def _family_points(audit: dict[str, Any]) -> dict[str, Any]:
     z = _sf(audit.get("z_score"))
     ret1d = _sf(audit.get("return_1d_pct"))
     ret5d = _sf(audit.get("return_5d_pct"))
+    ret10d = _sf(audit.get("return_10d_pct"))
     ret21d = _sf(audit.get("return_21d_pct"))
     ret63d = _sf(audit.get("return_63d_pct"))
     ema_dist = _sf(audit.get("ema_200_distance_pct"))
@@ -428,14 +450,31 @@ def _family_points(audit: dict[str, Any]) -> dict[str, Any]:
     fam["z"] = min(2.0, zc)
     add("z", "z_score", z, fam["z"])
 
-    # Multi-day momentum (cap 3): weighted 1/5/21/63d horizons (10/25/30/35%).
-    unit = 3.0
-    r1 = _ramp(ret1d, zero_at=-1.0, full_at=-2.0, full_points=unit) * ret1d_weight
-    r5 = _ramp(ret5d, zero_at=-2.0, full_at=-6.0, full_points=unit)
-    r21 = _ramp(ret21d, zero_at=-4.0, full_at=-12.0, full_points=unit)
-    r63 = _ramp(ret63d, zero_at=-8.0, full_at=-20.0, full_points=unit)
-    fam["momentum"] = min(unit, 0.10 * r1 + 0.25 * r5 + 0.30 * r21 + 0.35 * r63)
-    add("momentum", "return_1d/5d/21d/63d_pct", ret1d, fam["momentum"])
+    mom_mode = _medium_term_momentum_mode()
+    if mom_mode == "enforce":
+        unit = 3.0
+        r1 = _ramp(ret1d, zero_at=-1.0, full_at=-2.0, full_points=unit) * ret1d_weight
+        r5 = _ramp(ret5d, zero_at=-2.0, full_at=-6.0, full_points=unit)
+        r21 = _ramp(ret21d, zero_at=-4.0, full_at=-12.0, full_points=unit)
+        r63 = _ramp(ret63d, zero_at=-8.0, full_at=-20.0, full_points=unit)
+        fam["momentum"] = min(unit, 0.10 * r1 + 0.25 * r5 + 0.30 * r21 + 0.35 * r63)
+        add("momentum", "return_1d/5d/21d/63d_pct", ret1d, fam["momentum"])
+    else:
+        mom = 0.0
+        mom += _ramp(ret1d, zero_at=-1.0, full_at=-2.0, full_points=2.0 * ret1d_weight)
+        mom += _ramp(ret5d, zero_at=-2.0, full_at=-6.0, full_points=2.0)
+        mom += _ramp(ret10d, zero_at=-6.0, full_at=-10.0, full_points=1.5)
+        fam["momentum"] = min(3.0, mom)
+        add("momentum", "return_1d/5d/10d_pct", ret1d, fam["momentum"])
+        if mom_mode == "shadow":
+            unit = 3.0
+            r1 = _ramp(ret1d, zero_at=-1.0, full_at=-2.0, full_points=unit) * ret1d_weight
+            r5 = _ramp(ret5d, zero_at=-2.0, full_at=-6.0, full_points=unit)
+            r21 = _ramp(ret21d, zero_at=-4.0, full_at=-12.0, full_points=unit)
+            r63 = _ramp(ret63d, zero_at=-8.0, full_at=-20.0, full_points=unit)
+            audit["medium_term_momentum_shadow"] = {
+                "would_momentum": round(min(unit, 0.10 * r1 + 0.25 * r5 + 0.30 * r21 + 0.35 * r63), 4),
+            }
 
     # Below-EMA200 trend only (cap 2): ramp -2 -> -6 (over-extension is C-8)
     em = _ramp(ema_dist, zero_at=-2.0, full_at=-6.0, full_points=2.0)
@@ -835,17 +874,48 @@ def _aggregate(c: dict[str, Any], d: dict[str, Any], audit: dict[str, Any] | Non
     volatility = _sf(fam.get("volatility", 0.0)) * mult_risk
     fundamental = _sf(c.get("fundamental", 0.0))
 
-    risk_c, capped_groups = _apply_family_caps_to_risk(
-        fam=fam,
-        momentum_scaled=momentum_scaled,
-        money_flow_bear=money_flow_bear,
-        over_extension=over_extension,
-        upside_z=upside_z,
-        volatility=volatility,
-        fundamental=0.0,
-    )
-    risk_c += fundamental
-    audit["family_caps"] = {"groups": capped_groups}
+    caps_mode = _family_caps_mode()
+    if caps_mode == "enforce":
+        risk_c, capped_groups = _apply_family_caps_to_risk(
+            fam=fam,
+            momentum_scaled=momentum_scaled,
+            money_flow_bear=money_flow_bear,
+            over_extension=over_extension,
+            upside_z=upside_z,
+            volatility=volatility,
+            fundamental=0.0,
+        )
+        risk_c += fundamental
+        audit["family_caps"] = {"mode": "enforce", "groups": capped_groups}
+    else:
+        risk_c = (
+            _sf(fam.get("horizon", 0.0))
+            + _sf(fam.get("intent", 0.0))
+            + _sf(fam.get("z", 0.0))
+            + momentum_scaled
+            + _sf(fam.get("trend", 0.0))
+            + volatility
+            + money_flow_bear
+            + over_extension
+            + upside_z
+            + fundamental
+        )
+        if caps_mode == "shadow":
+            _, capped_groups = _apply_family_caps_to_risk(
+                fam=fam,
+                momentum_scaled=momentum_scaled,
+                money_flow_bear=money_flow_bear,
+                over_extension=over_extension,
+                upside_z=upside_z,
+                volatility=volatility,
+                fundamental=0.0,
+            )
+            audit["family_caps"] = {
+                "mode": "shadow",
+                "would_groups": capped_groups,
+                "would_risk_c": round(sum(capped_groups.values()) + fundamental, 4),
+                "published_risk_c": round(risk_c, 4),
+            }
 
     risk_c *= layer_c_mult
     risk_c += _sf(d.get("divergence_bump", 0.0))
@@ -1671,10 +1741,17 @@ def evaluate_signal_v2(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
     prior_label = _prior_label_from_audit(audit)
     label = _map_label(risk_net, gate, audit, a, prior_label=prior_label)
     if bool(audit.get("history_lt_200_sessions")):
-        if _ipo_leader_buy_ok(audit, risk_net) and gate.get("clean_buy"):
+        ipo_mode = _ipo_leader_exception_mode()
+        if ipo_mode == "enforce" and _ipo_leader_buy_ok(audit, risk_net) and gate.get("clean_buy"):
             label = "buy"
             a["label_ceiling"] = None
-            audit["ipo_leader_exception"] = {"applied_buy": True}
+            audit["ipo_leader_exception"] = {"mode": "enforce", "applied_buy": True}
+        elif ipo_mode == "shadow" and _ipo_leader_buy_ok(audit, risk_net):
+            audit["ipo_leader_exception"] = {
+                "mode": "shadow",
+                "would_buy": True,
+                "published_label": label,
+            }
         elif label in ("buy", "accumulate") and not _short_history_accumulate_ok(audit, risk_net):
             label = "hold"
     # STEP 2b: over-extension ceiling (shadow-first). Compute the would-be cap always;

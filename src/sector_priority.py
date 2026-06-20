@@ -25,9 +25,12 @@ from breeze_client import fetch_equity_data, volume_participation_ratio
 from config_loader import TitanConfig
 from sector_registry import SectorInstrument, expand_symbols_with_aliases, symbol_lookup_variants
 from tape_metrics import percentile_rank_0_100
+from titan_rollout import rollout_mode
+
 logger = logging.getLogger(__name__)
 
 _SECTOR_RELATIVE_RANK_WEIGHTS = (0.30, 0.25, 0.20, 0.15, 0.10)
+_SECTOR_RELATIVE_MOMENTUM_WEIGHTS = (0.35, 0.25, 0.20, 0.10, 0.10)
 IST = ZoneInfo("Asia/Kolkata")
 _NSE_HOME_URL = "https://www.nseindia.com"
 _NSE_QUOTE_URL = "https://www.nseindia.com/api/quote-equity?symbol={symbol}"
@@ -1973,6 +1976,13 @@ def _load_previous_market_caps(
 
 
 
+def sector_relative_ranking_mode() -> str:
+    return rollout_mode(
+        "TITAN_ENABLE_SECTOR_RELATIVE_RANKING",
+        "TITAN_SECTOR_RELATIVE_RANKING_MODE",
+    )
+
+
 def _sector_relative_weighted_score(
     *,
     sector_pctile_return_1m: float,
@@ -2023,13 +2033,14 @@ def compute_sector_relative_momentum_score(
     sector_pctile_intent: float,
     sector_pctile_next_week: float,
 ) -> float:
-    """Alias for ``compute_sector_relative_rank_score`` (always-on rank weights)."""
-    return compute_sector_relative_rank_score(
+    """2de00ac sector-relative momentum score (distinct weights from rank score)."""
+    return _sector_relative_weighted_score(
         sector_pctile_return_1m=sector_pctile_return_1m,
         sector_pctile_return_3m=sector_pctile_return_3m,
         sector_pctile_rel_strength=sector_pctile_rel_strength,
         sector_pctile_intent=sector_pctile_intent,
         sector_pctile_next_week=sector_pctile_next_week,
+        weights=_SECTOR_RELATIVE_MOMENTUM_WEIGHTS,
     )
 
 
@@ -2306,6 +2317,7 @@ def _score_from_features(
     percentile_1m: float = 50.0,
     sector_relative_score: float | None = None,
     sector_relative_rank_score: float | None = None,
+    ranking_mode: str | None = None,
 ) -> float:
     ref_1w = _env_float("TITAN_RANK_PCTILE_1W_REF", _PCTILE_1W_REF_RETURN)
     ref_1m = _env_float("TITAN_RANK_PCTILE_1M_REF", _PCTILE_1M_REF_RETURN)
@@ -2314,8 +2326,9 @@ def _score_from_features(
     ret_1w_term = 1.1 * (pct_1w / 100.0) * ref_1w
     ret_1m_term = 0.45 * (pct_1m / 100.0) * ref_1m
     absorption_term = _absorption_term(absorption, session_move)["value"]
+    mode = ranking_mode or sector_relative_ranking_mode()
     ref_total = _env_float("TITAN_SRM_REF_POINTS", ref_1w + ref_1m)
-    if sector_relative_rank_score is not None:
+    if mode == "enforce" and sector_relative_rank_score is not None:
         momentum_term = (float(sector_relative_rank_score) / 100.0) * ref_total
     else:
         momentum_term = ret_1w_term + ret_1m_term
@@ -3345,6 +3358,7 @@ def build_sector_rankings(
         bucket = p["bucket"]
         pct_1w = _safe_float(p.get("percentile_1w"))
         pct_1m = _safe_float(p.get("percentile_1m"))
+        rank_mode = sector_relative_ranking_mode()
         pct_inputs = {
             "sector_pctile_return_1m": pct_1m,
             "sector_pctile_return_3m": _safe_float(p.get("percentile_3m")),
@@ -3374,7 +3388,8 @@ def build_sector_rankings(
             session_move=ret_1d,
             percentile_1w=pct_1w,
             percentile_1m=pct_1m,
-            sector_relative_rank_score=srr_score,
+            sector_relative_rank_score=srr_score if rank_mode == "enforce" else None,
+            ranking_mode=rank_mode,
         )
         pre_gate_score = round(base_score + blend_points, 4)
         v2_signal = _resolve_v2_signal(symbol_u, eod_ctx)
@@ -3451,6 +3466,8 @@ def build_sector_rankings(
                     ),
                     "sector_relative_momentum_score": srm_score,
                     "sector_relative_rank_score": srr_score,
+                    "sector_relative_ranking_mode": rank_mode,
+                    "sector_relative_rank_score_shadow": srr_score if rank_mode == "shadow" else None,
                     "overextension_penalty": overext.get("penalty", 0.0),
                     "overextension_components": overext.get("components", {}),
                     "absorption_term": absorption_bd,

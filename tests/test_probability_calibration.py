@@ -1,6 +1,14 @@
-"""Probability calibration layer (always-on)."""
+"""Probability calibration layer (flag-gated rollout)."""
 
 from __future__ import annotations
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _enable_calibration(monkeypatch):
+    monkeypatch.setenv("TITAN_ENABLE_PROBABILITY_CALIBRATION", "1")
+    monkeypatch.setenv("TITAN_PROB_CALIB_MODE", "enforce")
 
 
 def test_probability_monotonic_in_score():
@@ -29,7 +37,7 @@ def test_calibration_improves_brier_vs_raw_confidence():
     assert brier_score(calibrated, outcomes) < brier_score(raw_conf, outcomes)
 
 
-def test_calibration_always_writes_audit():
+def test_calibration_writes_audit_when_enabled():
     from probability_calibration import ProbabilityCalibrator, apply_probability_calibration
 
     audit = {"next_week_score": 67.0, "signal_confidence": 0.55}
@@ -53,3 +61,14 @@ def test_shadow_mode_preserves_raw_confidence(monkeypatch):
     assert audit["predicted_probability"] == 0.48
     assert audit["predicted_success_probability"] == 0.48
     assert audit["signal_confidence"] == 0.55
+
+
+def test_legacy_mode_skips_calibration(monkeypatch):
+    from probability_calibration import apply_probability_calibration
+
+    monkeypatch.delenv("TITAN_ENABLE_PROBABILITY_CALIBRATION", raising=False)
+    audit = {"next_week_score": 67.0, "signal_confidence": 0.55}
+    out = apply_probability_calibration(audit)
+    assert out["enabled"] is False
+    assert out["mode"] == "off"
+    assert "predicted_probability" not in audit

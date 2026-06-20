@@ -1,8 +1,14 @@
-"""Sector-relative rank score (always-on production path)."""
+"""Sector-relative rank score with legacy/shadow/enforce rollout."""
 
 from __future__ import annotations
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _enforce_ranking(monkeypatch):
+    monkeypatch.setenv("TITAN_ENABLE_SECTOR_RELATIVE_RANKING", "1")
+    monkeypatch.setenv("TITAN_SECTOR_RELATIVE_RANKING_MODE", "enforce")
 
 
 def test_top_percentile_beats_large_absolute_return():
@@ -28,6 +34,7 @@ def test_top_percentile_beats_large_absolute_return():
         ret_1m=4.0,
         absorption=1.0,
         sector_relative_rank_score=high_pct,
+        ranking_mode="enforce",
     )
     score_low = _score_from_features(
         bucket="small",
@@ -35,6 +42,7 @@ def test_top_percentile_beats_large_absolute_return():
         ret_1m=20.0,
         absorption=1.0,
         sector_relative_rank_score=low_pct,
+        ranking_mode="enforce",
     )
     assert score_high > score_low
 
@@ -99,7 +107,34 @@ def test_intent_and_next_week_weighted_in_rank_score():
     assert intent_led > flat
 
 
-def test_momentum_alias_matches_rank_score():
+def test_legacy_mode_uses_percentile_1w_1m_terms(monkeypatch):
+    from sector_priority import _score_from_features
+
+    monkeypatch.delenv("TITAN_ENABLE_SECTOR_RELATIVE_RANKING", raising=False)
+    legacy = _score_from_features(
+        bucket="small",
+        ret_1w=10.0,
+        ret_1m=8.0,
+        absorption=1.0,
+        percentile_1w=80.0,
+        percentile_1m=70.0,
+        sector_relative_rank_score=99.0,
+        ranking_mode="off",
+    )
+    with_rank = _score_from_features(
+        bucket="small",
+        ret_1w=10.0,
+        ret_1m=8.0,
+        absorption=1.0,
+        percentile_1w=80.0,
+        percentile_1m=70.0,
+        sector_relative_rank_score=99.0,
+        ranking_mode="enforce",
+    )
+    assert with_rank > legacy
+
+
+def test_momentum_score_differs_from_rank_score():
     from sector_priority import (
         compute_sector_relative_momentum_score,
         compute_sector_relative_rank_score,
@@ -112,6 +147,4 @@ def test_momentum_alias_matches_rank_score():
         sector_pctile_intent=66.0,
         sector_pctile_next_week=64.0,
     )
-    assert compute_sector_relative_momentum_score(**kwargs) == pytest.approx(
-        compute_sector_relative_rank_score(**kwargs)
-    )
+    assert compute_sector_relative_momentum_score(**kwargs) != compute_sector_relative_rank_score(**kwargs)
