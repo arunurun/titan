@@ -16,3 +16,4 @@ feedparser>=6.0.10
 requests>=2.32.0
 yfinance>=0.2.40  # live PM macro series (DXY, gold, silver, SGE proxy)
 nltk>=3.8.1
+# Optional (Phase 3 meta-label BUY veto): pip install lightgbm

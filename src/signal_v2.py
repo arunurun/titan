@@ -197,17 +197,47 @@ _MOMENTUM_SECTORS = frozenset({
     "railways_transport_infra",
     "power_utilities",
     "defence",
+    "telecom",
+    "data_centre",
+    "ai",
 })
+
+
+def _is_momentum_sector(audit: dict[str, Any]) -> bool:
+    sector_clean = str(audit.get("sector_key") or audit.get("sector") or "").strip().lower()
+    return any(m_sec.lower().strip() in sector_clean for m_sec in _MOMENTUM_SECTORS)
+
+
+def _ensure_sector_profile(audit: dict[str, Any]) -> None:
+    if audit.get("sector_signal_profile"):
+        return
+    sk = str(audit.get("sector_key") or audit.get("sector") or "").strip()
+    if not sk:
+        return
+    try:
+        from sector_priority import sector_signal_profile_for
+
+        profile = sector_signal_profile_for(sk)
+        if profile:
+            audit["sector_signal_profile"] = profile
+    except ImportError:
+        pass
+
+
+def _profile_float(audit: dict[str, Any], key: str, default: float) -> float:
+    profile = audit.get("sector_signal_profile")
+    if isinstance(profile, dict) and key in profile:
+        try:
+            return float(profile[key])
+        except (TypeError, ValueError):
+            pass
+    return default
 
 
 def _tier2_thresholds(audit: dict[str, Any]) -> tuple[int, int]:
     trim = _env_int("TITAN_SIGV2_B_TIER2_TRIM_COUNT", 2)
     exit_c = _env_int("TITAN_SIGV2_B_TIER2_EXIT_COUNT", 3)
-    sector_clean = str(audit.get("sector_key") or audit.get("sector") or "").strip().lower()
-    is_momentum_sector = any(
-        m_sec.lower().strip() in sector_clean for m_sec in _MOMENTUM_SECTORS
-    )
-    if is_momentum_sector:
+    if _is_momentum_sector(audit):
         trim = 3
         exit_c = 4
     return trim, exit_c
@@ -965,7 +995,8 @@ def _buy_gate(audit: dict[str, Any], a: dict[str, Any], c: dict[str, Any]) -> di
         and not (not math.isnan(ret5d) and ret5d <= -4.0)
         and not (not math.isnan(rel5) and rel5 <= -3.0)
     )
-    flow_ok = math.isnan(cmf) or cmf >= -0.05
+    cmf_min = _profile_float(audit, "cmf_constructive_min", -0.05)
+    flow_ok = math.isnan(cmf) or cmf >= cmf_min
     not_overextended = not bool(c.get("over_extension_hot"))
     clean = core and flow_ok and not_overextended
     return {
@@ -979,8 +1010,8 @@ def _accumulate_band(audit: dict[str, Any], risk_net: float, *, buy_allowed: boo
     """Lower-bar accumulate when scores are decent and risk is low."""
     if not buy_allowed or risk_net >= _buy_risk_ceiling():
         return False
-    nw_min = _env_float("TITAN_SIGV2_ACCUM_NEXT_WEEK_MIN", _ACCUM_NEXT_WEEK_MIN)
-    intent_min = _env_float("TITAN_SIGV2_ACCUM_INTENT_MIN", _ACCUM_INTENT_MIN)
+    nw_min = _profile_float(audit, "accum_nw_min", _env_float("TITAN_SIGV2_ACCUM_NEXT_WEEK_MIN", _ACCUM_NEXT_WEEK_MIN))
+    intent_min = _profile_float(audit, "accum_intent_min", _env_float("TITAN_SIGV2_ACCUM_INTENT_MIN", _ACCUM_INTENT_MIN))
     next_week = _sf(audit.get("next_week_score"))
     eff = _sf(audit.get("effective_intent_score", audit.get("intent_score")))
     return (
@@ -995,8 +1026,8 @@ def _leader_participation_floor(audit: dict[str, Any], risk_net: float, *, buy_a
     """Leader + participation: strong intent with elevated VPR → at least accumulate."""
     if not buy_allowed or risk_net >= _buy_risk_ceiling():
         return False
-    intent_min = _env_float("TITAN_SIGV2_LEADER_INTENT_MIN", 65.0)
-    vpr_min = _env_float("TITAN_SIGV2_LEADER_VPR_MIN", 1.5)
+    intent_min = _profile_float(audit, "leader_intent_min", _env_float("TITAN_SIGV2_LEADER_INTENT_MIN", 65.0))
+    vpr_min = _profile_float(audit, "leader_vpr_min", _env_float("TITAN_SIGV2_LEADER_VPR_MIN", 1.5))
     eff = _sf(audit.get("effective_intent_score", audit.get("intent_score")))
     vpr = _participation_vpr(audit)
     return (
@@ -1372,15 +1403,63 @@ _PARTICIPATION_NW_MIN = 62.0
 _PARTICIPATION_VPR_MIN = 1.2
 _ACCUM_NEXT_WEEK_MIN = 58.0
 _ACCUM_INTENT_MIN = 58.0
+_MID_BAND_SCORE_MIN = 55.0
+_MID_BAND_SCORE_MAX = 65.0
+_MID_BAND_VPR_MIN = 1.0
+_MID_BAND_CMF_MIN = 0.0
+_MID_BAND_VPR_STRONG = 1.3
 _THIN_LIQ_INTENT_MIN = 65.0
 _THIN_LIQ_NW_MIN = 60.0
 _RECOVERY_RISK_MAX = 5.0
 # Tier-2 post-overextension / intent-led de-escalation (tunable via TITAN_SIGV2_TIER2_* env).
 _TIER2_RECOVERY_INTENT_MIN = 65.0
 _TIER2_RECOVERY_NW_MIN = 55.0
+_TIER2_MOMENTUM_RECOVERY_INTENT_MIN = 60.0
+_TIER2_MOMENTUM_RECOVERY_NW_MIN = 52.0
 _TIER2_RECOVERY_RISK_MAX = 5.0
 _TIER2_INTENT_LED_INTENT_MIN = 70.0
+_TIER2_MOMENTUM_INTENT_LED_INTENT_MIN = 65.0
 _TIER2_INTENT_LED_VPR_MIN = 1.2
+
+
+def _tier2_recovery_intent_min(audit: dict[str, Any]) -> float:
+    default = _TIER2_MOMENTUM_RECOVERY_INTENT_MIN if _is_momentum_sector(audit) else _TIER2_RECOVERY_INTENT_MIN
+    env_key = (
+        "TITAN_SIGV2_TIER2_MOMENTUM_RECOVERY_INTENT_MIN"
+        if _is_momentum_sector(audit)
+        else "TITAN_SIGV2_TIER2_RECOVERY_INTENT_MIN"
+    )
+    return _env_float(env_key, default)
+
+
+def _tier2_recovery_nw_min(audit: dict[str, Any]) -> float:
+    default = _TIER2_MOMENTUM_RECOVERY_NW_MIN if _is_momentum_sector(audit) else _TIER2_RECOVERY_NW_MIN
+    env_key = (
+        "TITAN_SIGV2_TIER2_MOMENTUM_RECOVERY_NW_MIN"
+        if _is_momentum_sector(audit)
+        else "TITAN_SIGV2_TIER2_RECOVERY_NW_MIN"
+    )
+    return _env_float(env_key, default)
+
+
+def _tier2_intent_led_intent_min(audit: dict[str, Any]) -> float:
+    default = (
+        _TIER2_MOMENTUM_INTENT_LED_INTENT_MIN
+        if _is_momentum_sector(audit)
+        else _TIER2_INTENT_LED_INTENT_MIN
+    )
+    env_key = (
+        "TITAN_SIGV2_TIER2_MOMENTUM_INTENT_LED_INTENT_MIN"
+        if _is_momentum_sector(audit)
+        else "TITAN_SIGV2_TIER2_INTENT_LED_INTENT_MIN"
+    )
+    return _env_float(env_key, default)
+
+
+def _strong_rally_tape(audit: dict[str, Any]) -> bool:
+    """Bullish ADX trend with supportive CMF — overext damp-only, not hard hold."""
+    cmf = _sf(audit.get("cmf_20"))
+    return _bullish_adx_trend(audit) and not math.isnan(cmf) and cmf >= 0.05
 
 
 def _prior_defensive_streak(audit: dict[str, Any]) -> int:
@@ -1456,8 +1535,8 @@ def _tier2_post_overext_recovery_ok(
         return False
     if not _tier2_tape_rally_ok(audit):
         return False
-    intent_min = _env_float("TITAN_SIGV2_TIER2_RECOVERY_INTENT_MIN", _TIER2_RECOVERY_INTENT_MIN)
-    nw_min = _env_float("TITAN_SIGV2_TIER2_RECOVERY_NW_MIN", _TIER2_RECOVERY_NW_MIN)
+    intent_min = _tier2_recovery_intent_min(audit)
+    nw_min = _tier2_recovery_nw_min(audit)
     eff = _sf(audit.get("effective_intent_score", audit.get("intent_score")))
     nw = _sf(audit.get("next_week_score"))
     return (
@@ -1477,7 +1556,7 @@ def _tier2_intent_led_recovery_ok(audit: dict[str, Any], risk_net: float) -> boo
         return False
     if not _tier2_tape_rally_ok(audit):
         return False
-    intent_min = _env_float("TITAN_SIGV2_TIER2_INTENT_LED_INTENT_MIN", _TIER2_INTENT_LED_INTENT_MIN)
+    intent_min = _tier2_intent_led_intent_min(audit)
     vpr_min = _env_float("TITAN_SIGV2_TIER2_INTENT_LED_VPR_MIN", _TIER2_INTENT_LED_VPR_MIN)
     eff = _sf(audit.get("effective_intent_score", audit.get("intent_score")))
     vpr = _participation_vpr(audit)
@@ -1500,7 +1579,7 @@ def _tier2_recovery_constructive_cap(
     if gate.get("constructive_core"):
         return "accumulate"
     risk_max = _env_float("TITAN_SIGV2_TIER2_RECOVERY_RISK_MAX", _TIER2_RECOVERY_RISK_MAX)
-    intent_min = _env_float("TITAN_SIGV2_TIER2_INTENT_LED_INTENT_MIN", _TIER2_INTENT_LED_INTENT_MIN)
+    intent_min = _tier2_intent_led_intent_min(audit)
     vpr_min = _env_float("TITAN_SIGV2_TIER2_INTENT_LED_VPR_MIN", _TIER2_INTENT_LED_VPR_MIN)
     nw_min = _env_float("TITAN_SIGV2_TIER2_RECOVERY_NW_MIN", _TIER2_RECOVERY_NW_MIN)
     eff = _sf(audit.get("effective_intent_score", audit.get("intent_score")))
@@ -1837,6 +1916,13 @@ def evaluate_signal_v2(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
     mapped_label = label
     label = _resolve_layer_a_final_label(mapped_label, a)
     audit["layer_a_boundary"] = {"mapped_label": mapped_label, "final_label": label}
+
+    try:
+        from meta_label import apply_meta_label_veto
+
+        label = apply_meta_label_veto(label, audit, risk_net=risk_net)
+    except ImportError:
+        pass
 
     confidence = _confidence(
         final_label=label,
