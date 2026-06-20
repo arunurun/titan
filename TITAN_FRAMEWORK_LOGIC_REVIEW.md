@@ -491,7 +491,7 @@ constructive_core = core
 
 **Mapping ladder** `_map_label(risk_net, gate, audit, a, prior_label)`:
 ```
-risk_net >= 7.5:                     exit-risk   (TITAN_SIGV2_E_EXIT_RISK_MIN)
+risk_net >= 7.0:                     exit-risk   (TITAN_SIGV2_E_EXIT_RISK_MIN)
 risk_net >= 5:                       trim          (TITAN_SIGV2_E_TRIM_RISK_MIN)
 risk_net <  5 and clean_buy and risk < 3:         buy   (TITAN_SIGV2_E_BUY_RISK_MAX)
 risk_net <  5 and constructive_core and risk < 3: accumulate

@@ -52,3 +52,11 @@ def test_momentum_sector_requires_higher_corroboration():
     trim2, exit2 = _tier2_thresholds({"sector_key": "pharma_healthcare"})
     assert trim2 == 2
     assert exit2 == 3
+
+
+def test_momentum_sector_case_insensitive_substring():
+    from signal_v2 import _tier2_thresholds
+
+    trim, exit_c = _tier2_thresholds({"sector_key": "India_DEFENCE_and_aerospace"})
+    assert trim == 3
+    assert exit_c == 4

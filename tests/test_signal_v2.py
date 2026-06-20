@@ -185,7 +185,17 @@ def test_adx_regime_multipliers():
 
 
 def test_divergence_caps_buy_confidence():
-    d = v2.layer_d({"return_1d_pct": 5.0, "cmf_20": -0.1, "adx_14": 22.0}, {})
+    d = v2.layer_d(
+        {
+            "return_1d_pct": 5.0,
+            "cmf_20": -0.1,
+            "adx_14": 22.0,
+            "obv_trend_confirm": False,
+            "obv_latest": 90.0,
+            "obv_ema_20": 100.0,
+        },
+        {},
+    )
     assert d["divergence_bump"] == 1.0
     assert d["buy_confidence_cap"] == 0.5
 
@@ -788,7 +798,8 @@ def test_map_label_uses_asymmetric_risk_thresholds():
     assert v2._map_label(2.5, gate, {}, a) == "buy"
     assert v2._map_label(3.5, gate, {}, a) == "hold"
     assert v2._map_label(5.5, gate, {}, a) == "trim"
-    assert v2._map_label(7.0, gate, {}, a) == "trim"
+    assert v2._map_label(6.9, gate, {}, a) == "trim"
+    assert v2._map_label(7.0, gate, {}, a) == "exit-risk"
     assert v2._map_label(7.5, gate, {}, a) == "exit-risk"
 
 
