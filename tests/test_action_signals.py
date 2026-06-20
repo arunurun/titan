@@ -76,12 +76,16 @@ def test_derive_trim_and_exit_bands():
             "next_week_score": 48.0,
             "effective_intent_score": 48.0,
             "return_1d_pct": -1.5,
+            "return_5d_pct": -8.0,
+            "return_21d_pct": -10.0,
+            "return_63d_pct": -15.0,
+            "return_126d_pct": -20.0,
             "event_risk_soon": True,
             "fundamental_status": "balanced",
         }
     )
     assert trim_sig == "trim"
-    assert 4.0 <= trim_risk < 7.0
+    assert 5.0 <= trim_risk < 7.0
 
     exit_sig, exit_risk, _ = derive_action_signal(
         {

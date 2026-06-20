@@ -1200,7 +1200,13 @@ def test_digest_action_summary_counts_accumulate_separately(mock_load, mock_metr
         },
     ]
     def _preserve_preset_sell_signal(audit):
-        preset = str(audit.get("sell_signal") or "hold")
+        presets = {
+            "ACC": "accumulate",
+            "HLD": "hold",
+            "TRM": "trim",
+            "EXT": "exit-risk",
+        }
+        preset = presets.get(str(audit.get("symbol") or "").upper(), "hold")
         return preset, 3.0, ["preset signal"]
 
     with patch("breeze_client.create_breeze_session", return_value=MagicMock()):
@@ -1666,6 +1672,10 @@ def test_sell_signal_framework_states():
             "effective_intent_score": 48.0,
             "z_score": -0.7,
             "return_1d_pct": -1.5,
+            "return_5d_pct": -8.0,
+            "return_21d_pct": -10.0,
+            "return_63d_pct": -15.0,
+            "return_126d_pct": -20.0,
             "ema_200_distance_pct": -1.2,
             "atr_14_pct": 3.2,
             "fundamental_status": "balanced",
@@ -1709,7 +1719,7 @@ def test_sell_signal_framework_states():
     assert hold_signal == "hold"
     assert hold_risk < 4.0
     assert trim_signal == "trim"
-    assert 4.0 <= trim_risk < 7.0
+    assert 5.0 <= trim_risk < 7.0
     assert exit_signal == "exit-risk"
     assert exit_risk >= 7.0
     assert reasons

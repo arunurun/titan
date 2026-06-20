@@ -81,8 +81,8 @@ TICKER_CASES: tuple[TickerCase, ...] = (
             "ema200_stretch_atr": 5.0,
         },
         "legacy_label": "buy",
-        "v2_label": "trim",
-        "driving_layer": "B Tier-2: C-8 over-extension hot + cmf distribution",
+        "v2_label": "accumulate",
+        "driving_layer": "B Tier-2: C-8 over-extension hot + cmf distribution (recovery de-escalates trim)",
     },
     {
         "ticker": "BALAMINES",
