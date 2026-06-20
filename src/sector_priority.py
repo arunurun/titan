@@ -24,6 +24,7 @@ from supabase import create_client
 from breeze_client import fetch_equity_data, volume_participation_ratio
 from config_loader import TitanConfig
 from sector_registry import SectorInstrument, expand_symbols_with_aliases, symbol_lookup_variants
+from tape_metrics import percentile_rank_0_100
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -1970,6 +1971,23 @@ def _load_previous_market_caps(
     return out
 
 
+def _cohort_return_percentiles(pending: list[dict[str, Any]]) -> None:
+    """Assign cross-sectional 1w/1m return percentiles; NaN returns -> sector median."""
+    ret_1w_vals = [float(p["ret_1w"]) for p in pending if not math.isnan(_safe_float(p.get("ret_1w")))]
+    ret_1m_vals = [float(p["ret_1m"]) for p in pending if not math.isnan(_safe_float(p.get("ret_1m")))]
+    for p in pending:
+        r1w = _safe_float(p.get("ret_1w"))
+        r1m = _safe_float(p.get("ret_1m"))
+        if math.isnan(r1w):
+            p["percentile_1w"] = _PCTILE_MEDIAN_DEFAULT
+        else:
+            p["percentile_1w"] = percentile_rank_0_100(ret_1w_vals, r1w)
+        if math.isnan(r1m):
+            p["percentile_1m"] = _PCTILE_MEDIAN_DEFAULT
+        else:
+            p["percentile_1m"] = percentile_rank_0_100(ret_1m_vals, r1m)
+
+
 def _return_pct(series: pd.Series, periods_back: int) -> float:
     s = pd.to_numeric(series, errors="coerce").dropna()
     if len(s) <= periods_back:
@@ -2218,9 +2236,15 @@ def _score_from_features(
     ema_dist: float = float("nan"),
     regime_hostile: bool = False,
     session_move: float = float("nan"),
+    percentile_1w: float = 50.0,
+    percentile_1m: float = 50.0,
 ) -> float:
-    ret_1w_term = 0.0 if math.isnan(ret_1w) else (ret_1w * 1.1)
-    ret_1m_term = 0.0 if math.isnan(ret_1m) else (ret_1m * 0.45)
+    ref_1w = _env_float("TITAN_RANK_PCTILE_1W_REF", _PCTILE_1W_REF_RETURN)
+    ref_1m = _env_float("TITAN_RANK_PCTILE_1M_REF", _PCTILE_1M_REF_RETURN)
+    pct_1w = 50.0 if math.isnan(percentile_1w) else percentile_1w
+    pct_1m = 50.0 if math.isnan(percentile_1m) else percentile_1m
+    ret_1w_term = 1.1 * (pct_1w / 100.0) * ref_1w
+    ret_1m_term = 0.45 * (pct_1m / 100.0) * ref_1m
     # P0-2 (STEP 3a): capped + sign-gated absorption term (down-day no longer a bonus).
     absorption_term = _absorption_term(absorption, session_move)["value"]
     score = _cap_bias(bucket) + ret_1w_term + ret_1m_term + absorption_term
@@ -2600,7 +2624,7 @@ _V2_RISK_SUPPRESS = ("trim", "exit-risk")
 _V2_RISK_DAMP_MULT = 0.5
 _V2_RANK_BONUS_MAX = 1.5
 _V2_RANK_PENALTY_MAX = 6.0
-_V2_RANK_TRIM_THRESHOLD = 4.0
+_V2_RANK_TRIM_THRESHOLD = 5.0
 _V2_LABEL_RISK_NET: dict[str, float] = {
     "buy": 1.0,
     "accumulate": 2.5,
@@ -2610,7 +2634,12 @@ _V2_LABEL_RISK_NET: dict[str, float] = {
 }
 _EXTREME_MOMENTUM_1W_PCT = 10.0
 _EXTREME_MOMENTUM_RANK = 5
-_RANK_LOOKBACK_CALENDAR_DAYS = 120
+_RANK_LOOKBACK_CALENDAR_DAYS = 400
+_MIN_EMA200_SESSIONS = 250
+_PCTILE_1W_REF_RETURN = 11.0  # maps p100 -> ~12.1 pts (equiv to 11% * 1.1)
+_PCTILE_1M_REF_RETURN = 11.0  # maps p100 -> ~5.0 pts (equiv to 11% * 0.45)
+_PCTILE_MEDIAN_DEFAULT = 50.0
+_V2_RANK_VOL_DAMP_FRAC = 0.25  # damp v2 penalty when overextension already penalized
 
 
 def _parse_v2_risk_net(raw: Any) -> float:
@@ -2663,7 +2692,11 @@ def _resolve_v2_signal(symbol: str, eod_ctx: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _v2_rank_adjustment(v2: dict[str, Any]) -> dict[str, Any]:
+def _v2_rank_adjustment(
+    v2: dict[str, Any],
+    *,
+    overextension_penalty: float = 0.0,
+) -> dict[str, Any]:
     """Translate signal_v2 risk_net into a rank_score bonus/penalty term."""
     label = str(v2.get("label") or "").strip().lower()
     risk_net = _safe_float(v2.get("risk_net"))
@@ -2676,6 +2709,7 @@ def _v2_rank_adjustment(v2: dict[str, Any]) -> dict[str, Any]:
     bonus_max = _env_float("TITAN_V2_RANK_BONUS_MAX", _V2_RANK_BONUS_MAX)
     penalty_max = _env_float("TITAN_V2_RANK_PENALTY_MAX", _V2_RANK_PENALTY_MAX)
     trim_at = _env_float("TITAN_V2_RANK_TRIM_THRESHOLD", _V2_RANK_TRIM_THRESHOLD)
+    vol_damp = _env_float("TITAN_V2_RANK_VOL_DAMP_FRAC", _V2_RANK_VOL_DAMP_FRAC)
     if risk_net < trim_at:
         frac = 1.0 - (risk_net / trim_at) if trim_at > 0 else 0.0
         adj = bonus_max * _clamp(frac, 0.0, 1.0)
@@ -2685,6 +2719,10 @@ def _v2_rank_adjustment(v2: dict[str, Any]) -> dict[str, Any]:
         frac = (risk_net - trim_at) / span
         adj = -penalty_max * _clamp(frac, 0.0, 1.0)
         mode = "penalty"
+        # De-conflict: when sector overextension penalty already fired, damp duplicate vol/risk.
+        if overextension_penalty > 0.05 and vol_damp > 0.0:
+            adj *= max(0.0, 1.0 - vol_damp)
+            mode = "penalty_vol_damped"
     return {
         "adjustment": round(adj, 4),
         "label": label or None,
@@ -3026,7 +3064,8 @@ def build_sector_rankings(
         as_of_date=as_of_date,
     )
     institutional_ctx = _institutional_context(eod_ctx)
-    rows: list[dict[str, Any]] = []
+    pending: list[dict[str, Any]] = []
+    rank_lookback = int(_env_float("TITAN_RANK_LOOKBACK_DAYS", float(_RANK_LOOKBACK_CALENDAR_DAYS)))
     for inst in instruments:
         issues: list[str] = []
         symbol_u = str(inst.symbol).strip().upper()
@@ -3038,10 +3077,7 @@ def build_sector_rankings(
                 inst.symbol,
                 inst.exchange,
                 breeze=breeze,
-                lookback_calendar_days=max(
-                    90,
-                    int(_env_float("TITAN_RANK_LOOKBACK_DAYS", float(_RANK_LOOKBACK_CALENDAR_DAYS))),
-                ),
+                lookback_calendar_days=rank_lookback,
                 max_retries=2,
             )
         except BreezeDataStaleError as exc:
@@ -3058,9 +3094,8 @@ def build_sector_rankings(
         ret_1m = _return_pct(series, periods_back=20)
         ret_1d = _return_pct(series, periods_back=1)  # latest session move (P0-2 sign-gate)
         absorption = volume_participation_ratio(df) if not df.empty else float("nan")
-        # Fix A inputs: ATR-normalized EMA200 stretch (NaN-safe; needs full history +
-        # OHLC, so it stays NaN when the 90-day fetch is too short -- penalty then
-        # relies on the run channel only).
+        # Fix A inputs: ATR-normalized EMA200 stretch (NaN-safe; needs ~250 sessions +
+        # OHLC for reliable EMA200/ATR stretch).
         ema_dist, stretch = _stretch_inputs_from_df(df, series)
         market_cap_cr, market_cap_source = fetch_nse_market_cap_inr_cr(inst.symbol)
         if market_cap_cr is None:
@@ -3085,6 +3120,42 @@ def build_sector_rankings(
             issues.append("return_1m_missing")
         if math.isnan(absorption):
             issues.append("absorption_missing")
+        pending.append(
+            {
+                "inst": inst,
+                "symbol_u": symbol_u,
+                "issues": issues,
+                "df": df,
+                "ret_1w": ret_1w,
+                "ret_1m": ret_1m,
+                "ret_1d": ret_1d,
+                "absorption": absorption,
+                "stretch": stretch,
+                "ema_dist": ema_dist,
+                "market_cap_cr": market_cap_cr,
+                "market_cap_source": market_cap_source,
+                "bucket": bucket,
+            }
+        )
+
+    _cohort_return_percentiles(pending)
+    rows: list[dict[str, Any]] = []
+    for p in pending:
+        inst = p["inst"]
+        symbol_u = p["symbol_u"]
+        issues = p["issues"]
+        df = p["df"]
+        ret_1w = p["ret_1w"]
+        ret_1m = p["ret_1m"]
+        ret_1d = p["ret_1d"]
+        absorption = p["absorption"]
+        stretch = p["stretch"]
+        ema_dist = p["ema_dist"]
+        market_cap_cr = p["market_cap_cr"]
+        market_cap_source = p["market_cap_source"]
+        bucket = p["bucket"]
+        pct_1w = _safe_float(p.get("percentile_1w"))
+        pct_1m = _safe_float(p.get("percentile_1m"))
         overext = _overextension_penalty(
             ret_1w=ret_1w,
             ret_1m=ret_1m,
@@ -3103,10 +3174,15 @@ def build_sector_rankings(
             ema_dist=ema_dist,
             regime_hostile=regime_hostile,
             session_move=ret_1d,
+            percentile_1w=pct_1w,
+            percentile_1m=pct_1m,
         )
         pre_gate_score = round(base_score + blend_points, 4)
         v2_signal = _resolve_v2_signal(symbol_u, eod_ctx)
-        v2_rank = _v2_rank_adjustment(v2_signal)
+        v2_rank = _v2_rank_adjustment(
+            v2_signal,
+            overextension_penalty=float(overext.get("penalty") or 0.0),
+        )
         pre_gate_score = round(pre_gate_score + float(v2_rank.get("adjustment") or 0.0), 4)
         # Shadow-mode buy-suppression gates (regime + delivery/ban/futures/v2-risk). In
         # the default shadow mode the multiplier is 1.0 / withhold False, so the published
@@ -3164,6 +3240,8 @@ def build_sector_rankings(
                     "rows_count": int(len(df)),
                     "issues": sorted(set(issues)),
                     "technical_rank_score": base_score,
+                    "percentile_1w": _round_or_none(pct_1w, digits=2),
+                    "percentile_1m": _round_or_none(pct_1m, digits=2),
                     "overextension_penalty": overext.get("penalty", 0.0),
                     "overextension_components": overext.get("components", {}),
                     "absorption_term": absorption_bd,

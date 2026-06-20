@@ -200,6 +200,48 @@ def calculate_cmf(data: pd.DataFrame, window: int = 20) -> float:
     return float(cmf.iloc[-1])
 
 
+def _obv_series(data: pd.DataFrame) -> pd.Series:
+    """Cumulative on-balance volume; empty when close/volume unavailable."""
+    if data.empty:
+        return pd.Series(dtype=float)
+    req = {"close", "volume"}
+    if not req.issubset(set(data.columns)):
+        return pd.Series(dtype=float)
+    c = pd.to_numeric(data["close"], errors="coerce")
+    v = pd.to_numeric(data["volume"], errors="coerce")
+    if c.dropna().empty or v.dropna().empty:
+        return pd.Series(dtype=float)
+    delta = c.diff()
+    direction = delta.apply(lambda x: 1.0 if x > 0 else (-1.0 if x < 0 else 0.0))
+    return (direction * v.fillna(0.0)).cumsum().dropna()
+
+
+def calculate_obv_latest(data: pd.DataFrame) -> float:
+    """Latest cumulative OBV level (signed, not normalized)."""
+    obv = _obv_series(data)
+    if obv.empty:
+        return float("nan")
+    return float(obv.iloc[-1])
+
+
+def calculate_obv_ema(data: pd.DataFrame, span: int = 20) -> float:
+    """20-session EMA of the OBV series (trend baseline)."""
+    obv = _obv_series(data)
+    if obv.empty or span < 1:
+        return float("nan")
+    ema = obv.ewm(span=span, adjust=False).mean()
+    return float(ema.iloc[-1])
+
+
+def calculate_obv_trend_confirm(data: pd.DataFrame, span: int = 20) -> bool | None:
+    """True when current OBV exceeds its EMA baseline (uptrend confirm)."""
+    obv = calculate_obv_latest(data)
+    baseline = calculate_obv_ema(data, span=span)
+    if math.isnan(obv) or math.isnan(baseline):
+        return None
+    return bool(obv > baseline)
+
+
 def calculate_obv_slope(data: pd.DataFrame, window: int = 20) -> float:
     """
     Linear slope of OBV over the latest window.
@@ -207,16 +249,7 @@ def calculate_obv_slope(data: pd.DataFrame, window: int = 20) -> float:
     """
     if data.empty or window < 2:
         return float("nan")
-    req = {"close", "volume"}
-    if not req.issubset(set(data.columns)):
-        return float("nan")
-    c = pd.to_numeric(data["close"], errors="coerce")
-    v = pd.to_numeric(data["volume"], errors="coerce")
-    if c.dropna().empty or v.dropna().empty:
-        return float("nan")
-    delta = c.diff()
-    direction = delta.apply(lambda x: 1.0 if x > 0 else (-1.0 if x < 0 else 0.0))
-    obv = (direction * v.fillna(0.0)).cumsum().dropna()
+    obv = _obv_series(data)
     if len(obv) < 2:
         return float("nan")
     tail = obv.iloc[-min(window, len(obv)) :]

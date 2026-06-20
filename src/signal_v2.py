@@ -54,6 +54,71 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _buy_risk_ceiling() -> float:
+    return _env_float("TITAN_SIGV2_E_BUY_RISK_MAX", _SIGV2_BUY_RISK_MAX)
+
+
+def _trim_risk_floor() -> float:
+    return _env_float("TITAN_SIGV2_E_TRIM_RISK_MIN", _SIGV2_TRIM_RISK_MIN)
+
+
+def _exit_risk_floor() -> float:
+    return _env_float("TITAN_SIGV2_E_EXIT_RISK_MIN", _SIGV2_EXIT_RISK_MIN)
+
+
+def _obv_trend_confirm(audit: dict[str, Any]) -> bool | None:
+    """Read OBV trend confirm from audit; None when unavailable."""
+    raw = audit.get("obv_trend_confirm")
+    if raw is None:
+        obv = _sf(audit.get("obv_latest"))
+        ema = _sf(audit.get("obv_ema_20"))
+        if math.isnan(obv) or math.isnan(ema):
+            return None
+        return obv > ema
+    return bool(raw)
+
+
+def _adx_plus_di(audit: dict[str, Any]) -> float:
+    return _sf(audit.get("adx_plus_di_14", audit.get("plus_di_14")))
+
+
+def _adx_minus_di(audit: dict[str, Any]) -> float:
+    return _sf(audit.get("adx_minus_di_14", audit.get("minus_di_14")))
+
+
+def _bullish_adx_trend(audit: dict[str, Any]) -> bool:
+    adx = _sf(audit.get("adx_14"))
+    plus_di = _adx_plus_di(audit)
+    minus_di = _adx_minus_di(audit)
+    adx_strong = _env_float("TITAN_SIGV2_D_ADX_STRONG", 25.0)
+    return (
+        not math.isnan(adx)
+        and adx >= adx_strong
+        and not math.isnan(plus_di)
+        and not math.isnan(minus_di)
+        and plus_di > minus_di
+    )
+
+
+def _bearish_adx_trend(audit: dict[str, Any]) -> bool:
+    adx = _sf(audit.get("adx_14"))
+    plus_di = _adx_plus_di(audit)
+    minus_di = _adx_minus_di(audit)
+    adx_strong = _env_float("TITAN_SIGV2_D_ADX_STRONG", 25.0)
+    return (
+        not math.isnan(adx)
+        and adx >= adx_strong
+        and not math.isnan(plus_di)
+        and not math.isnan(minus_di)
+        and minus_di > plus_di
+    )
+
+
+def _suppress_volatility_penalty(audit: dict[str, Any]) -> bool:
+    """Skip ATR volatility accumulation in strong bullish ADX trends."""
+    return _bullish_adx_trend(audit)
+
+
 def v2_enabled() -> bool:
     """V2 is always the production signal path."""
     return True
@@ -81,6 +146,10 @@ _SEVERITY: dict[str, int] = {
     "trim": 3,
     "exit-risk": 4,
 }
+
+_SIGV2_BUY_RISK_MAX = 3.0
+_SIGV2_TRIM_RISK_MIN = 5.0
+_SIGV2_EXIT_RISK_MIN = 7.0
 
 
 def _sf(v: Any) -> float:
@@ -270,14 +339,18 @@ def _family_points(audit: dict[str, Any]) -> dict[str, Any]:
     add("trend", "ema_200_distance_pct", ema_dist, fam["trend"])
 
     # Volatility (cap 2): prefer ATR-vs-sector input, else raw ATR%
-    if not math.isnan(atr_pi):
-        vo = _ramp(atr_pi, zero_at=1.25, full_at=2.2, full_points=2.0)
-        vmetric, vval = "atr_penalty_input", atr_pi
+    # Suppressed in strong bullish ADX (+DI>-DI) to avoid double-count with stretch.
+    if not _suppress_volatility_penalty(audit):
+        if not math.isnan(atr_pi):
+            vo = _ramp(atr_pi, zero_at=1.25, full_at=2.2, full_points=2.0)
+            vmetric, vval = "atr_penalty_input", atr_pi
+        else:
+            vo = _ramp(atr_pct, zero_at=4.0, full_at=6.0, full_points=2.0)
+            vmetric, vval = "atr_14_pct", atr_pct
+        fam["volatility"] = min(2.0, vo)
+        add("volatility", vmetric, vval, fam["volatility"])
     else:
-        vo = _ramp(atr_pct, zero_at=4.0, full_at=6.0, full_points=2.0)
-        vmetric, vval = "atr_14_pct", atr_pct
-    fam["volatility"] = min(2.0, vo)
-    add("volatility", vmetric, vval, fam["volatility"])
+        fam["volatility"] = 0.0
 
     return {"families": fam, "trace": trace}
 
@@ -293,16 +366,16 @@ def layer_c(audit: dict[str, Any]) -> dict[str, Any]:
     trace: list[dict[str, Any]] = list(fp["trace"])
 
     cmf = _sf(audit.get("cmf_20"))
-    obv = _sf(audit.get("obv_slope_20"))
+    obv_confirm = _obv_trend_confirm(audit)
     stretch = _sf(audit.get("ema200_stretch_atr"))
     stretch_pctile = _sf(audit.get("sector_pctile_ema200_stretch"))
     z = _sf(audit.get("z_score"))
 
     k_cmf = _env_float("TITAN_SIGV2_C_CMF_K", 10.0)
     cap_cmf = _env_float("TITAN_SIGV2_C_CMF_CAP", 2.0)
-    # Fix A (mirror): C-8 over-extension is now more sensitive. Default deadband
-    # lowered 4.0 -> 3.0 ATR (tunable down to ~2.0-2.5 via env).
     stretch_deadband = _env_float("TITAN_SIGV2_C_STRETCH_DEADBAND_ATR", 3.0)
+    if _bullish_adx_trend(audit):
+        stretch_deadband *= _env_float("TITAN_SIGV2_C_STRETCH_DEADBAND_BULL_MULT", 1.5)
     stretch_ramp = _env_float("TITAN_SIGV2_C_STRETCH_RAMP_ATR", 8.0)
     stretch_cap = _env_float("TITAN_SIGV2_C_STRETCH_CAP", 2.0)
     # Fix A (mirror): symmetric upside-z over-extension. A statistically stretched
@@ -318,8 +391,7 @@ def layer_c(audit: dict[str, Any]) -> dict[str, Any]:
     if not math.isnan(cmf):
         if cmf < -0.05:
             money_flow_bear = _clamp((-0.05 - cmf) * k_cmf, 0.0, cap_cmf)
-            # OBV only AMPLIFIES an existing same-sign (negative) cmf term.
-            if money_flow_bear > 0.0 and not math.isnan(obv) and obv < 0.0:
+            if money_flow_bear > 0.0 and obv_confirm is False:
                 money_flow_bear *= 1.25
             if money_flow_bear > 0.05:
                 trace.append(
@@ -330,7 +402,7 @@ def layer_c(audit: dict[str, Any]) -> dict[str, Any]:
                 )
         elif cmf > 0.05:
             money_flow_bull = _clamp((cmf - 0.05) * k_cmf, 0.0, cap_cmf)
-            if money_flow_bull > 0.0 and not math.isnan(obv) and obv > 0.0:
+            if money_flow_bull > 0.0 and obv_confirm is True:
                 money_flow_bull *= 1.25
             if money_flow_bull > 0.05:
                 trace.append(
@@ -406,6 +478,7 @@ def layer_d(audit: dict[str, Any], c: dict[str, Any]) -> dict[str, Any]:
         "mult_money_flow": 1.0,
         "mult_over_extension": 1.0,
         "mult_momentum": 1.0,
+        "mult_risk": 1.0,
         "divergence_bump": 0.0,
         "buy_confidence_cap": None,
         "pullback_bull_bump": 0.0,
@@ -416,7 +489,7 @@ def layer_d(audit: dict[str, Any], c: dict[str, Any]) -> dict[str, Any]:
     reasons: list[str] = []
     adx = _sf(audit.get("adx_14"))
     cmf = _sf(audit.get("cmf_20"))
-    obv = _sf(audit.get("obv_slope_20"))
+    obv_confirm = _obv_trend_confirm(audit)
     ret1d = _sf(audit.get("return_1d_pct"))
     ret5d = _sf(audit.get("return_5d_pct"))
     ema_dist = _sf(audit.get("ema_200_distance_pct"))
@@ -426,21 +499,47 @@ def layer_d(audit: dict[str, Any], c: dict[str, Any]) -> dict[str, Any]:
     adx_strong = _env_float("TITAN_SIGV2_D_ADX_STRONG", 25.0)
     divergence_ret1d = _env_float("TITAN_SIGV2_D_DIVERGENCE_RET1D", 2.0)
     pullback_vpr = _env_float("TITAN_SIGV2_D_PULLBACK_VPR", 1.0)
-    staleflow_eps = _env_float("TITAN_SIGV2_D_STALEFLOW_OBV_EPS", 0.0)
 
-    # 1) ADX regime: weak trend up-weights mean-reversion (cmf/over-extension),
-    #    down-weights momentum; strong trend does the inverse.
+    prev_mults = audit.get("prev_adx_regime_mults")
+    if not isinstance(prev_mults, dict):
+        prev_mults = {}
+
+    # 1) Directional ADX regime switching with 20-25 deadband persistence.
     if not math.isnan(adx):
         if adx < adx_weak:
             out["mult_money_flow"] = 1.3
             out["mult_over_extension"] = 1.3
             out["mult_momentum"] = 0.7
+            out["mult_risk"] = 1.0
             reasons.append(f"weak ADX {adx:.1f}: mean-reversion up-weighted")
         elif adx >= adx_strong:
-            out["mult_money_flow"] = 0.7
-            out["mult_over_extension"] = 0.7
-            out["mult_momentum"] = 1.3
-            reasons.append(f"strong ADX {adx:.1f}: momentum up-weighted")
+            plus_di = _adx_plus_di(audit)
+            minus_di = _adx_minus_di(audit)
+            if not math.isnan(plus_di) and not math.isnan(minus_di) and plus_di > minus_di:
+                out["mult_momentum"] = 1.3
+                out["mult_risk"] = 0.8
+                reasons.append(f"strong ADX {adx:.1f} +DI>{minus_di:.1f}: momentum up, vol noise down")
+            elif not math.isnan(plus_di) and not math.isnan(minus_di) and minus_di > plus_di:
+                out["mult_momentum"] = 0.5
+                out["mult_risk"] = 1.5
+                reasons.append(f"strong ADX {adx:.1f} -DI>{plus_di:.1f}: momentum down, risk up")
+            else:
+                out["mult_momentum"] = 1.3
+                out["mult_risk"] = 0.8
+                reasons.append(f"strong ADX {adx:.1f}: momentum up-weighted (DI tie)")
+        else:
+            out["mult_money_flow"] = float(prev_mults.get("mult_money_flow", 1.0))
+            out["mult_over_extension"] = float(prev_mults.get("mult_over_extension", 1.0))
+            out["mult_momentum"] = float(prev_mults.get("mult_momentum", 1.0))
+            out["mult_risk"] = float(prev_mults.get("mult_risk", 1.0))
+            reasons.append(f"ADX deadband {adx:.1f}: persisting prior regime multipliers")
+
+    out["adx_regime_mults"] = {
+        "mult_money_flow": out["mult_money_flow"],
+        "mult_over_extension": out["mult_over_extension"],
+        "mult_momentum": out["mult_momentum"],
+        "mult_risk": out["mult_risk"],
+    }
 
     # 2) Money-flow divergence ("hollow breakout"): price up on net distribution.
     if (not math.isnan(ret1d) and ret1d > divergence_ret1d) and (not math.isnan(cmf) and cmf < -0.05):
@@ -460,16 +559,15 @@ def layer_d(audit: dict[str, Any], c: dict[str, Any]) -> dict[str, Any]:
         out["pullback_bull_bump"] = 0.5
         reasons.append("healthy low-volume pullback: momentum penalty halved")
 
-    # 4) Stale-flow OBV tiebreaker (GREAVESCOT rule): neutral flow + over-extended +
-    #    weak trend + flat/negative OBV -> corroborated downgrade (forces TRIM).
+    # 4) Stale-flow OBV tiebreaker: neutral flow + over-extended + weak ADX + OBV below EMA.
     if (
         (not math.isnan(cmf) and -0.05 <= cmf <= 0.05)
         and bool(c.get("over_extension_hot"))
         and (not math.isnan(adx) and adx < adx_weak)
-        and (not math.isnan(obv) and obv <= staleflow_eps)
+        and obv_confirm is not True
     ):
         out["staleflow_downgrade"] = True
-        reasons.append("stale-flow: neutral CMF + over-extended + weak ADX + flat/neg OBV")
+        reasons.append("stale-flow: neutral CMF + over-extended + weak ADX + OBV below EMA")
 
     out["reasons"] = reasons
     return out
@@ -580,6 +678,7 @@ def _aggregate(c: dict[str, Any], d: dict[str, Any]) -> dict[str, float]:
     mult_mom = float(d.get("mult_momentum", 1.0))
     mult_mf = float(d.get("mult_money_flow", 1.0))
     mult_oe = float(d.get("mult_over_extension", 1.0))
+    mult_risk = float(d.get("mult_risk", 1.0))
 
     risk_c = 0.0
     risk_c += float(fam.get("horizon", 0.0))
@@ -587,7 +686,7 @@ def _aggregate(c: dict[str, Any], d: dict[str, Any]) -> dict[str, float]:
     risk_c += float(fam.get("z", 0.0))
     risk_c += min(3.0, float(fam.get("momentum", 0.0)) * mult_mom)
     risk_c += float(fam.get("trend", 0.0))
-    risk_c += float(fam.get("volatility", 0.0))
+    risk_c += float(fam.get("volatility", 0.0)) * mult_risk
     risk_c += float(c.get("money_flow_bear", 0.0)) * mult_mf
     risk_c += float(c.get("over_extension", 0.0)) * mult_oe
     risk_c += float(c.get("upside_z", 0.0)) * mult_oe
@@ -673,7 +772,7 @@ def _buy_gate(audit: dict[str, Any], a: dict[str, Any], c: dict[str, Any]) -> di
 
 def _accumulate_band(audit: dict[str, Any], risk_net: float, *, buy_allowed: bool) -> bool:
     """Lower-bar accumulate when scores are decent and risk is low."""
-    if not buy_allowed or risk_net >= 4.0:
+    if not buy_allowed or risk_net >= _buy_risk_ceiling():
         return False
     nw_min = _env_float("TITAN_SIGV2_ACCUM_NEXT_WEEK_MIN", _ACCUM_NEXT_WEEK_MIN)
     intent_min = _env_float("TITAN_SIGV2_ACCUM_INTENT_MIN", _ACCUM_INTENT_MIN)
@@ -689,7 +788,7 @@ def _accumulate_band(audit: dict[str, Any], risk_net: float, *, buy_allowed: boo
 
 def _leader_participation_floor(audit: dict[str, Any], risk_net: float, *, buy_allowed: bool) -> bool:
     """Leader + participation: strong intent with elevated VPR → at least accumulate."""
-    if not buy_allowed or risk_net >= 4.0:
+    if not buy_allowed or risk_net >= _buy_risk_ceiling():
         return False
     intent_min = _env_float("TITAN_SIGV2_LEADER_INTENT_MIN", 65.0)
     vpr_min = _env_float("TITAN_SIGV2_LEADER_VPR_MIN", 1.5)
@@ -705,7 +804,7 @@ def _leader_participation_floor(audit: dict[str, Any], risk_net: float, *, buy_a
 
 def _short_history_accumulate_ok(audit: dict[str, Any], risk_net: float) -> bool:
     """Short-history names may reach accumulate (never buy) when tape is strong."""
-    if risk_net >= 4.0:
+    if risk_net >= _buy_risk_ceiling():
         return False
     intent_min = _env_float("TITAN_SIGV2_SHORT_HIST_INTENT_MIN", 65.0)
     vpr_min = _env_float("TITAN_SIGV2_SHORT_HIST_VPR_MIN", 1.5)
@@ -723,16 +822,18 @@ def _map_label(risk_net: float, gate: dict[str, bool], audit: dict[str, Any], a:
     """Score -> label (before forced overrides / hysteresis)."""
     buy_allowed = bool(a.get("buy_allowed"))
     constructive_ok = _constructive_allowed(a, audit)
-    if risk_net >= 7.0:
+    buy_max = _buy_risk_ceiling()
+    trim_min = _trim_risk_floor()
+    if risk_net >= _exit_risk_floor():
         return "exit-risk"
-    if risk_net >= 4.0:
+    if risk_net >= trim_min:
         return "trim"
-    # risk_net < 4
-    if gate["clean_buy"]:
+    # risk_net below trim floor
+    if gate["clean_buy"] and risk_net < buy_max:
         return "buy"
-    if gate["constructive_core"]:
+    if gate["constructive_core"] and risk_net < buy_max:
         return "accumulate"
-    accum_pref_max = _env_float("TITAN_SIGV2_ACCUM_PREF_RISK_MAX", 3.5)
+    accum_pref_max = _env_float("TITAN_SIGV2_ACCUM_PREF_RISK_MAX", buy_max)
     if (
         constructive_ok
         and gate.get("constructive_scores")
@@ -1172,7 +1273,7 @@ def _participation_accumulate_ok(
     audit: dict[str, Any], risk_net: float, *, buy_allowed: bool
 ) -> bool:
     """DATAMATICS-class: strong intent + decent horizon + supportive VPR → accumulate."""
-    if not buy_allowed or risk_net >= 4.0:
+    if not buy_allowed or risk_net >= _buy_risk_ceiling():
         return False
     intent_min = _env_float("TITAN_SIGV2_PARTICIPATION_INTENT_MIN", _PARTICIPATION_INTENT_MIN)
     nw_min = _env_float("TITAN_SIGV2_PARTICIPATION_NW_MIN", _PARTICIPATION_NW_MIN)
@@ -1249,13 +1350,15 @@ def _apply_hysteresis(
     buffer: float,
     audit: dict[str, Any] | None = None,
 ) -> tuple[str, bool]:
-    """Asymmetric hysteresis: constructive transitions are sticky, danger is fast.
+    """Asymmetric hysteresis with expanded entry/exit deadbands.
 
-    Returns (label, applied). Recovery de-escalation allows downgrade from trim/exit
-    when intent/nw recover; re-escalation to trim requires a 2-session defensive streak
-    when corroborators are below the exit threshold.
+    Enter buy/accumulate: risk_net < buy_ceiling (default 3.0).
+    Enter trim: risk_net >= trim_floor (default 5.0).
+    From trim/exit-risk: cannot upgrade to constructive until risk_net < buy_ceiling.
     """
     audit = audit or {}
+    buy_max = _buy_risk_ceiling()
+    trim_min = _trim_risk_floor()
     if prior_label is None or prior_label == label:
         return label, False
     if bypass or label == "exit-risk":
@@ -1265,8 +1368,15 @@ def _apply_hysteresis(
     recovery_ok = rally_ok or _recovery_tape_ok(audit, risk_net, rally=False)
     if audit.get("tier2_recovery_deescalation"):
         recovery_ok = True
-    if prior_label in ("trim", "exit-risk") and label in ("hold", "accumulate", "buy") and recovery_ok:
-        return label, False
+
+    # From defensive labels: require strict buy ceiling before constructive upgrade.
+    if prior_label in ("trim", "exit-risk") and label in ("hold", "accumulate", "buy"):
+        if risk_net >= buy_max:
+            return prior_label, True
+        if recovery_ok:
+            return label, False
+        return prior_label, True
+
     if prior_label == "trim" and label == "hold" and not recovery_ok:
         return prior_label, True
 
@@ -1274,26 +1384,30 @@ def _apply_hysteresis(
     if (
         prior_label in ("hold", "accumulate", "buy")
         and label == "trim"
-        and risk_net < 4.0 + buffer
+        and risk_net < trim_min
         and recovery_ok
         and _prior_defensive_streak(audit) < 2
     ):
         return prior_label, True
 
-    # Buffer-based stickiness around the trim edge (4.0) for hold<->trim churn.
-    if {prior_label, label} == {"hold", "trim"}:
-        if label == "trim" and risk_net < 4.0 + buffer:
+    # Hold<->trim churn: trim only sticks when risk clears trim floor.
+    prior_trim = prior_label == "trim"
+    label_trim = label == "trim"
+    prior_hold = prior_label == "hold"
+    label_hold = label == "hold"
+    if (prior_trim and label_hold) or (prior_hold and label_trim):
+        if label_trim and risk_net < trim_min:
             if recovery_ok and _prior_defensive_streak(audit) < 2:
                 return prior_label, True
             if not recovery_ok:
                 return prior_label, True
             return label, False
-        if label == "hold" and risk_net > 4.0 - buffer and not recovery_ok:
+        if label_hold and risk_net >= trim_min - buffer and not recovery_ok:
             return prior_label, True
         return label, False
 
-    # Entering a constructive label (buy/accumulate) requires margin below the edge.
-    if label in ("buy", "accumulate") and risk_net > 4.0 - buffer:
+    # Entering constructive labels requires margin below the buy ceiling.
+    if label in ("buy", "accumulate") and risk_net >= buy_max - buffer:
         if audit.get("tier2_recovery_deescalation"):
             return label, False
         return prior_label, True
@@ -1314,7 +1428,7 @@ def _confidence(
 ) -> float:
     if bypass:
         return _round(_clamp(max(0.9, seed), 0.0, 1.0), 3)
-    dominant_bear = final_label in ("trim", "exit-risk") or risk_net >= 4.0
+    dominant_bear = final_label in ("trim", "exit-risk") or risk_net >= _trim_risk_floor()
     if dominant_bear:
         n = sum(1 for t in trace if t.get("side") == "bear" and float(t.get("points") or 0) > 0.05)
         n += corroborators
@@ -1455,6 +1569,7 @@ def evaluate_signal_v2(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
         "terms": c.get("trace", []),
         "modifiers": d.get("reasons", []),
         "data_quality": a.get("reasons", []),
+        "adx_regime_mults": d.get("adx_regime_mults"),
     }
     audit["signal_engine_version"] = "v2"
 

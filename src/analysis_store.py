@@ -821,6 +821,9 @@ def build_symbol_daily_feature(
         # over-extension layers at zero. Persist them so they are reproducible offline.
         "cmf_20": audit.get("cmf_20"),
         "obv_slope_20": audit.get("obv_slope_20"),
+        "obv_latest": audit.get("obv_latest"),
+        "obv_ema_20": audit.get("obv_ema_20"),
+        "obv_trend_confirm": audit.get("obv_trend_confirm"),
         "adx_14": audit.get("adx_14"),
         "adx_plus_di_14": audit.get("adx_plus_di_14"),
         "adx_minus_di_14": audit.get("adx_minus_di_14"),
@@ -828,6 +831,12 @@ def build_symbol_daily_feature(
         "sector_pctile_ema200_stretch": audit.get("sector_pctile_ema200_stretch"),
         "sector_pctile_cmf_20": audit.get("sector_pctile_cmf_20"),
         "sector_pctile_adx_14": audit.get("sector_pctile_adx_14"),
+        "adx_regime_mults": (
+            (audit.get("signal_reason_trace") or {}).get("adx_regime_mults")
+            if isinstance(audit.get("signal_reason_trace"), dict)
+            else None
+        ),
+        "sell_signal_risk_score": audit.get("sell_signal_risk_score"),
     }
 
     vpr = audit.get("volume_participation_ratio", audit.get("absorption_ratio"))

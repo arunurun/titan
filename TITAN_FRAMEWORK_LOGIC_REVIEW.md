@@ -152,18 +152,23 @@ File: `src/sector_priority.py`. The ranking score is produced by `_score_from_fe
 
 `_score_from_features` (`sector_priority.py:2114-2135`):
 ```
-ret_1w_term     = 1.1 * return_1w       (0 if NaN)
-ret_1m_term     = 0.45 * return_1m      (0 if NaN)
+ret_1w_term     = 1.1 * (percentile_1w / 100) * TITAN_RANK_PCTILE_1W_REF   (default ref 11.0)
+ret_1m_term     = 0.45 * (percentile_1m / 100) * TITAN_RANK_PCTILE_1M_REF  (default ref 11.0)
 absorption_term = 8.0 * (absorption - 1.0)   (0 if NaN)
-base_score      = cap_bias(bucket) + ret_1w_term + ret_1m_term + absorption_term
+base_score      = cap_bias + ret_1w_term + ret_1m_term + absorption_term
 rank_score_technical = round(base_score - overextension_penalty, 4)
 ```
+Percentiles are computed cross-sectionally per sector cohort via `percentile_rank_0_100`
+(`tape_metrics.py`). Missing 1w/1m history defaults to the sector-median percentile (50.0).
+At p100 with default refs, the momentum terms approximate the legacy raw-return scale
+(e.g. p100 1w → ~12.1 pts, same as an 11% weekly return × 1.1).
+
 i.e.
 
 ```
 rank_score = cap_bias
-           + 1.10 * return_1w_pct
-           + 0.45 * return_1m_pct
+           + 1.10 * (percentile_1w/100) * PCTILE_1W_REF
+           + 0.45 * (percentile_1m/100) * PCTILE_1M_REF
            + 8.0  * (absorption - 1.0)
            - overextension_penalty            # §3.2
            + news_blend_points                # §3.3 (added in build_sector_rankings)
@@ -176,10 +181,12 @@ rank_score = cap_bias
 Latest stored `action_signal` + `signal_reason_trace.risk_net` (fallback label→risk map)
 from `symbol_daily_features` are translated into a bounded bonus/penalty before other gates:
 
-- `risk_net < 4` (buy/accumulate/hold): bonus up to **+1.5** (`TITAN_V2_RANK_BONUS_MAX`), linear
+- `risk_net < 5` (buy/accumulate/hold): bonus up to **+1.5** (`TITAN_V2_RANK_BONUS_MAX`), linear
   from trim threshold down to 0.
-- `risk_net ≥ 4` (trim/exit-risk): penalty up to **−6.0** (`TITAN_V2_RANK_PENALTY_MAX`), linear
-  from 4→10 on the 0–10 `risk_net` scale.
+- `risk_net ≥ 5` (trim/exit-risk): penalty up to **−6.0** (`TITAN_V2_RANK_PENALTY_MAX`), linear
+  from 5→10 on the 0–10 `risk_net` scale. When sector overextension penalty already fired,
+  v2 penalty is damped by `TITAN_V2_RANK_VOL_DAMP_FRAC` (default 0.25) to avoid double-counting
+  volatility/stretch already in `risk_c`.
 
 The legacy `v2_risk_label` gate records posture but sets `score_multiplier = 1.0` (no double
 penalty). In `skip` mode it may still **withhold** only extreme exit-risk (`risk_net ≥ 7`).
@@ -338,18 +345,25 @@ Layer-D multipliers are **not** applied here (applied in E) so raw terms stay in
 | volatility (preferred) | `atr_penalty_input` | 1.25 → 2.2, 2.0 | 2.0 | `:274` |
 | volatility (fallback) | `atr_14_pct` | 4.0 → 6.0, 2.0 | 2.0 | `:277` |
 
+Volatility family is **suppressed** when `adx ≥ 25 AND +DI > -DI` (strong bullish trend) to
+avoid double-count with stretch/over-extension. In that regime C-8 stretch deadband is widened
+×1.5 (`TITAN_SIGV2_C_STRETCH_DEADBAND_BULL_MULT`).
+
 `ret1d_weight = 0.45 if extreme_price_move_proxy else 1.0` (`:229`). Momentum sub-terms are summed
 then `min(3.0, …)` (`:264`).
 
 **C-7 money flow** (`:315-341`) — dead-band ±0.05, scaled by magnitude. Defaults
 `TITAN_SIGV2_C_CMF_K = 10.0` (`:301`), `TITAN_SIGV2_C_CMF_CAP = 2.0` (`:302`):
 ```
-if cmf < -0.05:  money_flow_bear = clamp((-0.05 - cmf)*K, 0, cap);  if obv<0: *=1.25   # bear
-elif cmf > 0.05: money_flow_bull = clamp((cmf - 0.05)*K, 0, cap);   if obv>0: *=1.25   # bull
+if cmf < -0.05:  money_flow_bear = clamp((-0.05 - cmf)*K, 0, cap);  if NOT obv_trend_confirm: *=1.25
+elif cmf > 0.05: money_flow_bull = clamp((cmf - 0.05)*K, 0, cap);   if obv_trend_confirm: *=1.25
 # |cmf| <= 0.05 -> dead-band, both 0
 ```
+`obv_trend_confirm = (obv_latest > obv_ema_20)` computed in the audit pipeline
+(`titan_engine.calculate_obv_trend_confirm`, persisted as `obv_latest`, `obv_ema_20`,
+`obv_trend_confirm`). Replaces the prior absolute-sign OBV slope rule.
 The ×1.25 OBV rule only **amplifies an already-nonzero same-sign** term. `bull_terms =
-money_flow_bull` (`:393`).
+money_flow_bull`.
 
 **C-8 ATR-normalized over-extension** (`:343-355`) — upside only. Defaults
 `TITAN_SIGV2_C_STRETCH_DEADBAND_ATR = 3.0` (`:305`, *lowered from 4.0 by Fix A*),
@@ -377,17 +391,19 @@ Produces multipliers/bumps/flags; **never returns a label**. Defaults: `TITAN_SI
 `_PULLBACK_VPR = 1.0` (`:428`), `_STALEFLOW_OBV_EPS = 0.0` (`:429`). `vpr` reads
 `volume_participation_ratio` (fallback `absorption_ratio`, `:423`).
 
-1. **ADX regime** (`:433-443`): `adx < 20` → `mult_money_flow=1.3, mult_over_extension=1.3,
-   mult_momentum=0.7` (weak trend up-weights mean-reversion). `adx ≥ 25` → `0.7 / 0.7 / 1.3`
-   (strong trend up-weights momentum). `20 ≤ adx < 25` or NaN → all 1.0.
+1. **Directional ADX regime** (`:433-543`): `adx < 20` → `mult_money_flow=1.3,
+   mult_over_extension=1.3, mult_momentum=0.7` (mean-reversion). `adx ≥ 25 AND +DI > -DI` →
+   `mult_momentum=1.3, mult_risk=0.8` (volatility term in aggregate scaled ×0.8). `adx ≥ 25 AND
+   -DI > +DI` → `mult_momentum=0.5, mult_risk=1.5`. `20 ≤ adx < 25` deadband persists prior
+   session multipliers from `prev_adx_regime_mults` / `tape_extras.adx_regime_mults` (default 1.0).
 2. **Money-flow divergence ("hollow breakout")** (`:446-449`): `ret1d > 2.0 AND cmf < -0.05` →
    `divergence_bump = +1.0` (added to risk) and `buy_confidence_cap = 0.5`.
 3. **Healthy-pullback rescue** (`:452-461`): `ret1d < 0 AND vpr < 1.0 AND cmf > 0.05 AND ret5d ≥
    -3.0 AND ema_200_distance_pct ≥ 0` → `mult_momentum = min(mult_momentum, 0.5)` and
    `pullback_bull_bump = +0.5`.
 4. **Stale-flow OBV tiebreaker (GREAVESCOT rule)** (`:465-472`): `-0.05 ≤ cmf ≤ 0.05 (neutral) AND
-   over_extension_hot AND adx < 20 AND obv ≤ 0.0` → `staleflow_downgrade = True` (forces TRIM in B
-   and counts as a Tier-2 corroborator).
+   over_extension_hot AND adx < 20 AND obv_trend_confirm is not True` → `staleflow_downgrade = True`
+   (forces TRIM in B and counts as a Tier-2 corroborator).
 
 ### Layer B — two-tier hard disqualifiers (`layer_b`, `:493-569`)
 Runs after C and D (needs `over_extension_hot` and `staleflow_downgrade`). Defaults:
@@ -430,7 +446,7 @@ z<0). "Below put support" = spot below max-put-OI strike with distribution/negat
 ```
 risk_c  = horizon + intent + z
         + min(3.0, momentum * mult_momentum)        # momentum re-capped at 3
-        + trend + volatility
+        + trend + volatility * mult_risk
         + money_flow_bear * mult_money_flow
         + over_extension  * mult_over_extension
         + upside_z        * mult_over_extension     # C-8b uses the over-extension multiplier
@@ -468,9 +484,9 @@ constructive_core = core
 **Mapping ladder** `_map_label(risk_net, gate, a)` (`:635-647`):
 ```
 risk_net >= 7:                       exit-risk
-risk_net >= 4:                       trim
-risk_net <  4 and clean_buy:         buy
-risk_net <  4 and constructive_core: accumulate
+risk_net >= 5:                       trim          (TITAN_SIGV2_E_TRIM_RISK_MIN)
+risk_net <  5 and clean_buy and risk < 3:         buy   (TITAN_SIGV2_E_BUY_RISK_MAX)
+risk_net <  5 and constructive_core and risk < 3: accumulate
 otherwise:                           hold
 ```
 
@@ -480,10 +496,10 @@ Then applied in order inside `evaluate_signal_v2` (`:743-752`):
 2. **`_escalate`** (`:657-660`): Layer-B `forced_label` overrides **only if strictly more severe**
    per `_SEVERITY` — bearish disqualifiers win ties; constructive labels can never be upgraded.
 3. **`_apply_hysteresis`** (`:663-694`, `TITAN_SIGV2_E_HYST_BUFFER = 0.5`, `:738`): asymmetric
-   stickiness around the trim edge (4.0 ± 0.5). Danger transitions and Tier-1 `bypass` apply
-   same-day. **Inert in production**: `prev_action_signal` is only populated by the backtest
-   harness (`signal_v2_backtest.py:239`), never in live runs, so the `prior is None → no-op` branch
-   is always taken live.
+   deadbands — enter buy/accumulate only when `risk_net < 3.0`; enter trim when
+   `risk_net ≥ 5.0`; from trim/exit-risk cannot upgrade to constructive until
+   `risk_net < 3.0` (with recovery tape when wired). Danger transitions and Tier-1 `bypass`
+   apply same-day.
 
 > **Note:** `accumulate` is a **first-class always-on label** in the current code (module
 > docstring `:1-17`); there is no accumulate-disable gate in `evaluate_signal_v2`.
@@ -531,7 +547,13 @@ buy = constructive setup; accumulate = constructive but extended (add on pullbac
 | `TITAN_SIGV2_B_TIER2_TRIM_COUNT` | 2 | corroborators → trim | `:504` |
 | `TITAN_SIGV2_B_TIER2_EXIT_COUNT` | 3 | corroborators → exit-risk | `:505` |
 | `TITAN_SIGV2_E_BULL_OFFSET` | 0.5 | bull offset weight in risk_net | `:737` |
-| `TITAN_SIGV2_E_HYST_BUFFER` | 0.5 | hysteresis buffer around 4.0 | `:738` |
+| `TITAN_SIGV2_E_BUY_RISK_MAX` | 3.0 | buy/accumulate ceiling | `:57` |
+| `TITAN_SIGV2_E_TRIM_RISK_MIN` | 5.0 | trim entry floor | `:58` |
+| `TITAN_SIGV2_E_HYST_BUFFER` | 0.5 | hysteresis buffer around deadbands | `:738` |
+| `TITAN_RANK_PCTILE_1W_REF` | 11.0 | percentile→points scale (1w) | `sector_priority.py` |
+| `TITAN_RANK_PCTILE_1M_REF` | 11.0 | percentile→points scale (1m) | `sector_priority.py` |
+| `TITAN_V2_RANK_TRIM_THRESHOLD` | 5.0 | v2 rank bonus/penalty pivot | `sector_priority.py` |
+| `TITAN_EMA200_LOOKBACK_CALENDAR_DAYS` | 400 | min fetch for EMA200 (~250 sessions) | `sector_audit.py` |
 | `TITAN_MIN_MEDIAN_DAILY_NOTIONAL_INR` | 1,200,000 | liquidity floor (₹) | `:483-490` |
 
 In-code constants (not env-tunable): BUY gate `next_week_score ≥ 70`, `effective_intent_score ≥

@@ -2433,6 +2433,9 @@ def _attach_prior_action_signals(
             prev_risk = tape.get("sell_signal_risk_score", tape.get("risk_net"))
             if prev_risk is not None:
                 audit["prev_risk_net"] = prev_risk
+            prev_mults = tape.get("adx_regime_mults")
+            if isinstance(prev_mults, dict):
+                audit["prev_adx_regime_mults"] = prev_mults
 
 
 def _refresh_symbol_scoring_outputs(audit: dict[str, Any]) -> None:
@@ -3248,7 +3251,7 @@ def build_equity_live_audit(
     inst: SectorInstrument,
     *,
     sector_id: str,
-    lookback_calendar_days: int = 60,
+    lookback_calendar_days: int | None = None,
     with_narrative: bool = True,
     strict_data: bool = False,
     event_snapshot: dict[str, Any] | None = None,
@@ -3276,9 +3279,17 @@ def build_equity_live_audit(
         calculate_ema,
         calculate_equity_technical_score,
         calculate_latest_di,
+        calculate_obv_ema,
+        calculate_obv_latest,
         calculate_obv_slope,
+        calculate_obv_trend_confirm,
     )
 
+    if lookback_calendar_days is None:
+        lookback_calendar_days = max(
+            60,
+            int(os.environ.get("TITAN_EMA200_LOOKBACK_CALENDAR_DAYS", "400") or 400),
+        )
     df = fetch_equity_data(
         cfg,
         inst.symbol,
@@ -3337,6 +3348,9 @@ def build_equity_live_audit(
                 "interpretation": "unavailable",
             },
             "obv_slope_20": float("nan"),
+            "obv_latest": float("nan"),
+            "obv_ema_20": float("nan"),
+            "obv_trend_confirm": None,
         }
         return skip, ""
     metrics_df, ohlc_meta = _prepare_ohlc_for_metrics(df)
@@ -3386,6 +3400,9 @@ def build_equity_live_audit(
     cmf_20_prev = calculate_cmf(df.iloc[:-1], window=20) if len(df) > 1 else float("nan")
     cmf_20_delta = _cmf_delta_payload(cmf_20_prev, cmf_20)
     obv_slope_20 = calculate_obv_slope(df, window=20)
+    obv_latest = calculate_obv_latest(df)
+    obv_ema_20 = calculate_obv_ema(df, span=20)
+    obv_trend_confirm = calculate_obv_trend_confirm(df, span=20)
     atr_14_pct = (
         (atr_14 / close_last) * 100.0
         if (not math.isnan(atr_14) and not math.isnan(close_last) and close_last != 0.0)
@@ -3537,6 +3554,9 @@ def build_equity_live_audit(
         "cmf_20": cmf_20,
         "cmf_20_delta": cmf_20_delta,
         "obv_slope_20": obv_slope_20,
+        "obv_latest": obv_latest,
+        "obv_ema_20": obv_ema_20,
+        "obv_trend_confirm": obv_trend_confirm,
         "atr_break_multiple": atr_break_multiple,
         "structural_break_proxy": (
             not math.isnan(atr_break_multiple) and atr_break_multiple >= 1.5

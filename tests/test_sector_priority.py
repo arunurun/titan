@@ -1224,3 +1224,45 @@ def test_overextension_confirmation_allows_mild_weekly_pullback():
     assert mult < 1.0
     assert mult > 0.2
 
+
+def test_score_from_features_uses_return_percentiles():
+    from sector_priority import _score_from_features
+
+    raw = _score_from_features(
+        bucket="small",
+        ret_1w=20.0,
+        ret_1m=10.0,
+        absorption=1.0,
+        percentile_1w=100.0,
+        percentile_1m=100.0,
+    )
+    median = _score_from_features(
+        bucket="small",
+        ret_1w=20.0,
+        ret_1m=10.0,
+        absorption=1.0,
+        percentile_1w=50.0,
+        percentile_1m=50.0,
+    )
+    assert raw > median
+
+
+def test_cohort_return_percentiles_defaults_nan_to_median():
+    from sector_priority import _cohort_return_percentiles
+
+    pending = [{"ret_1w": 10.0, "ret_1m": float("nan")}, {"ret_1w": 5.0, "ret_1m": 8.0}]
+    _cohort_return_percentiles(pending)
+    assert pending[0]["percentile_1w"] == 100.0
+    assert pending[1]["percentile_1w"] == 0.0
+    assert pending[0]["percentile_1m"] == 50.0
+    assert pending[1]["percentile_1m"] == 50.0  # single valid cohort value -> mid-rank
+
+
+def test_v2_rank_adjustment_damps_when_overextension_penalized():
+    from sector_priority import _v2_rank_adjustment
+
+    plain = _v2_rank_adjustment({"label": "trim", "risk_net": 6.0}, overextension_penalty=0.0)
+    damped = _v2_rank_adjustment({"label": "trim", "risk_net": 6.0}, overextension_penalty=2.0)
+    assert damped["adjustment"] > plain["adjustment"]
+    assert damped["mode"] == "penalty_vol_damped"
+

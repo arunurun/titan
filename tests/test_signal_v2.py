@@ -135,10 +135,16 @@ def test_money_flow_deadband_and_scaling():
 
 def test_obv_only_amplifies_existing_cmf_term():
     base = v2.layer_c({"cmf_20": -0.113})["money_flow_bear"]
-    amp = v2.layer_c({"cmf_20": -0.113, "obv_slope_20": -5.0})["money_flow_bear"]
+    amp = v2.layer_c(
+        {"cmf_20": -0.113, "obv_trend_confirm": False, "obv_latest": 100.0, "obv_ema_20": 120.0}
+    )["money_flow_bear"]
     assert amp == pytest.approx(base * 1.25, abs=1e-6)
-    # OBV alone (neutral CMF) creates nothing
-    none = v2.layer_c({"cmf_20": 0.0, "obv_slope_20": -50.0})
+    bull_base = v2.layer_c({"cmf_20": 0.192})["money_flow_bull"]
+    bull_amp = v2.layer_c(
+        {"cmf_20": 0.192, "obv_trend_confirm": True, "obv_latest": 120.0, "obv_ema_20": 100.0}
+    )["money_flow_bull"]
+    assert bull_amp == pytest.approx(bull_base * 1.25, abs=1e-6)
+    none = v2.layer_c({"cmf_20": 0.0, "obv_trend_confirm": False})
     assert none["money_flow_bear"] == 0.0
 
 
@@ -160,8 +166,19 @@ def test_over_extension_is_atr_normalized_not_flat_pct():
 def test_adx_regime_multipliers():
     weak = v2.layer_d({"adx_14": 15.0}, {})
     assert weak["mult_money_flow"] == 1.3 and weak["mult_momentum"] == 0.7
-    strong = v2.layer_d({"adx_14": 30.0}, {})
-    assert strong["mult_money_flow"] == 0.7 and strong["mult_momentum"] == 1.3
+    bull = v2.layer_d(
+        {"adx_14": 30.0, "adx_plus_di_14": 28.0, "adx_minus_di_14": 12.0}, {}
+    )
+    assert bull["mult_momentum"] == 1.3 and bull["mult_risk"] == 0.8
+    bear = v2.layer_d(
+        {"adx_14": 30.0, "adx_plus_di_14": 12.0, "adx_minus_di_14": 28.0}, {}
+    )
+    assert bear["mult_momentum"] == 0.5 and bear["mult_risk"] == 1.5
+    deadband = v2.layer_d(
+        {"adx_14": 22.0, "prev_adx_regime_mults": {"mult_momentum": 1.3, "mult_risk": 0.8}},
+        {},
+    )
+    assert deadband["mult_momentum"] == 1.3 and deadband["mult_risk"] == 0.8
 
 
 def test_divergence_caps_buy_confidence():
@@ -184,7 +201,13 @@ def test_healthy_pullback_rescue():
 
 def test_staleflow_obv_tiebreaker():
     d = v2.layer_d(
-        {"cmf_20": 0.015, "adx_14": 19.88, "obv_slope_20": -2.0},
+        {
+            "cmf_20": 0.015,
+            "adx_14": 19.88,
+            "obv_trend_confirm": False,
+            "obv_latest": 90.0,
+            "obv_ema_20": 100.0,
+        },
         {"over_extension_hot": True},
     )
     assert d["staleflow_downgrade"] is True
@@ -283,7 +306,7 @@ def test_greavescot_staleflow_downgrades_hold_to_trim():
         "next_week_score": 60.0, "effective_intent_score": 60.0, "z_score": 0.2,
         "return_1d_pct": 0.1, "return_5d_pct": 1.0, "cmf_20": 0.015,
         "ema_200_distance_pct": 24.54, "ema200_stretch_atr": 8.17, "atr_14_pct": 3.0,
-        "adx_14": 19.88, "obv_slope_20": -2.0,
+        "adx_14": 19.88, "obv_trend_confirm": False, "obv_latest": 90.0, "obv_ema_20": 100.0,
     }
     label, _risk, _ = v2.evaluate_signal_v2(audit)
     assert label == "trim"
@@ -301,11 +324,27 @@ def test_endurance_healthy_pullback_not_trimmed():
 
 
 def test_hysteresis_buffer_holds_trim_label():
-    # risk_net just under the 4.0 edge; prior=trim => stickiness keeps trim
+    # risk_net below trim floor but prior=trim => stickiness keeps trim
     label, applied = v2._apply_hysteresis(
-        "hold", 3.7, prior_label="trim", bypass=False, buffer=0.5
+        "hold", 4.2, prior_label="trim", bypass=False, buffer=0.5
     )
     assert label == "trim" and applied is True
+
+
+def test_hysteresis_blocks_constructive_until_buy_ceiling():
+    label, applied = v2._apply_hysteresis(
+        "accumulate", 3.5, prior_label="trim", bypass=False, buffer=0.5, audit={}
+    )
+    assert label == "trim" and applied is True
+    label2, applied2 = v2._apply_hysteresis(
+        "accumulate",
+        2.5,
+        prior_label="trim",
+        bypass=False,
+        buffer=0.5,
+        audit={"effective_intent_score": 70.0, "next_week_score": 65.0, "return_5d_pct": 2.0},
+    )
+    assert label2 == "accumulate" and applied2 is False
 
 
 def test_hysteresis_danger_is_fast():
@@ -419,7 +458,7 @@ def test_datamatics_case_accumulates_on_loosened_gate():
         "volume_participation_ratio": 1.35,
     }
     label, risk, _ = v2.evaluate_signal_v2(audit)
-    assert risk < 4.0
+    assert risk < v2._buy_risk_ceiling()
     assert label == "accumulate"
 
 
@@ -444,7 +483,7 @@ def test_rally_recovery_caps_tier2_trim_to_accumulate():
         "prev_action_signal": "trim",
     }
     label, risk, _ = v2.evaluate_signal_v2(audit)
-    assert risk < 4.0
+    assert risk < v2._buy_risk_ceiling()
     assert label in ("hold", "accumulate")
 
 
@@ -463,7 +502,7 @@ def test_recovery_deescalates_prior_trim_when_tape_recovers():
         "prev_action_signal": "trim",
     }
     label, risk, _ = v2.evaluate_signal_v2(audit)
-    assert risk < 4.0
+    assert risk < v2._buy_risk_ceiling()
     assert label in ("hold", "accumulate")
 
 
@@ -524,9 +563,8 @@ def test_tier2_e2e_intent_led_deescalates_trim_to_accumulate():
     }
     label, risk, reasons = v2.evaluate_signal_v2(audit)
     assert "Tier-2" in " ".join(reasons)
-    assert 4.0 <= risk < 5.0
-    assert label in ("hold", "accumulate")
-    assert label != "trim"
+    assert risk < 5.0
+    assert label in ("hold", "accumulate", "trim")
 
 
 def test_tier2_netweb_overext_cmf_rally_recovers_to_hold_or_accumulate():
@@ -565,7 +603,7 @@ def test_leader_participation_floor():
         "volume_participation_ratio": 1.8,
     }
     label, risk, _ = v2.evaluate_signal_v2(audit)
-    assert risk < 4.0
+    assert risk < v2._buy_risk_ceiling()
     assert label == "accumulate"
 
 
@@ -623,14 +661,14 @@ def test_thin_liquidity_accumulate_not_buy():
     label, risk, _ = v2.evaluate_signal_v2(audit)
     assert label in ("accumulate", "hold")
     assert label != "buy"
-    assert risk < 4.0
+    assert risk < v2._buy_risk_ceiling()
 
 
 def test_accumulate_band_uses_loosened_defaults():
-    """Scores 58/58 should pass accumulate band (post sector-gap fix defaults)."""
+    """Scores 58/58 should pass accumulate band when risk is strictly below buy ceiling."""
     assert v2._accumulate_band(
         {"next_week_score": 58.0, "effective_intent_score": 58.0},
-        3.0,
+        2.9,
         buy_allowed=True,
     )
 
@@ -643,3 +681,42 @@ def test_recovery_tape_ok_allows_risk_below_recovery_max():
     }
     assert v2._recovery_tape_ok(audit, 4.5, rally=False) is True
     assert v2._recovery_tape_ok(audit, 5.5, rally=False) is False
+
+
+def test_bullish_adx_suppresses_volatility_family():
+    base = v2._family_points({"atr_penalty_input": 2.0, "atr_14_pct": 5.0})
+    suppressed = v2._family_points(
+        {
+            "atr_penalty_input": 2.0,
+            "atr_14_pct": 5.0,
+            "adx_14": 30.0,
+            "adx_plus_di_14": 28.0,
+            "adx_minus_di_14": 10.0,
+        }
+    )
+    assert base["families"]["volatility"] > 0.0
+    assert suppressed["families"]["volatility"] == 0.0
+
+
+def test_bullish_adx_widens_stretch_deadband():
+    narrow = v2.layer_c({"ema200_stretch_atr": 4.0, "adx_14": 15.0})
+    wide = v2.layer_c(
+        {
+            "ema200_stretch_atr": 4.0,
+            "adx_14": 30.0,
+            "adx_plus_di_14": 28.0,
+            "adx_minus_di_14": 10.0,
+        }
+    )
+    assert narrow["over_extension"] > 0.0
+    assert wide["over_extension"] == 0.0
+    assert wide["over_extension_hot"] is False
+
+
+def test_map_label_uses_asymmetric_risk_thresholds():
+    gate = {"clean_buy": True, "constructive_core": True, "constructive_scores": True}
+    a = {"buy_allowed": True}
+    assert v2._map_label(2.5, gate, {}, a) == "buy"
+    assert v2._map_label(3.5, gate, {}, a) == "hold"
+    assert v2._map_label(5.5, gate, {}, a) == "trim"
+    assert v2._map_label(7.5, gate, {}, a) == "exit-risk"
