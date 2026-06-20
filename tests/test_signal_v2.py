@@ -416,10 +416,71 @@ def test_datamatics_case_accumulates_on_loosened_gate():
         "ema200_stretch_atr": 2.5,
         "atr_14_pct": 2.5,
         "adx_14": 25.0,
+        "volume_participation_ratio": 1.35,
     }
     label, risk, _ = v2.evaluate_signal_v2(audit)
     assert risk < 4.0
     assert label == "accumulate"
+
+
+def test_rally_recovery_caps_tier2_trim_to_accumulate():
+    """SONATSOFTW-class: rally tape with corroborators should not stay on trim."""
+    audit = {
+        "next_week_score": 62.0,
+        "effective_intent_score": 68.0,
+        "z_score": 1.0,
+        "return_1d_pct": 2.5,
+        "return_5d_pct": 4.0,
+        "return_10d_pct": 6.0,
+        "rel_return_5d_vs_nifty_pct": 2.0,
+        "cmf_20": -0.06,
+        "ema_200_distance_pct": 12.0,
+        "ema200_stretch_atr": 3.5,
+        "atr_14_pct": 3.0,
+        "adx_14": 18.0,
+        "adx_plus_di_14": 15.0,
+        "adx_minus_di_14": 22.0,
+        "high_volume_down_day_proxy": True,
+        "prev_action_signal": "trim",
+    }
+    label, risk, _ = v2.evaluate_signal_v2(audit)
+    assert risk < 4.0
+    assert label in ("hold", "accumulate")
+
+
+def test_recovery_deescalates_prior_trim_when_tape_recovers():
+    audit = {
+        "next_week_score": 58.0,
+        "effective_intent_score": 62.0,
+        "z_score": 0.4,
+        "return_1d_pct": 0.8,
+        "return_5d_pct": 1.5,
+        "cmf_20": 0.05,
+        "ema_200_distance_pct": 6.0,
+        "ema200_stretch_atr": 2.0,
+        "atr_14_pct": 2.5,
+        "adx_14": 24.0,
+        "prev_action_signal": "trim",
+    }
+    label, risk, _ = v2.evaluate_signal_v2(audit)
+    assert risk < 4.0
+    assert label in ("hold", "accumulate")
+
+
+def test_reescalate_trim_blocked_without_defensive_streak():
+    label, applied = v2._apply_hysteresis(
+        "trim",
+        3.6,
+        prior_label="hold",
+        bypass=False,
+        buffer=0.5,
+        audit={
+            "effective_intent_score": 62.0,
+            "next_week_score": 58.0,
+            "prev_action_signal": "hold",
+        },
+    )
+    assert label == "hold" and applied is True
 
 
 def test_short_history_strong_vpr_accumulates():

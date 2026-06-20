@@ -68,16 +68,81 @@ on:
         required: false
         default: false
         type: boolean
+  schedule:
+    # 06:30 IST Monday–Friday (GitHub cron is UTC).
+    - cron: "0 1 * * 1-5"
+  workflow_call:
+    inputs:
+      mode:
+        required: false
+        type: string
+        default: "all_sectors"
+      sector_id:
+        required: false
+        type: string
+        default: "defence"
+      max_symbols:
+        required: false
+        type: string
+        default: ""
+      workers:
+        required: false
+        type: string
+        default: "4"
+      all_sector_workers:
+        required: false
+        type: string
+        default: "1"
+      custom_symbols:
+        required: false
+        type: string
+        default: ""
+      custom_exchange:
+        required: false
+        type: string
+        default: "NSE"
+      portfolio_holdings_json:
+        required: false
+        type: string
+        default: ""
+      portfolio_max_positions:
+        required: false
+        type: string
+        default: "75"
+      titan_scope:
+        required: false
+        type: string
+        default: "full"
+      priority_top_n:
+        required: false
+        type: string
+        default: ""
+      refresh_global_news:
+        required: false
+        type: boolean
+        default: false
+      prefetch_symbol_news:
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   run:
+    if: ${{ github.ref_name == github.event.repository.default_branch || github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' }}
     runs-on: ubuntu-latest
     # Without this, a hung Breeze/SMTP/Gemini call can sit until the hosted runner default (~6h).
     timeout-minutes: 180
     steps:
+      - name: Schedule context (debug)
+        if: ${{ github.event_name == 'schedule' }}
+        run: |
+          echo "github.event_name=${{ github.event_name }}"
+          echo "UTC now:" && date -u
+          echo "06:30 IST = 01:00 UTC (GitHub cron is always UTC)"
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
@@ -87,14 +152,122 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Resolve run parameters
+        id: params
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "mode=all_sectors" >> "$GITHUB_OUTPUT"
+            echo "sector_id=defence" >> "$GITHUB_OUTPUT"
+            echo "max_symbols=" >> "$GITHUB_OUTPUT"
+            echo "workers=4" >> "$GITHUB_OUTPUT"
+            echo "all_sector_workers=1" >> "$GITHUB_OUTPUT"
+            echo "custom_symbols=" >> "$GITHUB_OUTPUT"
+            echo "custom_exchange=NSE" >> "$GITHUB_OUTPUT"
+            echo "portfolio_holdings_json=" >> "$GITHUB_OUTPUT"
+            echo "portfolio_max_positions=75" >> "$GITHUB_OUTPUT"
+            echo "titan_scope=full" >> "$GITHUB_OUTPUT"
+            echo "priority_top_n=" >> "$GITHUB_OUTPUT"
+            echo "refresh_global_news=false" >> "$GITHUB_OUTPUT"
+            echo "prefetch_symbol_news=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=${{ inputs.mode }}" >> "$GITHUB_OUTPUT"
+            echo "sector_id=${{ inputs.sector_id }}" >> "$GITHUB_OUTPUT"
+            echo "max_symbols=${{ inputs.max_symbols }}" >> "$GITHUB_OUTPUT"
+            echo "workers=${{ inputs.workers }}" >> "$GITHUB_OUTPUT"
+            echo "all_sector_workers=${{ inputs.all_sector_workers }}" >> "$GITHUB_OUTPUT"
+            echo "custom_symbols=${{ inputs.custom_symbols }}" >> "$GITHUB_OUTPUT"
+            echo "custom_exchange=${{ inputs.custom_exchange }}" >> "$GITHUB_OUTPUT"
+            echo "portfolio_holdings_json=${{ inputs.portfolio_holdings_json }}" >> "$GITHUB_OUTPUT"
+            echo "portfolio_max_positions=${{ inputs.portfolio_max_positions }}" >> "$GITHUB_OUTPUT"
+            SCOPE="${{ inputs.titan_scope }}"
+            if [ -z "$SCOPE" ]; then SCOPE="priority"; fi
+            echo "titan_scope=$SCOPE" >> "$GITHUB_OUTPUT"
+            echo "priority_top_n=${{ inputs.priority_top_n }}" >> "$GITHUB_OUTPUT"
+            echo "refresh_global_news=${{ inputs.refresh_global_news }}" >> "$GITHUB_OUTPUT"
+            echo "prefetch_symbol_news=${{ inputs.prefetch_symbol_news }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Market-open guard (IST)
+        id: market_open_guard
+        if: ${{ github.event_name == 'schedule' }}
+        env:
+          MARKET_HOLIDAYS_IST: ${{ secrets.MARKET_HOLIDAYS_IST }}
+        run: |
+          python - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+
+          root = Path(".").resolve()
+          src = root / "src"
+          if str(src) not in sys.path:
+            sys.path.insert(0, str(src))
+
+          from market_calendar import market_closed_reason_ist
+
+          now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
+          reason = market_closed_reason_ist(now_ist)
+          out = os.environ.get("GITHUB_OUTPUT", "")
+          if reason:
+            print(f"{reason} Skipping scheduled Titan run for {now_ist.date().isoformat()} (IST).")
+            if out:
+              with open(out, "a", encoding="utf-8") as fp:
+                fp.write("market_closed=true\n")
+                fp.write(f"reason={reason}\n")
+          else:
+            print(f"Market open day confirmed for {now_ist.date().isoformat()} (IST).")
+            if out:
+              with open(out, "a", encoding="utf-8") as fp:
+                fp.write("market_closed=false\n")
+          PY
+
       - name: Load Breeze token from Supabase
+        if: ${{ github.event_name != 'schedule' || steps.market_open_guard.outputs.market_closed != 'true' }}
+        id: inject_token
+        continue-on-error: true
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python scripts/inject_breeze_session_from_supabase.py
+        run: |
+          set +e
+          python scripts/inject_breeze_session_from_supabase.py 2>&1 | tee inject_token.log
+          rc=${PIPESTATUS[0]}
+          if grep -Eiq "session_config.*no rows|session_config.*not readable|breeze_session_token is empty|publishable key|service_role|Session token expired|SESSIONKEY_EXPIRED" inject_token.log; then
+            echo "breeze_session_invalid=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "breeze_session_invalid=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+
+      - name: Trigger breeze-token-updator workflow when token injection fails
+        if: ${{ (github.event_name != 'schedule' || steps.market_open_guard.outputs.market_closed != 'true') && steps.inject_token.outcome == 'failure' && steps.inject_token.outputs.breeze_session_invalid == 'true' }}
+        env:
+          GH_PAT: ${{ secrets.BREEZE_TOKEN_UPDATOR_PAT }}
+        run: |
+          set -e
+          if [ -z "${GH_PAT:-}" ]; then
+            echo "Missing secret BREEZE_TOKEN_UPDATOR_PAT; cannot dispatch updater workflow."
+            exit 1
+          fi
+          curl -fsS -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_PAT}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/arunurun/breeze-token-updator/actions/workflows/validate_token.yml/dispatches \
+            -d '{"ref":"main"}'
+          echo "Dispatched arunurun/breeze-token-updator validate_token workflow."
+
+      - name: Stop run if token injection failed
+        if: ${{ (github.event_name != 'schedule' || steps.market_open_guard.outputs.market_closed != 'true') && steps.inject_token.outcome == 'failure' }}
+        run: |
+          echo "Token injection failed (exit=${{ steps.inject_token.outputs.exit_code }})."
+          exit 1
 
       - name: Load news/CI config from Supabase
-        if: inputs.refresh_global_news == true || inputs.prefetch_symbol_news == true
+        if: ${{ (github.event_name != 'schedule' || steps.market_open_guard.outputs.market_closed != 'true') && (steps.params.outputs.refresh_global_news == 'true' || steps.params.outputs.prefetch_symbol_news == 'true') }}
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
@@ -102,6 +275,7 @@ jobs:
         run: python scripts/load_ci_config_from_supabase.py
 
       - name: News preflight
+        if: ${{ github.event_name != 'schedule' || steps.market_open_guard.outputs.market_closed != 'true' }}
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
@@ -111,14 +285,14 @@ jobs:
           TITAN_NEWS_DRIVER_LIMIT: "3"
           TITAN_STOCK_NEWS_COVERAGE_TOP_N: "5"
         run: |
-          SCOPE="${{ inputs.titan_scope }}"
-          if [ -z "$SCOPE" ]; then SCOPE="priority"; fi
+          SCOPE="${{ steps.params.outputs.titan_scope }}"
+          MODE="${{ steps.params.outputs.mode }}"
           ARGS=""
-          if [ "${{ inputs.mode }}" = "sector" ] || [ "${{ inputs.mode }}" = "custom" ]; then
-            ARGS="--sector ${{ inputs.sector_id }}"
+          if [ "$MODE" = "sector" ] || [ "$MODE" = "custom" ]; then
+            ARGS="--sector ${{ steps.params.outputs.sector_id }}"
             if [ "$SCOPE" = "priority" ]; then
               ARGS="$ARGS --priority-only"
-              TOPN="${{ inputs.priority_top_n }}"
+              TOPN="${{ steps.params.outputs.priority_top_n }}"
               if [ -n "$TOPN" ]; then
                 ARGS="$ARGS --priority-top-n $TOPN"
               fi
@@ -127,7 +301,7 @@ jobs:
           python scripts/preflight_news.py $ARGS
 
       - name: Refresh global news snapshot
-        if: inputs.refresh_global_news == true
+        if: ${{ (github.event_name != 'schedule' || steps.market_open_guard.outputs.market_closed != 'true') && steps.params.outputs.refresh_global_news == 'true' }}
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
@@ -155,7 +329,7 @@ jobs:
           PY
 
       - name: Prefetch symbol news
-        if: inputs.prefetch_symbol_news == true
+        if: ${{ (github.event_name != 'schedule' || steps.market_open_guard.outputs.market_closed != 'true') && steps.params.outputs.prefetch_symbol_news == 'true' }}
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
@@ -163,12 +337,11 @@ jobs:
           TITAN_NEWS_FETCH_LIMIT: "40"
           TITAN_NEWS_SNAPSHOT_TTL_HOURS: "2"
         run: |
-          SCOPE="${{ inputs.titan_scope }}"
-          if [ -z "$SCOPE" ]; then SCOPE="priority"; fi
-          ARGS="--sector ${{ inputs.sector_id }} --refresh-snapshots --workers 4"
+          SCOPE="${{ steps.params.outputs.titan_scope }}"
+          ARGS="--sector ${{ steps.params.outputs.sector_id }} --refresh-snapshots --workers 4"
           if [ "$SCOPE" = "priority" ]; then
             ARGS="$ARGS --priority-only"
-            TOPN="${{ inputs.priority_top_n }}"
+            TOPN="${{ steps.params.outputs.priority_top_n }}"
             if [ -n "$TOPN" ]; then
               ARGS="$ARGS --priority-top-n $TOPN"
             fi
@@ -176,6 +349,7 @@ jobs:
           python scripts/fetch_news_batch.py $ARGS
 
       - name: Run Titan
+        if: ${{ github.event_name != 'schedule' || steps.market_open_guard.outputs.market_closed != 'true' }}
         env:
           GITHUB_RUN_ID: ${{ github.run_id }}
           GITHUB_RUN_NUMBER: ${{ github.run_number }}
@@ -197,63 +371,60 @@ jobs:
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           SMTP_USE_TLS: ${{ secrets.SMTP_USE_TLS }}
-          GH_INPUT_PORTFOLIO_JSON: ${{ inputs.portfolio_holdings_json }}
+          GH_INPUT_PORTFOLIO_JSON: ${{ steps.params.outputs.portfolio_holdings_json }}
           TITAN_NEWS_MAX_AGE_HOURS: "36"
           TITAN_NEWS_SNAPSHOT_TTL_HOURS: "2"
           TITAN_NEWS_FETCH_LIMIT: "40"
           TITAN_NEWS_DRIVER_LIMIT: "3"
           TITAN_STOCK_NEWS_COVERAGE_TOP_N: "5"
         run: |
-          SCOPE="${{ inputs.titan_scope }}"
-          if [ -z "$SCOPE" ]; then SCOPE="priority"; fi
+          MODE="${{ steps.params.outputs.mode }}"
+          SCOPE="${{ steps.params.outputs.titan_scope }}"
+          MAX_SYMBOLS="${{ steps.params.outputs.max_symbols }}"
+          WORKERS="${{ steps.params.outputs.workers }}"
+          ALL_SECTOR_WORKERS="${{ steps.params.outputs.all_sector_workers }}"
+          SECTOR_ID="${{ steps.params.outputs.sector_id }}"
+          CUSTOM_EXCHANGE="${{ steps.params.outputs.custom_exchange }}"
+          CUSTOM_SYMBOLS="${{ steps.params.outputs.custom_symbols }}"
+          PRIORITY_TOP_N="${{ steps.params.outputs.priority_top_n }}"
+          PORTFOLIO_MAX="${{ steps.params.outputs.portfolio_max_positions }}"
 
-          if [ "${{ inputs.mode }}" = "live" ]; then
-            python main.py --live
-          elif [ "${{ inputs.mode }}" = "portfolio" ]; then
-            ARGS="--custom-exchange ${{ inputs.custom_exchange }}"
-            if [ -n "${{ inputs.portfolio_max_positions }}" ]; then
-              ARGS="$ARGS --portfolio-max-positions ${{ inputs.portfolio_max_positions }}"
+          ARGS=""
+          if [ "$MODE" = "live" ]; then
+            set -- python main.py --live
+          elif [ "$MODE" = "portfolio" ]; then
+            ARGS="--custom-exchange $CUSTOM_EXCHANGE"
+            if [ -n "$PORTFOLIO_MAX" ]; then
+              ARGS="$ARGS --portfolio-max-positions $PORTFOLIO_MAX"
             fi
-            python main.py $ARGS --portfolio-holdings-json "$GH_INPUT_PORTFOLIO_JSON"
-          elif [ "${{ inputs.mode }}" = "custom" ]; then
-            ARGS="--sector ${{ inputs.sector_id }} --custom-exchange ${{ inputs.custom_exchange }} --sector-digest"
-            if [ -n "${{ inputs.max_symbols }}" ]; then
-              ARGS="$ARGS --sector-max-symbols ${{ inputs.max_symbols }}"
-            fi
-            if [ -n "${{ inputs.workers }}" ]; then
-              ARGS="$ARGS --sector-workers ${{ inputs.workers }}"
-            fi
-            python main.py $ARGS --custom-symbols "${{ inputs.custom_symbols }}"
-          elif [ "${{ inputs.mode }}" = "all_sectors" ]; then
+            set -- python main.py $ARGS --portfolio-holdings-json "$GH_INPUT_PORTFOLIO_JSON"
+          elif [ "$MODE" = "custom" ]; then
+            ARGS="--sector $SECTOR_ID --custom-exchange $CUSTOM_EXCHANGE --sector-digest"
+            if [ -n "$MAX_SYMBOLS" ]; then ARGS="$ARGS --sector-max-symbols $MAX_SYMBOLS"; fi
+            if [ -n "$WORKERS" ]; then ARGS="$ARGS --sector-workers $WORKERS"; fi
+            set -- python main.py $ARGS --custom-symbols "$CUSTOM_SYMBOLS"
+          elif [ "$MODE" = "all_sectors" ]; then
             ARGS="--all-sectors --exclude-sectors unknown,non_equity"
             if [ "$SCOPE" = "priority" ]; then
-              TOPN="${{ inputs.priority_top_n }}"
+              TOPN="$PRIORITY_TOP_N"
               if [ -z "$TOPN" ]; then TOPN=5; fi
               ARGS="$ARGS --sector-priority-only --sector-priority-top-n $TOPN"
             fi
-            if [ -n "${{ inputs.max_symbols }}" ]; then
-              ARGS="$ARGS --sector-max-symbols ${{ inputs.max_symbols }}"
-            fi
-            if [ -n "${{ inputs.workers }}" ]; then
-              ARGS="$ARGS --sector-workers ${{ inputs.workers }}"
-            fi
-            if [ -n "${{ inputs.all_sector_workers }}" ]; then
-              ARGS="$ARGS --all-sector-workers ${{ inputs.all_sector_workers }}"
-            fi
-            python main.py $ARGS
+            if [ -n "$MAX_SYMBOLS" ]; then ARGS="$ARGS --sector-max-symbols $MAX_SYMBOLS"; fi
+            if [ -n "$WORKERS" ]; then ARGS="$ARGS --sector-workers $WORKERS"; fi
+            if [ -n "$ALL_SECTOR_WORKERS" ]; then ARGS="$ARGS --all-sector-workers $ALL_SECTOR_WORKERS"; fi
+            set -- python main.py $ARGS
           else
             if [ "$SCOPE" = "priority" ]; then
-              TOPN="${{ inputs.priority_top_n }}"
+              TOPN="$PRIORITY_TOP_N"
               if [ -z "$TOPN" ]; then TOPN=10; fi
-              ARGS="--sector ${{ inputs.sector_id }} --sector-priority-only --sector-priority-top-n $TOPN --sector-digest"
+              ARGS="--sector $SECTOR_ID --sector-priority-only --sector-priority-top-n $TOPN --sector-digest"
             else
-              ARGS="--sector ${{ inputs.sector_id }} --sector-digest"
+              ARGS="--sector $SECTOR_ID --sector-digest"
             fi
-            if [ -n "${{ inputs.max_symbols }}" ]; then
-              ARGS="$ARGS --sector-max-symbols ${{ inputs.max_symbols }}"
-            fi
-            if [ -n "${{ inputs.workers }}" ]; then
-              ARGS="$ARGS --sector-workers ${{ inputs.workers }}"
-            fi
-            python main.py $ARGS
+            if [ -n "$MAX_SYMBOLS" ]; then ARGS="$ARGS --sector-max-symbols $MAX_SYMBOLS"; fi
+            if [ -n "$WORKERS" ]; then ARGS="$ARGS --sector-workers $WORKERS"; fi
+            set -- python main.py $ARGS
           fi
+          echo "Running: $*"
+          "$@"

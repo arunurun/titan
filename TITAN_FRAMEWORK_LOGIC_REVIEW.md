@@ -57,8 +57,10 @@ past predictions against realized returns to measure hit-rate.
     drawdown-saved, false-exit cost, flip-rate, confidence calibration
 ```
 
-**Two distinct scoring systems** (do not conflate):
+**Two distinct scoring systems** (reconciled in ranking since Jun 2026):
 1. `rank_score` (§3) — a *cross-sectional sector ranking* score. Higher = stronger winner.
+   Includes a `v2_rank_adjustment` term derived from the latest stored `signal_v2` label /
+   `risk_net` so offensive momentum and defensive posture move together.
 2. `risk_net` + label (§4–5) — a *per-stock defensive/constructive* signal. Higher risk_net = more
    defensive.
 
@@ -165,7 +167,24 @@ rank_score = cap_bias
            + 8.0  * (absorption - 1.0)
            - overextension_penalty            # §3.2
            + news_blend_points                # §3.3 (added in build_sector_rankings)
+           + v2_rank_adjustment               # §3.1a (signal_v2 risk_net reconciliation)
+           × gate_multiplier                  # other shadow gates (v2 gate no longer multiplies)
 ```
+
+### 3.1a `v2_rank_adjustment` (signal_v2 reconciliation)
+
+Latest stored `action_signal` + `signal_reason_trace.risk_net` (fallback label→risk map)
+from `symbol_daily_features` are translated into a bounded bonus/penalty before other gates:
+
+- `risk_net < 4` (buy/accumulate/hold): bonus up to **+1.5** (`TITAN_V2_RANK_BONUS_MAX`), linear
+  from trim threshold down to 0.
+- `risk_net ≥ 4` (trim/exit-risk): penalty up to **−6.0** (`TITAN_V2_RANK_PENALTY_MAX`), linear
+  from 4→10 on the 0–10 `risk_net` scale.
+
+The legacy `v2_risk_label` gate records posture but sets `score_multiplier = 1.0` (no double
+penalty). In `skip` mode it may still **withhold** only extreme exit-risk (`risk_net ≥ 7`).
+Meta exposes `v2_rank_adjustment` and `dual_engine_conflict` when a top-quartile momentum name
+still carries trim/exit-risk.
 
 **`cap_bias`** rewards smaller caps (the stated objective is higher-move small/micro names)
 (`_cap_bias`, `sector_priority.py:1733-1742`; buckets `_bucket_from_market_cap_cr`, `:1721-1730`):

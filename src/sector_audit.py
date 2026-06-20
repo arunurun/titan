@@ -2395,6 +2395,46 @@ def _derive_sell_signal(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
     return derive_action_signal(audit)
 
 
+def _attach_prior_action_signals(
+    cfg: TitanConfig,
+    sector_key: str,
+    ok_results: list[dict[str, Any]],
+) -> None:
+    """Wire prior-session labels/risk for v2 hysteresis and recovery de-escalation."""
+    if not ok_results or not sector_key:
+        return
+    try:
+        from analysis_store import _fetch_symbol_history_by_sector
+    except ImportError:
+        return
+    history = _fetch_symbol_history_by_sector(cfg, sector=sector_key, lookback_days=21)
+    if not history:
+        return
+    for r in ok_results:
+        audit = r.get("audit")
+        if not isinstance(audit, dict):
+            continue
+        sym = str(r.get("symbol") or audit.get("symbol") or "").strip().upper()
+        if not sym:
+            continue
+        rows = history.get(sym) or []
+        if not rows:
+            continue
+        latest = rows[0] if isinstance(rows[0], dict) else {}
+        prior = str(latest.get("action_signal") or "").strip().lower()
+        if prior:
+            audit["prev_action_signal"] = prior
+        if len(rows) > 1 and isinstance(rows[1], dict):
+            prev_prev = str(rows[1].get("action_signal") or "").strip().lower()
+            if prev_prev:
+                audit["prev_prev_action_signal"] = prev_prev
+        tape = latest.get("tape_extras")
+        if isinstance(tape, dict):
+            prev_risk = tape.get("sell_signal_risk_score", tape.get("risk_net"))
+            if prev_risk is not None:
+                audit["prev_risk_net"] = prev_risk
+
+
 def _refresh_symbol_scoring_outputs(audit: dict[str, Any]) -> None:
     _apply_contemporaneous_dampener(audit)  # Fix C: de-bias same-day pop before scoring
     next_day_score, next_week_score, prediction_breakdown = _predictive_scores(audit)
@@ -2402,6 +2442,9 @@ def _refresh_symbol_scoring_outputs(audit: dict[str, Any]) -> None:
     audit["next_week_score"] = next_week_score
     audit["prediction_breakdown"] = prediction_breakdown
     audit["hypothesis_support"] = _hypothesis_support_tag(audit)
+    # Drop stale labels so Tier-2 options corroborators do not read a prior pass.
+    audit.pop("sell_signal", None)
+    audit.pop("action_signal", None)
     action_signal, sell_risk_score, sell_reasons = _derive_sell_signal(audit)
     audit["sell_signal"] = action_signal
     audit["action_signal"] = action_signal
@@ -3889,6 +3932,7 @@ def run_sector_live(
         event_adjustments = _apply_event_guardrails(ok_results)
         macro_applied, macro_reason = _apply_macro_guardrails(ok_results, macro_snapshot)
         _apply_sector_cross_section(ok_results, score_percentiles=False)
+        _attach_prior_action_signals(cfg, sector_id, ok_results)
         for r in ok_results:
             if isinstance(r.get("audit"), dict):
                 r["audit"]["sector_options_context"] = sector_options_ctx

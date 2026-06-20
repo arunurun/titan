@@ -23,7 +23,7 @@ from supabase import create_client
 
 from breeze_client import fetch_equity_data, volume_participation_ratio
 from config_loader import TitanConfig
-from sector_registry import SectorInstrument
+from sector_registry import SectorInstrument, expand_symbols_with_aliases, symbol_lookup_variants
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -2032,6 +2032,7 @@ def _ramp(value: float, zero_at: float, full_at: float, full_points: float) -> f
 _OVEREXT_CONFIRM_TREND_WEAK_PCT = 6.0    # 1m return where continuation credit starts
 _OVEREXT_CONFIRM_TREND_FULL_PCT = 18.0   # 1m return where continuation credit is maxed
 _OVEREXT_CONFIRM_FLOOR = 0.2             # min penalty multiplier for a confirmed winner
+_OVEREXT_CONFIRM_WEEKLY_FLOOR_PCT = -3.0   # mild weekly pullback still counts as continuation
 
 
 def _overextension_confirm_mode() -> str:
@@ -2057,8 +2058,13 @@ def _overextension_confirmation(ret_1w: float, ret_1m: float, regime_hostile: bo
     weak = _env_float("TITAN_OVEREXT_CONFIRM_TREND_WEAK_PCT", _OVEREXT_CONFIRM_TREND_WEAK_PCT)
     full = _env_float("TITAN_OVEREXT_CONFIRM_TREND_FULL_PCT", _OVEREXT_CONFIRM_TREND_FULL_PCT)
     floor = _env_float("TITAN_OVEREXT_CONFIRM_FLOOR", _OVEREXT_CONFIRM_FLOOR)
+    weekly_floor = _env_float(
+        "TITAN_OVEREXT_CONFIRM_WEEKLY_FLOOR_PCT", _OVEREXT_CONFIRM_WEEKLY_FLOOR_PCT
+    )
     cont = _ramp(ret_1m, weak, full, 1.0)
-    if ret_1w <= 0.0:  # weekly rolling over -> not a continuing winner
+    # Mild weekly pullbacks within a strong monthly uptrend still get continuation credit
+    # (e.g. TRENT: slight 1w dip while 1m trend remains constructive).
+    if ret_1w <= weekly_floor or (ret_1w <= 0.0 and ret_1m < weak):
         cont = 0.0
     mult = 1.0 - (1.0 - _clamp(floor, 0.0, 1.0)) * cont
     return _clamp(mult, floor, 1.0), f"cont={round(cont, 3)}"
@@ -2463,6 +2469,7 @@ def _fetch_eod_gate_context(
     Populated by STEP 4b (delivery) / 4c (ban) / 4d (futures + institutional).
     """
     syms = sorted({str(s).strip().upper() for s in symbols if s})
+    query_syms = expand_symbols_with_aliases(syms)
     ctx: dict[str, Any] = {
         "delivery": {}, "ban": set(), "futures": {}, "institutional": {},
         "calendar": {}, "as_of_date": as_of_date,
@@ -2473,7 +2480,7 @@ def _fetch_eod_gate_context(
     try:
         q = client.table("delivery_daily").select(
             "trade_date,symbol,deliv_per,deliv_qty,ttl_traded_qty"
-        ).in_("symbol", syms)
+        ).in_("symbol", query_syms)
         if as_of_date:
             q = q.lte("trade_date", as_of_date)
         res = q.order("trade_date", desc=True).limit(2000).execute()
@@ -2499,7 +2506,7 @@ def _fetch_eod_gate_context(
     try:
         q = client.table("futures_daily").select(
             "trade_date,symbol,open_interest,change_in_oi,underlying_close"
-        ).in_("symbol", syms)
+        ).in_("symbol", query_syms)
         if as_of_date:
             q = q.lte("trade_date", as_of_date)
         res = q.order("trade_date", desc=True).limit(2000).execute()
@@ -2520,20 +2527,29 @@ def _fetch_eod_gate_context(
             ctx["institutional"] = inst_rows[0]
     except Exception as exc:  # noqa: BLE001
         logger.info("institutional_flow read failed: %s", exc)
-    # --- 3b: latest signal_v2 risk label per symbol (symbol_daily_features.action_signal) ---
+    # --- 3b: latest signal_v2 label + risk_net per symbol (symbol_daily_features) ---
     try:
         q = client.table("symbol_daily_features").select(
-            "trade_date,symbol,action_signal"
-        ).in_("symbol", syms)
+            "trade_date,symbol,action_signal,signal_reason_trace"
+        ).in_("symbol", query_syms)
         if as_of_date:
             q = q.lte("trade_date", as_of_date)
         res = q.order("trade_date", desc=True).limit(4000).execute()
         labels: dict[str, str] = {}
+        risk_net_map: dict[str, float] = {}
+        label_dates: dict[str, str] = {}
         for r in list(getattr(res, "data", None) or []):
             sym = str(r.get("symbol")).upper()
             if sym not in labels and r.get("action_signal"):
                 labels[sym] = str(r.get("action_signal")).strip().lower()
+                label_dates[sym] = str(r.get("trade_date") or "").strip() or None
+            if sym not in risk_net_map:
+                rn = _parse_v2_risk_net(r.get("signal_reason_trace"))
+                if not math.isnan(rn):
+                    risk_net_map[sym] = rn
         ctx["v2_labels"] = labels
+        ctx["v2_risk_net"] = risk_net_map
+        ctx["v2_label_dates"] = label_dates
     except Exception as exc:  # noqa: BLE001
         logger.info("symbol_daily_features label read failed: %s", exc)
     # --- Phase 3: corporate-actions / results calendar (corporate_actions_calendar) ---
@@ -2543,7 +2559,7 @@ def _fetch_eod_gate_context(
         end_date = (date.fromisoformat(anchor) + timedelta(days=lookahead)).isoformat()
         q = client.table("corporate_actions_calendar").select(
             "symbol,ex_date,purpose"
-        ).in_("symbol", syms).gte("ex_date", anchor).lte("ex_date", end_date)
+        ).in_("symbol", query_syms).gte("ex_date", anchor).lte("ex_date", end_date)
         res = q.order("ex_date").execute()
         for r in list(getattr(res, "data", None) or []):
             sym = str(r.get("symbol") or "").strip().upper()
@@ -2579,32 +2595,147 @@ def _resolve_symbol_gates(
     return [g for g in gates if isinstance(g, dict)]
 
 
-# ---- STEP 3b (P1-6): gate the winners shortlist by the signal_v2 risk label ----
+# ---- STEP 3b (P1-6): reconcile signal_v2 risk into rank_score (not post-hoc withhold) ----
 _V2_RISK_SUPPRESS = ("trim", "exit-risk")
 _V2_RISK_DAMP_MULT = 0.5
+_V2_RANK_BONUS_MAX = 1.5
+_V2_RANK_PENALTY_MAX = 6.0
+_V2_RANK_TRIM_THRESHOLD = 4.0
+_V2_LABEL_RISK_NET: dict[str, float] = {
+    "buy": 1.0,
+    "accumulate": 2.5,
+    "hold": 3.0,
+    "trim": 5.5,
+    "exit-risk": 8.0,
+}
+_EXTREME_MOMENTUM_1W_PCT = 10.0
+_EXTREME_MOMENTUM_RANK = 5
+_RANK_LOOKBACK_CALENDAR_DAYS = 120
+
+
+def _parse_v2_risk_net(raw: Any) -> float:
+    if raw is None:
+        return float("nan")
+    if isinstance(raw, (int, float)):
+        val = float(raw)
+        return val if not math.isnan(val) else float("nan")
+    if isinstance(raw, dict):
+        return _safe_float(raw.get("risk_net"))
+    if isinstance(raw, str):
+        txt = raw.strip()
+        if not txt:
+            return float("nan")
+        try:
+            parsed = json.loads(txt)
+        except (json.JSONDecodeError, TypeError):
+            return float("nan")
+        return _safe_float(parsed.get("risk_net")) if isinstance(parsed, dict) else float("nan")
+    return float("nan")
+
+
+def _resolve_v2_signal(symbol: str, eod_ctx: dict[str, Any]) -> dict[str, Any]:
+    """Latest v2 label + risk_net for a symbol, following NSE rename aliases."""
+    sym = str(symbol).strip().upper()
+    labels = eod_ctx.get("v2_labels") or {}
+    risk_map = eod_ctx.get("v2_risk_net") or {}
+    dates_map = eod_ctx.get("v2_label_dates") or {}
+    label = ""
+    risk_net = float("nan")
+    trade_date: str | None = None
+    alias_used: str | None = None
+    for variant in symbol_lookup_variants(sym):
+        if not label and variant in labels:
+            label = str(labels[variant]).strip().lower()
+            trade_date = dates_map.get(variant)
+            if variant != sym:
+                alias_used = variant
+        if math.isnan(risk_net) and variant in risk_map:
+            risk_net = _safe_float(risk_map[variant])
+            if variant != sym and alias_used is None:
+                alias_used = variant
+    if math.isnan(risk_net) and label:
+        risk_net = _V2_LABEL_RISK_NET.get(label, float("nan"))
+    return {
+        "label": label or None,
+        "risk_net": _round_or_none(risk_net, 2),
+        "trade_date": trade_date,
+        "alias_used": alias_used,
+    }
+
+
+def _v2_rank_adjustment(v2: dict[str, Any]) -> dict[str, Any]:
+    """Translate signal_v2 risk_net into a rank_score bonus/penalty term."""
+    label = str(v2.get("label") or "").strip().lower()
+    risk_net = _safe_float(v2.get("risk_net"))
+    if not label and math.isnan(risk_net):
+        return {"adjustment": 0.0, "label": None, "risk_net": None, "mode": "no_data"}
+    if math.isnan(risk_net):
+        risk_net = _V2_LABEL_RISK_NET.get(label, float("nan"))
+    if math.isnan(risk_net):
+        return {"adjustment": 0.0, "label": label or None, "risk_net": None, "mode": "no_data"}
+    bonus_max = _env_float("TITAN_V2_RANK_BONUS_MAX", _V2_RANK_BONUS_MAX)
+    penalty_max = _env_float("TITAN_V2_RANK_PENALTY_MAX", _V2_RANK_PENALTY_MAX)
+    trim_at = _env_float("TITAN_V2_RANK_TRIM_THRESHOLD", _V2_RANK_TRIM_THRESHOLD)
+    if risk_net < trim_at:
+        frac = 1.0 - (risk_net / trim_at) if trim_at > 0 else 0.0
+        adj = bonus_max * _clamp(frac, 0.0, 1.0)
+        mode = "bonus"
+    else:
+        span = max(1.0, 10.0 - trim_at)
+        frac = (risk_net - trim_at) / span
+        adj = -penalty_max * _clamp(frac, 0.0, 1.0)
+        mode = "penalty"
+    return {
+        "adjustment": round(adj, 4),
+        "label": label or None,
+        "risk_net": round(risk_net, 2),
+        "mode": mode,
+        "trade_date": v2.get("trade_date"),
+        "alias_used": v2.get("alias_used"),
+    }
 
 
 def _v2_risk_gate(symbol: str, eod_ctx: dict[str, Any]) -> dict[str, Any]:
-    """Down-rank / withhold a momentum winner the defensive signal_v2 flags as risky.
+    """Log v2-risk posture; scoring uses _v2_rank_adjustment (no double penalty).
 
-    Reconciles the offensive winners list with the defensive engine (deep-scan P1-6: of
-    10 Defence buys, signal_v2 labelled 0 buy / 5 trim-exit incl. #1 BDL). NaN-safe: no
-    stored label -> no-op.
+    Withhold in skip mode only for extreme exit-risk (risk_net >= 7). NaN-safe: no label -> no-op.
     """
     mode = _gate_mode("TITAN_V2_RISK_GATE_MODE")
-    damp = _env_float("TITAN_V2_RISK_GATE_DAMP_MULT", _V2_RISK_DAMP_MULT)
-    label = str((eod_ctx.get("v2_labels") or {}).get(str(symbol).upper()) or "").strip().lower()
+    v2 = _resolve_v2_signal(symbol, eod_ctx)
+    label = str(v2.get("label") or "").strip().lower()
+    risk_net = _safe_float(v2.get("risk_net"))
     triggered = label in _V2_RISK_SUPPRESS
-    mult, withhold = _gate_effect(mode, triggered, damp)
+    extreme = label == "exit-risk" or ((not math.isnan(risk_net)) and risk_net >= 7.0)
+    withhold = mode == "skip" and extreme
+    would = "allow"
+    if withhold:
+        would = f"withhold extreme ({label})"
+    elif triggered:
+        would = "logged (scoring reconciled)"
     return {
         "gate": "v2_risk_label",
         "mode": mode,
         "triggered": triggered,
-        "would": f"down-rank/withhold ({label})" if triggered else "allow",
+        "would": would,
         "v2_label": label or None,
-        "score_multiplier": round(mult, 4),
+        "v2_risk_net": v2.get("risk_net"),
+        "v2_label_date": v2.get("trade_date"),
+        "score_multiplier": 1.0,
         "withhold": withhold,
+        "scoring_reconciled": True,
     }
+
+
+def _priority_momentum_cap_override(row: dict[str, Any]) -> bool:
+    """Allow large/mid caps into priority slots on extreme weekly momentum."""
+    threshold = _env_float("TITAN_PRIORITY_MOMENTUM_1W_PCT", _EXTREME_MOMENTUM_1W_PCT)
+    rank_limit = max(1, int(_env_float("TITAN_PRIORITY_MOMENTUM_RANK", float(_EXTREME_MOMENTUM_RANK))))
+    bucket = str(row.get("market_cap_bucket") or "")
+    if bucket not in ("large", "mid"):
+        return False
+    ret_1w = _safe_float(row.get("return_1w_pct"))
+    rank = int(row.get("rank_in_sector") or 999)
+    return (not math.isnan(ret_1w)) and ret_1w > threshold and rank <= rank_limit
 
 
 # ---- Phase 3: corporate-actions / results calendar gate ----
@@ -2907,7 +3038,10 @@ def build_sector_rankings(
                 inst.symbol,
                 inst.exchange,
                 breeze=breeze,
-                lookback_calendar_days=90,
+                lookback_calendar_days=max(
+                    90,
+                    int(_env_float("TITAN_RANK_LOOKBACK_DAYS", float(_RANK_LOOKBACK_CALENDAR_DAYS))),
+                ),
                 max_retries=2,
             )
         except BreezeDataStaleError as exc:
@@ -2971,6 +3105,9 @@ def build_sector_rankings(
             session_move=ret_1d,
         )
         pre_gate_score = round(base_score + blend_points, 4)
+        v2_signal = _resolve_v2_signal(symbol_u, eod_ctx)
+        v2_rank = _v2_rank_adjustment(v2_signal)
+        pre_gate_score = round(pre_gate_score + float(v2_rank.get("adjustment") or 0.0), 4)
         # Shadow-mode buy-suppression gates (regime + delivery/ban/futures/v2-risk). In
         # the default shadow mode the multiplier is 1.0 / withhold False, so the published
         # rank is unchanged and only the would-be decisions are recorded in meta.
@@ -3031,6 +3168,7 @@ def build_sector_rankings(
                     "overextension_components": overext.get("components", {}),
                     "absorption_term": absorption_bd,
                     "pre_gate_rank_score": pre_gate_score,
+                    "v2_rank_adjustment": v2_rank,
                     "gate_multiplier": round(gate_mult, 4),
                     "gate_withhold": gate_withhold,
                     "shadow_gates": gate_records,
@@ -3044,6 +3182,23 @@ def build_sector_rankings(
         key=lambda r: (_safe_float(r.get("rank_score")), _safe_float(r.get("return_1w_pct"))),
         reverse=True,
     )
+    n_ranked = len(ranked)
+    quartile_cut = max(1, math.ceil(n_ranked * 0.25)) if n_ranked else 1
+    for i, row in enumerate(ranked, start=1):
+        row["rank_in_sector"] = i
+        meta = row.setdefault("meta", {})
+        v2_meta = meta.get("v2_rank_adjustment") if isinstance(meta.get("v2_rank_adjustment"), dict) else {}
+        label = str(v2_meta.get("label") or "").strip().lower()
+        if i <= quartile_cut and label in _V2_RISK_SUPPRESS and v2_meta.get("mode") == "penalty":
+            meta["dual_engine_conflict"] = True
+            meta["conflict_detail"] = {
+                "rank_in_sector": i,
+                "quartile_cutoff": quartile_cut,
+                "v2_label": label,
+                "v2_risk_net": v2_meta.get("risk_net"),
+                "technical_rank_score": meta.get("technical_rank_score"),
+                "v2_rank_adjustment": v2_meta.get("adjustment"),
+            }
     top_n = max(1, int(top_n))
     priority_candidates = [
         r
@@ -3053,14 +3208,29 @@ def build_sector_rankings(
     ]
     # Primary objective: small/micro-cap AI names for higher-move opportunity.
     preferred = [r for r in priority_candidates if str(r.get("market_cap_bucket")) in ("micro", "small")]
-    fallback = [r for r in priority_candidates if str(r.get("market_cap_bucket")) not in ("micro", "small")]
-    ordered_candidates = preferred + fallback
+    momentum_override = [r for r in priority_candidates if _priority_momentum_cap_override(r)]
+    preferred_keys = {(r["symbol"], r["exchange"]) for r in preferred}
+    momentum_keys = {(r["symbol"], r["exchange"]) for r in momentum_override}
+    fallback = [
+        r
+        for r in priority_candidates
+        if (r["symbol"], r["exchange"]) not in preferred_keys
+        and (r["symbol"], r["exchange"]) not in momentum_keys
+    ]
+    ordered_candidates: list[dict[str, Any]] = []
+    seen_keys: set[tuple[str, str]] = set()
+    for bucket in (preferred, momentum_override, fallback):
+        for r in bucket:
+            key = (r["symbol"], r["exchange"])
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            ordered_candidates.append(r)
     priority_keys = {
         (r["symbol"], r["exchange"])
         for r in ordered_candidates[:top_n]
     }
-    for i, row in enumerate(ranked, start=1):
-        row["rank_in_sector"] = i
+    for row in ranked:
         row["is_priority"] = (row["symbol"], row["exchange"]) in priority_keys
     return ranked
 

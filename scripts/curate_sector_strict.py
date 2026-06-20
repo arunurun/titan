@@ -19,6 +19,8 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 load_dotenv(ROOT / ".env", override=False)
 
+from sector_registry import expand_symbols_with_aliases, symbol_lookup_variants
+
 IST = ZoneInfo("Asia/Kolkata")
 
 # PostgREST URL/query limits: large `.in_(instrument_id, ...)` and huge upserts return 400.
@@ -45,6 +47,10 @@ def _load_allowlist(path: Path) -> tuple[str, str, set[str]]:
     policy = str(data.get("policy", "sector_strict_allowlist_v1")).strip()
     symbols = {str(s).strip().upper() for s in (data.get("symbols") or []) if str(s).strip()}
     return sector_key, policy, symbols
+
+
+def _matches_allowlist(symbol: str, allow_syms: set[str]) -> bool:
+    return any(v in allow_syms for v in symbol_lookup_variants(symbol))
 
 
 def main() -> int:
@@ -86,7 +92,7 @@ def main() -> int:
     allow_rows = (
         client.table("market_instruments")
         .select("id,symbol,exchange")
-        .in_("symbol", sorted(allow_syms))
+        .in_("symbol", sorted(expand_symbols_with_aliases(allow_syms)))
         .in_("exchange", ["NSE", "BSE"])
         .eq("is_active", True)
         .execute()
@@ -110,8 +116,12 @@ def main() -> int:
             by_symbol[sym] = {"id": iid, "symbol": sym, "exchange": ex}
     allow_ids = {v["id"] for v in by_symbol.values()}
     allow_pairs = [(v["symbol"], v["exchange"]) for v in by_symbol.values()]
-    found_syms = {sym for sym, _ex in allow_pairs}
-    unresolved = sorted(allow_syms - found_syms)
+    found_allow_syms: set[str] = set()
+    for sym, _ex in allow_pairs:
+        for variant in symbol_lookup_variants(sym):
+            if variant in allow_syms:
+                found_allow_syms.add(variant)
+    unresolved = sorted(allow_syms - found_allow_syms)
 
     active_maps = (
         client.table("instrument_sector_map")
@@ -130,7 +140,7 @@ def main() -> int:
             continue
         sym = str(mi.get("symbol", "")).strip().upper()
         iid = str(mi.get("id", "")).strip()
-        if sym in allow_syms and iid and iid not in allow_ids:
+        if _matches_allowlist(sym, allow_syms) and iid and iid not in allow_ids:
             map_id = str(row.get("id", "")).strip()
             if map_id:
                 duplicate_map_ids.append(map_id)
@@ -150,7 +160,7 @@ def main() -> int:
         if not symbol:
             continue
         iid = str(mi.get("id", "")).strip()
-        if symbol in allow_syms and iid in allow_ids:
+        if _matches_allowlist(symbol, allow_syms) and iid in allow_ids:
             continue
         inst_rows.append(
             {
@@ -284,7 +294,7 @@ def main() -> int:
         "sector_key": sector_key,
         "allowlist_path": str(allow_path.as_posix()),
         "allowlist_declared": len(allow_syms),
-        "allowlist_resolved_symbols": sorted(found_syms),
+        "allowlist_resolved_symbols": sorted(found_allow_syms),
         "allowlist_unresolved_symbols": unresolved,
         "allowlist_active_pairs": sorted(f"{sym}({ex})" for sym, ex in allow_pairs),
         "symbols_removed_from_sector": sorted({r["symbol"] for r in inst_rows}),

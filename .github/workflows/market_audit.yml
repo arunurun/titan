@@ -1,185 +1,20 @@
-# Private repo recommended. ICICI Breeze session tokens expire quickly—if this runs often,
-# refresh BREEZE_SESSION_TOKEN (GitHub secret / Supabase) whenever the API returns "session expired".
-#
-# Repository secrets: SUPABASE_URL, SUPABASE_KEY (service role: read session_config + write audit_logs),
-#   BREEZE_API_KEY, BREEZE_SECRET, GEMINI_API_KEY (optional: GEMINI_API_KEY_2 for rotation on quota)
-# Recommended: BREEZE_SESSION_TOKEN — daily Breeze token; if set, bash writes GITHUB_ENV (no Supabase read).
-# Optional email: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, EMAIL_FROM, EMAIL_TO, SMTP_USE_TLS
-#
-# If the repo root is not the Titan folder, set defaults.run.working-directory below (e.g. Titan).
+# DEPRECATED — use "Run Titan Now" (run_titan_now.yml) instead.
+# Scheduled weekday market runs (06:30 IST) live in run_titan_now.yml.
+# This wrapper remains for one release so existing bookmarks still work.
 
-name: Market audit (Titan V12.0)
+name: Market audit (deprecated — use Run Titan Now)
 
 on:
   workflow_dispatch:
-  schedule:
-    # 06:30 IST Monday-Friday (GitHub cron is UTC).
-    - cron: "0 1 * * 1-5"
-
-permissions:
-  contents: read
 
 jobs:
-  audit:
-    if: ${{ github.ref_name == github.event.repository.default_branch || github.event_name == 'workflow_dispatch' }}
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: .
-    steps:
-      - name: Schedule context (debug)
-        run: |
-          echo "github.event_name=${{ github.event_name }}"
-          echo "UTC now:" && date -u
-          echo "06:30 IST = 01:00 UTC (GitHub cron is always UTC)"
-
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Market-open guard (IST)
-        id: market_open_guard
-        if: ${{ github.event_name == 'schedule' }}
-        env:
-          MARKET_HOLIDAYS_IST: ${{ secrets.MARKET_HOLIDAYS_IST }}
-        run: |
-          python - <<'PY'
-          import os
-          import sys
-          from pathlib import Path
-          from datetime import datetime
-          from zoneinfo import ZoneInfo
-
-          root = Path(".").resolve()
-          src = root / "src"
-          if str(src) not in sys.path:
-            sys.path.insert(0, str(src))
-
-          from market_calendar import market_closed_reason_ist
-
-          now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
-          reason = market_closed_reason_ist(now_ist)
-          out = os.environ.get("GITHUB_OUTPUT", "")
-          if reason:
-            print(f"{reason} Skipping market audit for {now_ist.date().isoformat()} (IST).")
-            if out:
-              with open(out, "a", encoding="utf-8") as fp:
-                fp.write("market_closed=true\n")
-                fp.write(f"reason={reason}\n")
-          else:
-            print(f"Market open day confirmed for {now_ist.date().isoformat()} (IST).")
-            if out:
-              with open(out, "a", encoding="utf-8") as fp:
-                fp.write("market_closed=false\n")
-          PY
-
-      # Single source of truth: always load Breeze token from Supabase session_config.
-      - name: Load Breeze session token (Supabase session_config)
-        if: ${{ github.event_name != 'schedule' || steps.market_open_guard.outputs.market_closed != 'true' }}
-        id: inject_token
-        continue-on-error: true
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: |
-          set +e
-          python scripts/inject_breeze_session_from_supabase.py 2>&1 | tee inject_token.log
-          rc=${PIPESTATUS[0]}
-          if grep -Eiq "session_config.*no rows|session_config.*not readable|breeze_session_token is empty|publishable key|service_role|Session token expired|SESSIONKEY_EXPIRED" inject_token.log; then
-            echo "breeze_session_invalid=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "breeze_session_invalid=false" >> "$GITHUB_OUTPUT"
-          fi
-          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
-          exit "$rc"
-
-      - name: Trigger breeze-token-updator workflow when token injection fails
-        if: ${{ (github.event_name != 'schedule' || steps.market_open_guard.outputs.market_closed != 'true') && steps.inject_token.outcome == 'failure' && steps.inject_token.outputs.breeze_session_invalid == 'true' }}
-        env:
-          GH_PAT: ${{ secrets.BREEZE_TOKEN_UPDATOR_PAT }}
-        run: |
-          set -e
-          if [ -z "${GH_PAT:-}" ]; then
-            echo "Missing secret BREEZE_TOKEN_UPDATOR_PAT; cannot dispatch updater workflow."
-            exit 1
-          fi
-          curl -fsS -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${GH_PAT}" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            https://api.github.com/repos/arunurun/breeze-token-updator/actions/workflows/validate_token.yml/dispatches \
-            -d '{"ref":"main"}'
-          echo "Dispatched arunurun/breeze-token-updator validate_token workflow."
-
-      - name: Stop run if token injection failed
-        if: ${{ (github.event_name != 'schedule' || steps.market_open_guard.outputs.market_closed != 'true') && steps.inject_token.outcome == 'failure' }}
-        run: |
-          echo "Token injection failed (exit=${{ steps.inject_token.outputs.exit_code }})."
-          exit 1
-
-      # On branches `main`, `sector`, `analysis`: run all active sectors (excluding unknown). Else: NIFTY live.
-      - name: Market audit (NIFTY live or all sectors)
-        if: ${{ github.event_name != 'schedule' || steps.market_open_guard.outputs.market_closed != 'true' }}
-        id: market_audit
-        continue-on-error: true
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          BREEZE_API_KEY: ${{ secrets.BREEZE_API_KEY }}
-          BREEZE_SECRET: ${{ secrets.BREEZE_SECRET }}
-          TITAN_ENABLE_ANALYSIS_STORE: "1"
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_API_KEY_2: ${{ secrets.GEMINI_API_KEY_2 }}
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO }}
-          SMTP_USE_TLS: ${{ secrets.SMTP_USE_TLS }}
-        run: |
-          set +e
-          if [ "${{ github.ref_name }}" = "analysis" ] || [ "${{ github.ref_name }}" = "sector" ] || [ "${{ github.ref_name }}" = "main" ]; then
-            # Default: one digest narrative per sector run (use --sector-per-symbol-narrative for per-stock posts).
-            python main.py --all-sectors --all-sector-workers 1 --sector-workers 4 --exclude-sectors unknown,non_equity 2>&1 | tee market_audit.log
-            rc=${PIPESTATUS[0]}
-          else
-            python main.py --live 2>&1 | tee market_audit.log
-            rc=${PIPESTATUS[0]}
-          fi
-          if grep -Eiq "Session token expired|SESSIONKEY_EXPIRED" market_audit.log; then
-            echo "breeze_session_invalid=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "breeze_session_invalid=false" >> "$GITHUB_OUTPUT"
-          fi
-          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
-          exit "$rc"
-
-      - name: Trigger breeze-token-updator workflow on invalid token
-        if: ${{ (github.event_name != 'schedule' || steps.market_open_guard.outputs.market_closed != 'true') && steps.market_audit.outputs.breeze_session_invalid == 'true' }}
-        env:
-          GH_PAT: ${{ secrets.BREEZE_TOKEN_UPDATOR_PAT }}
-        run: |
-          set -e
-          if [ -z "${GH_PAT:-}" ]; then
-            echo "Missing secret BREEZE_TOKEN_UPDATOR_PAT; cannot dispatch updater workflow."
-            exit 1
-          fi
-          curl -fsS -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${GH_PAT}" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            https://api.github.com/repos/arunurun/breeze-token-updator/actions/workflows/validate_token.yml/dispatches \
-            -d '{"ref":"main"}'
-          echo "Dispatched arunurun/breeze-token-updator validate_token workflow."
-
-      - name: Mark run failed if market audit failed
-        if: ${{ (github.event_name != 'schedule' || steps.market_open_guard.outputs.market_closed != 'true') && steps.market_audit.outcome == 'failure' }}
-        run: |
-          echo "Market audit step failed (exit=${{ steps.market_audit.outputs.exit_code }})."
-          exit 1
+  run:
+    uses: ./.github/workflows/run_titan_now.yml
+    secrets: inherit
+    with:
+      mode: all_sectors
+      titan_scope: full
+      workers: "4"
+      all_sector_workers: "1"
+      refresh_global_news: false
+      prefetch_symbol_news: false

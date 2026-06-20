@@ -6,12 +6,24 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_market_audit_workflow_uses_630am_ist_weekdays() -> None:
-    path = ROOT / ".github" / "workflows" / "market_audit.yml"
+def test_run_titan_now_scheduled_630am_ist_weekdays() -> None:
+    path = ROOT / ".github" / "workflows" / "run_titan_now.yml"
     text = path.read_text(encoding="utf-8")
     assert 'cron: "0 1 * * 1-5"' in text
     assert "Market-open guard (IST)" in text
-    assert "--all-sectors --all-sector-workers 1 --sector-workers 4 --exclude-sectors unknown,non_equity" in text
+    assert "mode=all_sectors" in text
+    assert "titan_scope=full" in text
+    assert "all_sector_workers=1" in text
+    assert "--all-sectors --exclude-sectors unknown,non_equity" in text
+    assert "breeze-token-updator" in text
+
+
+def test_market_audit_is_deprecated_wrapper() -> None:
+    path = ROOT / ".github" / "workflows" / "market_audit.yml"
+    text = path.read_text(encoding="utf-8")
+    assert "deprecated" in text.lower()
+    assert "uses: ./.github/workflows/run_titan_now.yml" in text
+    assert 'cron: "0 1 * * 1-5"' not in text
 
 
 def test_run_titan_now_no_default_symbol_cap() -> None:

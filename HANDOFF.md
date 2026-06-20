@@ -33,12 +33,16 @@ Set these repository secrets to enable email alerts for that workflow:
 
 ## Schedule (GitHub)
 
-Workflow runs **weekdays** during **09:15–15:30 IST** (crons are **UTC**; see `market_audit.yml`). Includes **11:00 IST** and **11:15 IST** slots. ICICI session tokens still expire independently.
+**Run Titan Now** (`run_titan_now.yml`) is the single scheduled workflow: **weekdays 06:30 IST** (`cron: 0 1 * * 1-5` UTC). Scheduled runs use `mode=all_sectors`, `titan_scope=full`, `all_sector_workers=1`, `workers=4`, exclude `unknown,non_equity`, news flags off. Includes market-open guard (IST) and Breeze token-updator fallback on inject failure.
+
+**Market audit** (`market_audit.yml`) is a deprecated manual wrapper — use **Run Titan Now** instead.
+
+Other schedules: post-market reconcile (`daily_post_market_reconcile.yml`, 11:05 IST). ICICI session tokens still expire independently.
 
 ### If a scheduled run does not appear
 
 1. **GitHub often delays** scheduled jobs (sometimes **15–60+ minutes**); see [schedule event](https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#schedule).
-2. **Default branch** must be the branch that contains `.github/workflows/market_audit.yml` (usually `main`).
+2. **Default branch** must be the branch that contains `.github/workflows/run_titan_now.yml` (usually `main`).
 3. **Settings → Actions → General**: Actions must be allowed; workflow must not be disabled under **Actions** tab.
 4. **Forks**: scheduled workflows **do not run** on forks (only on the upstream repo you own).
 5. After changing `schedule`, allow **up to ~1 hour** for the scheduler to pick up new crons.
@@ -76,7 +80,7 @@ Sector digests (`--sector-digest`, `--all-sectors`, custom/portfolio modes) call
 
 **Gmail setup:** enable 2-Step Verification on the sender account, then create an App Password at [Google Account → Security → App passwords](https://myaccount.google.com/apppasswords). Paste the app password into `SMTP_PASSWORD` (spaces are stripped automatically).
 
-Workflows that pass these secrets: `run_titan_now.yml`, `market_audit.yml`, `daily_post_market_reconcile.yml`, `validate_breeze_token_manual.yml`.
+Workflows that pass these secrets: `run_titan_now.yml`, `daily_post_market_reconcile.yml`, `validate_breeze_token_manual.yml`.
 
 **Local test:** copy values into project-root `.env` (never commit), then:
 

@@ -1161,3 +1161,66 @@ def test_sector_benchmark_index_code_maps_psu_banks():
     assert _sector_benchmark_index_code("banks_psu") == "NIFTY BANK"
     assert _sector_benchmark_index_code("defence") == "NIFTY"
 
+
+def test_v2_rank_adjustment_bonus_for_low_risk():
+    from sector_priority import _v2_rank_adjustment
+
+    out = _v2_rank_adjustment({"label": "hold", "risk_net": 3.0})
+    assert out["mode"] == "bonus"
+    assert out["adjustment"] > 0.0
+
+
+def test_v2_rank_adjustment_penalty_for_trim():
+    from sector_priority import _v2_rank_adjustment
+
+    out = _v2_rank_adjustment({"label": "trim", "risk_net": 5.5})
+    assert out["mode"] == "penalty"
+    assert out["adjustment"] < 0.0
+
+
+def test_v2_risk_gate_does_not_double_penalize_score(monkeypatch):
+    from sector_priority import _v2_risk_gate
+
+    monkeypatch.setenv("TITAN_V2_RISK_GATE_MODE", "damp")
+    gate = _v2_risk_gate(
+        "BDL",
+        {"v2_labels": {"BDL": "trim"}, "v2_risk_net": {"BDL": 5.5}, "v2_label_dates": {"BDL": "2026-06-12"}},
+    )
+    assert gate["triggered"] is True
+    assert gate["score_multiplier"] == 1.0
+    assert gate["withhold"] is False
+    assert gate["scoring_reconciled"] is True
+
+
+def test_v2_risk_gate_withholds_extreme_exit_risk_in_skip_mode(monkeypatch):
+    from sector_priority import _v2_risk_gate
+
+    monkeypatch.setenv("TITAN_V2_RISK_GATE_MODE", "skip")
+    gate = _v2_risk_gate(
+        "XYZ",
+        {"v2_labels": {"XYZ": "exit-risk"}, "v2_risk_net": {"XYZ": 8.0}, "v2_label_dates": {"XYZ": "2026-06-12"}},
+    )
+    assert gate["withhold"] is True
+    assert gate["score_multiplier"] == 1.0
+
+
+def test_resolve_v2_signal_follows_symbol_alias():
+    from sector_priority import _resolve_v2_signal
+
+    ctx = {
+        "v2_labels": {"ETERNAL": "hold"},
+        "v2_risk_net": {"ETERNAL": 3.0},
+        "v2_label_dates": {"ETERNAL": "2026-06-16"},
+    }
+    out = _resolve_v2_signal("ZOMATO", ctx)
+    assert out["label"] == "hold"
+    assert out["alias_used"] == "ETERNAL"
+
+
+def test_overextension_confirmation_allows_mild_weekly_pullback():
+    from sector_priority import _overextension_confirmation
+
+    mult, _reason = _overextension_confirmation(ret_1w=-1.5, ret_1m=12.0, regime_hostile=False)
+    assert mult < 1.0
+    assert mult > 0.2
+

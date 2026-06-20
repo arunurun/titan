@@ -20,6 +20,12 @@ _SECTOR_ALIASES: dict[str, str] = {
     "tejasnet": "telecom",
 }
 
+# NSE ticker renames (old -> current). Used for allowlist resolution and v2/ranking lookups.
+_NSE_SYMBOL_ALIASES: dict[str, str] = {
+    "ZOMATO": "ETERNAL",
+    "TATAMOTORS": "TMPV",
+}
+
 
 def resolve_sector_key(sector_id: str) -> str:
     """Return canonical sector_key (lowercase), applying known aliases."""
@@ -27,6 +33,29 @@ def resolve_sector_key(sector_id: str) -> str:
     if not sid:
         raise ValueError("sector_id must be non-empty")
     return _SECTOR_ALIASES.get(sid, sid)
+
+
+def symbol_lookup_variants(symbol: str) -> tuple[str, ...]:
+    """Return sorted unique NSE symbol variants (self + known renames)."""
+    sym = str(symbol or "").strip().upper()
+    if not sym:
+        return ()
+    variants: set[str] = {sym}
+    alt = _NSE_SYMBOL_ALIASES.get(sym)
+    if alt:
+        variants.add(alt)
+    for old, new in _NSE_SYMBOL_ALIASES.items():
+        if new == sym:
+            variants.add(old)
+    return tuple(sorted(variants))
+
+
+def expand_symbols_with_aliases(symbols) -> list[str]:
+    """Expand a symbol iterable for DB/API queries that may store legacy tickers."""
+    out: set[str] = set()
+    for raw in symbols:
+        out.update(symbol_lookup_variants(str(raw or "").strip().upper()))
+    return sorted(s for s in out if s)
 
 
 @dataclass(frozen=True)

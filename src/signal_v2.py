@@ -724,6 +724,8 @@ def _map_label(risk_net: float, gate: dict[str, bool], audit: dict[str, Any], a:
         return "accumulate"
     if _leader_participation_floor(audit, risk_net, buy_allowed=buy_allowed):
         return "accumulate"
+    if _participation_accumulate_ok(audit, risk_net, buy_allowed=buy_allowed):
+        return "accumulate"
     if (
         bool(audit.get("history_lt_200_sessions"))
         and _short_history_accumulate_ok(audit, risk_net)
@@ -947,6 +949,130 @@ def _escalate(label: str, forced: str | None) -> str:
     return forced if _SEVERITY[forced] > _SEVERITY[label] else label
 
 
+# Recovery / rally de-escalation defaults (override via TITAN_SIGV2_* env).
+_RECOVERY_INTENT_MIN = 60.0
+_RECOVERY_NW_MIN = 55.0
+_RALLY_INTENT_MIN = 65.0
+_RALLY_NW_MIN = 60.0
+_PARTICIPATION_INTENT_MIN = 70.0
+_PARTICIPATION_NW_MIN = 65.0
+_PARTICIPATION_VPR_MIN = 1.2
+
+
+def _prior_defensive_streak(audit: dict[str, Any]) -> int:
+    """Count consecutive prior sessions at trim/exit-risk (when history is wired)."""
+    streak = 0
+    for key in ("prev_action_signal", "prev_prev_action_signal"):
+        prior = str(audit.get(key) or "").strip().lower()
+        if prior in ("trim", "exit-risk"):
+            streak += 1
+        elif prior:
+            break
+    return streak
+
+
+def _recovery_tape_ok(audit: dict[str, Any], risk_net: float, *, rally: bool) -> bool:
+    if risk_net >= 4.0:
+        return False
+    eff = _sf(audit.get("effective_intent_score", audit.get("intent_score")))
+    nw = _sf(audit.get("next_week_score"))
+    if rally:
+        intent_min = _env_float("TITAN_SIGV2_RALLY_INTENT_MIN", _RALLY_INTENT_MIN)
+        nw_min = _env_float("TITAN_SIGV2_RALLY_NW_MIN", _RALLY_NW_MIN)
+        ret5d = _sf(audit.get("return_5d_pct"))
+        if math.isnan(ret5d) or ret5d <= 0.0:
+            return False
+    else:
+        intent_min = _env_float("TITAN_SIGV2_RECOVERY_INTENT_MIN", _RECOVERY_INTENT_MIN)
+        nw_min = _env_float("TITAN_SIGV2_RECOVERY_NW_MIN", _RECOVERY_NW_MIN)
+    if math.isnan(eff) or eff < intent_min or math.isnan(nw) or nw < nw_min:
+        if rally:
+            return False
+        prev_risk = _sf(audit.get("prev_risk_net"))
+        return not math.isnan(prev_risk) and risk_net < prev_risk - 0.25
+    return True
+
+
+def _recovery_constructive_cap(
+    gate: dict[str, bool],
+    audit: dict[str, Any],
+    risk_net: float,
+    *,
+    buy_allowed: bool,
+) -> str:
+    if gate.get("constructive_core"):
+        return "accumulate"
+    if (
+        buy_allowed
+        and gate.get("constructive_scores")
+        and _accumulate_band(audit, risk_net, buy_allowed=buy_allowed)
+    ):
+        return "accumulate"
+    if _participation_accumulate_ok(audit, risk_net, buy_allowed=buy_allowed):
+        return "accumulate"
+    return "hold"
+
+
+def _participation_accumulate_ok(
+    audit: dict[str, Any], risk_net: float, *, buy_allowed: bool
+) -> bool:
+    """DATAMATICS-class: strong intent + decent horizon + supportive VPR → accumulate."""
+    if not buy_allowed or risk_net >= 4.0:
+        return False
+    intent_min = _env_float("TITAN_SIGV2_PARTICIPATION_INTENT_MIN", _PARTICIPATION_INTENT_MIN)
+    nw_min = _env_float("TITAN_SIGV2_PARTICIPATION_NW_MIN", _PARTICIPATION_NW_MIN)
+    vpr_min = _env_float("TITAN_SIGV2_PARTICIPATION_VPR_MIN", _PARTICIPATION_VPR_MIN)
+    eff = _sf(audit.get("effective_intent_score", audit.get("intent_score")))
+    nw = _sf(audit.get("next_week_score"))
+    vpr = _participation_vpr(audit)
+    return (
+        not math.isnan(eff)
+        and eff >= intent_min
+        and not math.isnan(nw)
+        and nw >= nw_min
+        and not math.isnan(vpr)
+        and vpr >= vpr_min
+    )
+
+
+def _cap_tier2_for_recovery(
+    forced_label: str | None,
+    *,
+    audit: dict[str, Any],
+    risk_net: float,
+    bypass: bool,
+    corroborators: int,
+    gate: dict[str, bool],
+    buy_allowed: bool,
+    staleflow_downgrade: bool = False,
+) -> str | None:
+    """Cap Tier-2 forced trim/exit when intent/nw recovered (Tier-1 bypass untouched)."""
+    if bypass or forced_label is None:
+        return forced_label
+    exit_count = _env_int("TITAN_SIGV2_B_TIER2_EXIT_COUNT", 3)
+    trim_count = _env_int("TITAN_SIGV2_B_TIER2_TRIM_COUNT", 2)
+    rally_ok = _recovery_tape_ok(audit, risk_net, rally=True)
+    recovery_ok = rally_ok or _recovery_tape_ok(audit, risk_net, rally=False)
+    if staleflow_downgrade and not rally_ok:
+        return forced_label
+    if rally_ok:
+        cap = _recovery_constructive_cap(gate, audit, risk_net, buy_allowed=buy_allowed)
+        if _SEVERITY[cap] < _SEVERITY.get(forced_label, 0):
+            return cap
+        return forced_label
+    if not recovery_ok:
+        return forced_label
+    if forced_label == "exit-risk" and corroborators < exit_count:
+        cap = _recovery_constructive_cap(gate, audit, risk_net, buy_allowed=buy_allowed)
+        return cap if _SEVERITY[cap] < _SEVERITY[forced_label] else forced_label
+    if forced_label == "trim":
+        if corroborators < trim_count and _prior_defensive_streak(audit) < 2:
+            return None
+        cap = _recovery_constructive_cap(gate, audit, risk_net, buy_allowed=buy_allowed)
+        return cap if _SEVERITY[cap] < _SEVERITY[forced_label] else forced_label
+    return forced_label
+
+
 def _apply_hysteresis(
     label: str,
     risk_net: float,
@@ -954,23 +1080,46 @@ def _apply_hysteresis(
     prior_label: str | None,
     bypass: bool,
     buffer: float,
+    audit: dict[str, Any] | None = None,
 ) -> tuple[str, bool]:
     """Asymmetric hysteresis: constructive transitions are sticky, danger is fast.
 
-    Returns (label, applied). When there is no prior-session label available this is a
-    no-op (see module note: persistence-based stickiness is deferred until prior-session
-    plumbing is wired). Danger transitions and Tier-1 bypass apply same-day.
+    Returns (label, applied). Recovery de-escalation allows downgrade from trim/exit
+    when intent/nw recover; re-escalation to trim requires a 2-session defensive streak
+    when corroborators are below the exit threshold.
     """
+    audit = audit or {}
     if prior_label is None or prior_label == label:
         return label, False
     if bypass or label == "exit-risk":
         return label, False  # fast out on genuine danger
 
+    rally_ok = _recovery_tape_ok(audit, risk_net, rally=True)
+    recovery_ok = rally_ok or _recovery_tape_ok(audit, risk_net, rally=False)
+    if prior_label in ("trim", "exit-risk") and label in ("hold", "accumulate", "buy") and recovery_ok:
+        return label, False
+    if prior_label == "trim" and label == "hold" and not recovery_ok:
+        return prior_label, True
+
+    exit_count = _env_int("TITAN_SIGV2_B_TIER2_EXIT_COUNT", 3)
+    if (
+        prior_label in ("hold", "accumulate", "buy")
+        and label == "trim"
+        and risk_net < 4.0 + buffer
+        and recovery_ok
+        and _prior_defensive_streak(audit) < 2
+    ):
+        return prior_label, True
+
     # Buffer-based stickiness around the trim edge (4.0) for hold<->trim churn.
     if {prior_label, label} == {"hold", "trim"}:
         if label == "trim" and risk_net < 4.0 + buffer:
-            return prior_label, True
-        if label == "hold" and risk_net > 4.0 - buffer:
+            if recovery_ok and _prior_defensive_streak(audit) < 2:
+                return prior_label, True
+            if not recovery_ok:
+                return prior_label, True
+            return label, False
+        if label == "hold" and risk_net > 4.0 - buffer and not recovery_ok:
             return prior_label, True
         return label, False
 
@@ -1078,13 +1227,28 @@ def evaluate_signal_v2(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
         "label_after": label,
         "reason": gg.get("reason"),
     }
-    label = _escalate(label, b.get("forced_label"))
+    forced_label = _cap_tier2_for_recovery(
+        b.get("forced_label"),
+        audit=audit,
+        risk_net=risk_net,
+        bypass=bool(b.get("bypass_hysteresis")),
+        corroborators=int(b.get("corroborators", 0)),
+        gate=gate,
+        buy_allowed=bool(a.get("buy_allowed")),
+        staleflow_downgrade=bool(d.get("staleflow_downgrade")),
+    )
+    label = _escalate(label, forced_label)
 
     bypass = bool(b.get("bypass_hysteresis"))
     prior_label = audit.get("prev_action_signal")
     prior_label = str(prior_label).strip().lower() if prior_label else None
     label, _hyst = _apply_hysteresis(
-        label, risk_net, prior_label=prior_label, bypass=bypass, buffer=buffer
+        label,
+        risk_net,
+        prior_label=prior_label,
+        bypass=bypass,
+        buffer=buffer,
+        audit=audit,
     )
 
     confidence = _confidence(

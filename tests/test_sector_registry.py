@@ -5,7 +5,15 @@ from pathlib import Path
 
 import pytest
 
-from sector_registry import SectorInstrument, list_active_sector_ids, load_sector_instruments, load_sector_symbols, resolve_sector_key
+from sector_registry import (
+    SectorInstrument,
+    expand_symbols_with_aliases,
+    list_active_sector_ids,
+    load_sector_instruments,
+    load_sector_symbols,
+    resolve_sector_key,
+    symbol_lookup_variants,
+)
 
 
 class _FakeQuery:
@@ -192,3 +200,14 @@ def test_load_sector_instruments_resolves_alias(monkeypatch, tmp_path: Path):
     monkeypatch.delenv("SUPABASE_KEY", raising=False)
     out = load_sector_symbols("tejasnet")
     assert out == ["TEJASNET", "BHARTIARTL"]
+
+
+def test_symbol_lookup_variants_maps_nse_renames():
+    assert set(symbol_lookup_variants("ZOMATO")) == {"ETERNAL", "ZOMATO"}
+    assert set(symbol_lookup_variants("ETERNAL")) == {"ETERNAL", "ZOMATO"}
+    assert set(symbol_lookup_variants("TATAMOTORS")) == {"TATAMOTORS", "TMPV"}
+
+
+def test_expand_symbols_with_aliases_dedupes():
+    out = expand_symbols_with_aliases(["ZOMATO", "ETERNAL", "HAL"])
+    assert out == ["ETERNAL", "HAL", "ZOMATO"]
