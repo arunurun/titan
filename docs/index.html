@@ -493,7 +493,7 @@
 
     <div class="card" aria-labelledby="breakoutCardTitle">
       <h3 id="breakoutCardTitle">Find Breakouts</h3>
-      <p class="small breakout-lead">Scan Nifty Smallcap 100 and Microcap 250 for volume breakouts (ADX, RSI, SMA filters). Calls <code>POST /api/breakouts</code> on the control server — may take several minutes; not a GitHub Actions workflow.</p>
+      <p class="small breakout-lead">Scan Nifty Smallcap 100 and Microcap 250 for volume breakouts (ADX, RSI, SMA filters). Dispatches <code>breakout_scan.yml</code> on main — typically ~30–45 minutes. Results arrive by <strong>email</strong> (same inbox as sector digests). Check <strong>Latest workflow runs</strong> below for status.</p>
       <div class="breakout-dispatch">
         <button type="button" id="findBreakoutsBtn">Find Breakouts</button>
       </div>

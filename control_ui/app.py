@@ -213,7 +213,7 @@ TEMPLATE = """
 
     <div class="card">
       <h3>Find Breakouts</h3>
-      <p class="hint">Scan Nifty Smallcap 100 and Microcap 250 for volume breakouts. Calls <code>POST /api/breakouts</code> — may take several minutes.</p>
+      <p class="hint">Scan Nifty Smallcap 100 and Microcap 250 for volume breakouts. Runs locally via <code>POST /api/breakouts</code> and emails the report when SMTP is configured (same env as sector digests).</p>
       <button type="button" id="findBreakoutsBtn">Find Breakouts</button>
       <pre id="breakoutResult" class="hidden" style="margin-top:12px"></pre>
     </div>
@@ -321,7 +321,9 @@ TEMPLATE = """
               out.textContent = "Find Breakouts failed:\\n" + msg;
               return;
             }
-            out.textContent = formatBreakout(data);
+            let text = formatBreakout(data);
+            text += "\\n\\nWhen SMTP is configured, the full report is also emailed (same inbox as sector digests).";
+            out.textContent = text;
           } catch (err) {
             out.textContent = "Find Breakouts failed:\\n" + (err && err.message ? err.message : String(err));
           } finally {

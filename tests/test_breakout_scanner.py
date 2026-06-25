@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -10,7 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
-from breakout_scanner import serialize_candidate, _build_report_markdown  # noqa: E402
+from breakout_scanner import serialize_candidate, _build_report_markdown, run_breakout_scan  # noqa: E402
 
 
 def test_serialize_candidate_maps_api_fields():
@@ -42,6 +43,35 @@ def test_build_report_markdown_empty():
 
     md = _build_report_markdown([], datetime.date(2026, 6, 25))
     assert "No small-cap or micro-cap stocks met" in md
+
+
+@patch("email_notify.send_success_post_email")
+def test_run_breakout_scan_emails_report(mock_send, monkeypatch, tmp_path):
+    mock_send.return_value = True
+    monkeypatch.setattr("breakout_scanner._repo_root", lambda: tmp_path)
+    monkeypatch.setattr("breakout_scanner.download_nse_tickers", lambda url: [])
+    monkeypatch.setattr("breakout_scanner.warm_yahoo_session", lambda: None)
+
+    result = run_breakout_scan(output_dir=tmp_path, emit_to_stdout=False, send_email=True)
+
+    assert result["ok"] is True
+    assert result["candidate_count"] == 0
+    mock_send.assert_called_once()
+    body, = mock_send.call_args[0]
+    assert "Tickers scanned:" in body
+    assert "No small-cap or micro-cap stocks met" in body
+    assert mock_send.call_args[1]["subject_prefix"] == "Titan V12.0 breakout scan"
+
+
+@patch("email_notify.send_success_post_email")
+def test_run_breakout_scan_skips_email_when_disabled(mock_send, monkeypatch, tmp_path):
+    monkeypatch.setattr("breakout_scanner._repo_root", lambda: tmp_path)
+    monkeypatch.setattr("breakout_scanner.download_nse_tickers", lambda url: [])
+    monkeypatch.setattr("breakout_scanner.warm_yahoo_session", lambda: None)
+
+    run_breakout_scan(output_dir=tmp_path, emit_to_stdout=False, send_email=False)
+
+    mock_send.assert_not_called()
 
 
 @pytest.fixture
@@ -82,6 +112,7 @@ def test_api_breakouts_endpoint_returns_json(monkeypatch, flask_client):
     def _fake_run(**kwargs):
         assert kwargs["emit_to_stdout"] is False
         assert kwargs["write_report"] is True
+        assert kwargs.get("send_email", True) is True
         return dict(sample)
 
     monkeypatch.setattr("app.run_breakout_scan", _fake_run)

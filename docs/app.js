@@ -5,8 +5,8 @@ const WORKFLOWS = {
   validate: "validate_breeze_token_manual.yml",
   persist: "persist_breeze_token_manual.yml",
   refreshRankings: "refresh_sector_rankings_weekly.yml",
+  breakoutScan: "breakout_scan.yml",
 };
-const BREAKOUTS_API_PATH = "/api/breakouts";
 const PROXY_BASE = "https://titan-proxy.arunjain-real.workers.dev";
 const STATIC_SECTOR_OPTIONS = [
   "ai",
@@ -393,62 +393,6 @@ async function dispatchWorkflow(filename, inputs = {}, statusSuffix = "", ref = 
   await ghApi("/dispatch", "POST", { workflow: filename, ref, inputs });
   const extra = statusSuffix ? `\n\n${statusSuffix}` : "";
   setStatus(`Dispatched ${filename} successfully.${extra}`);
-}
-
-function formatBreakoutStatus(data) {
-  if (!data || typeof data !== "object") return "Empty breakout response.";
-  const lines = [];
-  lines.push(`Breakout scan ${data.ok ? "completed" : "failed"}`);
-  if (data.scan_date) lines.push(`Scan date: ${data.scan_date}`);
-  if (data.duration_sec != null) lines.push(`Duration: ${data.duration_sec}s`);
-  if (data.tickers_scanned != null) lines.push(`Tickers scanned: ${data.tickers_scanned}`);
-  if (data.candidate_count != null) lines.push(`Candidates: ${data.candidate_count}`);
-  if (data.tier_candidate_counts && typeof data.tier_candidate_counts === "object") {
-    const tiers = Object.entries(data.tier_candidate_counts)
-      .map(([tier, count]) => `${tier}: ${count}`)
-      .join("; ");
-    if (tiers) lines.push(`By tier: ${tiers}`);
-  }
-  if (data.report_path) lines.push(`Report: ${data.report_path}`);
-  if (data.log_path) lines.push(`Log: ${data.log_path}`);
-  const candidates = Array.isArray(data.candidates) ? data.candidates : [];
-  if (candidates.length) {
-    lines.push("");
-    lines.push("Candidates:");
-    for (const c of candidates) {
-      const change =
-        c.change_display || (c.change_pct != null ? `${c.change_pct}%` : "?");
-      const vol =
-        c.volume_mult_display || (c.volume_mult != null ? `${c.volume_mult}x` : "?");
-      lines.push(
-        `  ${c.ticker} | ${c.tier || "?"} | ${change} | vol ${vol} | RSI ${c.rsi ?? "?"} | ADX ${c.adx ?? "?"}`,
-      );
-    }
-  } else if (data.ok) {
-    lines.push("");
-    lines.push("No breakout candidates met filters today.");
-  }
-  return lines.join("\n");
-}
-
-async function fetchBreakouts({ writeReport = true, includeReportMarkdown = false } = {}) {
-  const res = await fetch(BREAKOUTS_API_PATH, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      write_report: writeReport,
-      include_report_markdown: includeReportMarkdown,
-    }),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const msg =
-      typeof data.error === "string" ? data.error : `${res.status} ${res.statusText}`;
-    const err = new Error(msg);
-    err.payload = data;
-    throw err;
-  }
-  return data;
 }
 
 function humanizeAgeMinutes(age) {
@@ -1376,19 +1320,16 @@ function wireEvents() {
       const btn = findBreakoutsBtn;
       try {
         btn.disabled = true;
-        setWorking(`Running breakout scan (${BREAKOUTS_API_PATH})`);
-        const data = await fetchBreakouts();
-        setStatus(formatBreakoutStatus(data));
+        setWorking(`Dispatch breakout scan (${WORKFLOWS.breakoutScan})`);
+        await checkConnection();
+        await dispatchWorkflow(
+          WORKFLOWS.breakoutScan,
+          {},
+          "Dispatched on main branch.\nScan usually takes ~30–45 minutes. Watch Latest workflow runs below for status.\nWhen the job completes, the breakout report is emailed to the same inbox as sector digests (subject: Titan V12.0 breakout scan). The workflow also uploads daily_breakout_report_v2.md as an artifact.",
+          "main",
+        );
       } catch (e) {
-        let hint = "";
-        const msg = String(e.message || e);
-        if (msg.includes("404") || msg.toLowerCase().includes("failed to fetch")) {
-          hint =
-            "\n\nHint: POST /api/breakouts is served by the Titan control server " +
-            "(python control_ui/app.py on the same origin). The static Cloudflare UI cannot " +
-            "reach it unless a proxy route is added.";
-        }
-        setStatus(`Find Breakouts failed:\n${msg}${hint}`);
+        setStatus(`Find Breakouts dispatch failed:\n${e.message}`);
       } finally {
         btn.disabled = false;
       }

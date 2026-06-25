@@ -78,7 +78,7 @@ Sector digests (`--sector-digest`, `--all-sectors`, custom/portfolio modes) call
 
 **Gmail setup:** enable 2-Step Verification on the sender account, then create an App Password at [Google Account → Security → App passwords](https://myaccount.google.com/apppasswords). Paste the app password into `SMTP_PASSWORD` (spaces are stripped automatically).
 
-Workflows that pass these secrets: `run_titan_now.yml`, `daily_post_market_reconcile.yml`, `validate_breeze_token_manual.yml`.
+Workflows that pass these secrets: `run_titan_now.yml`, `daily_post_market_reconcile.yml`, `validate_breeze_token_manual.yml`, `breakout_scan.yml`.
 
 **Local test:** copy values into project-root `.env` (never commit), then:
 

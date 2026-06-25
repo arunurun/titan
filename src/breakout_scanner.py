@@ -7,6 +7,7 @@ import datetime
 import json
 import os
 import random
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -41,6 +42,12 @@ _OUTPUT_DIR: Path | None = None
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
+
+
+def _ensure_src_on_path() -> None:
+    src = Path(__file__).resolve().parent
+    if str(src) not in sys.path:
+        sys.path.insert(0, str(src))
 
 
 def default_output_dir() -> Path:
@@ -565,6 +572,7 @@ def run_breakout_scan(
     *,
     write_report: bool = True,
     emit_to_stdout: bool = True,
+    send_email: bool = True,
 ) -> dict[str, Any]:
     """Run the full breakout scan and return structured results for API/CLI callers."""
     global _OUTPUT_DIR
@@ -632,6 +640,13 @@ def run_breakout_scan(
                 print("\n Scan & Audit complete for this tier.\n")
 
     report_markdown = _build_report_markdown(all_results, scan_date)
+    tier_candidate_counts = {
+        "Small-Cap (Nifty Smallcap 100)": 0,
+        "Micro-Cap (Nifty Microcap 250)": 0,
+    }
+    for row in all_results:
+        tier_candidate_counts[row["Tier"]] = tier_candidate_counts.get(row["Tier"], 0) + 1
+
     if write_report:
         report_path.write_text(report_markdown, encoding="utf-8")
         if emit_to_stdout:
@@ -642,13 +657,38 @@ def run_breakout_scan(
                 print(" No breakout setups found today. Empty report generated.")
             print(f" Diagnostic log: {log_path}")
 
+    if send_email:
+        _ensure_src_on_path()
+        from email_notify import send_success_post_email
+
+        email_body = report_markdown.strip()
+        if scan_ticker_count or tier_ticker_counts:
+            summary_lines = [
+                f"Tickers scanned: {scan_ticker_count}",
+                f"Candidates: {len(all_results)}",
+            ]
+            if tier_candidate_counts:
+                tier_summary = "; ".join(
+                    f"{tier}: {count}" for tier, count in sorted(tier_candidate_counts.items())
+                )
+                if tier_summary:
+                    summary_lines.append(f"By tier: {tier_summary}")
+            email_body = "\n".join(summary_lines) + "\n\n" + email_body
+        emailed_ok = send_success_post_email(
+            email_body,
+            subject_prefix="Titan V12.0 breakout scan",
+        )
+        if emit_to_stdout:
+            if emailed_ok:
+                print(" Breakout scan report emailed successfully.", flush=True)
+            else:
+                print(
+                    " Email not sent (SMTP not configured or send failed). "
+                    "Set SMTP_HOST, EMAIL_FROM, EMAIL_TO and related env vars.",
+                    flush=True,
+                )
+
     finished_at = datetime.datetime.now()
-    tier_candidate_counts = {
-        "Small-Cap (Nifty Smallcap 100)": 0,
-        "Micro-Cap (Nifty Microcap 250)": 0,
-    }
-    for row in all_results:
-        tier_candidate_counts[row["Tier"]] = tier_candidate_counts.get(row["Tier"], 0) + 1
 
     return {
         "ok": True,
@@ -668,7 +708,18 @@ def run_breakout_scan(
 
 
 def main() -> None:
-    run_breakout_scan()
+    try:
+        run_breakout_scan()
+    except Exception as exc:
+        _ensure_src_on_path()
+        from email_notify import send_failure_email
+
+        send_failure_email(
+            f"[Breakout scan] {exc}",
+            detail=str(exc),
+            subject_prefix="Titan V12.0 breakout scan",
+        )
+        raise
 
 
 if __name__ == "__main__":
