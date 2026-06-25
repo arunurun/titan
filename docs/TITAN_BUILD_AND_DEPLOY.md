@@ -44,7 +44,7 @@ There are effectively **two Cloudflare surfaces**:
 
 - Workflows live under `.github/workflows/`.
 - Repository **secrets** (for example Breeze token, Supabase keys used in CI) are configured in GitHub: **Settings → Secrets and variables → Actions**. Do not commit secrets into the repo.
-- Manual runs (for example `run_titan_now.yml`) are triggered from the Actions tab or from the mobile UI via the proxy.
+- Manual runs (for example `run_titan_now.yml`, `breakout_scan.yml`) are triggered from the Actions tab or from the mobile UI via the proxy.
 
 ---
 

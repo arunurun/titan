@@ -77,6 +77,7 @@ The UI uses a hardcoded `PROXY_BASE` constant and no longer requires manual prox
 - `POST /dispatch`
   - body: `{ "workflow": "<filename>", "ref": "main", "inputs": { ... } }`
 - **News buttons (mobile UI):** **Global news** calls `POST /news/refresh` (macro `global_news_snapshots`, synchronous on the Worker, ~5s). It does **not** appear under “Latest workflow runs”. **Symbol news** dispatches `news_fetch.yml` (per-symbol `news_feed` / `symbol_news_snapshots` via `scripts/fetch_news_batch.py`). Run Titan does not prefetch symbol news.
+- **Find Breakouts** dispatches `breakout_scan.yml` (runs `python -m src.breakout_scanner`; uploads `daily_breakout_report_v2.md` and `breakout_scanner_run.log` as workflow artifacts). Add `breakout_scan.yml` to `ALLOWED_WORKFLOWS` in `proxy/cloudflare-worker.js` and redeploy the Worker after merging.
 - `GET /runs?limit=20`
   - returns GitHub workflow runs payload
 - `GET /workflow-run/{id}`

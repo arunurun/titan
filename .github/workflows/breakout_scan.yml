@@ -1,0 +1,31 @@
+name: Breakout scan
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  breakout_scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run small & micro-cap breakout scanner
+        run: python -m src.breakout_scanner
+
+      - name: Upload breakout report and log
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: breakout-scan-${{ github.run_number }}
+          path: |
+            output/breakouts/daily_breakout_report_v2.md
+            output/breakouts/breakout_scanner_run.log
+          if-no-files-found: warn

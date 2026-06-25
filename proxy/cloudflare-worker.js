@@ -19,6 +19,7 @@ const ALLOWED_WORKFLOWS = new Set([
   "validate_breeze_token_manual.yml",
   "persist_breeze_token_manual.yml",
   "refresh_sector_rankings_weekly.yml",
+  "breakout_scan.yml",
 ]);
 const RUN_MODES = new Set(["sector", "all_sectors", "live", "custom", "portfolio"]);
 const TITAN_SCOPES = new Set(["full", "priority"]);

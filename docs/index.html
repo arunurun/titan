@@ -342,6 +342,14 @@
     .portfolio-dispatch button {
       margin-top: 0;
     }
+    /* Find Breakouts card */
+    .breakout-lead { margin: 0 0 10px; }
+    .breakout-dispatch {
+      margin-top: 14px;
+    }
+    .breakout-dispatch button {
+      margin-top: 0;
+    }
   </style>
 </head>
 <body data-page="control">
@@ -483,6 +491,14 @@
       </div>
     </div>
 
+    <div class="card" aria-labelledby="breakoutCardTitle">
+      <h3 id="breakoutCardTitle">Find Breakouts</h3>
+      <p class="small breakout-lead">Scan Nifty Smallcap 100 and Microcap 250 for volume breakouts (ADX, RSI, SMA filters). Calls <code>POST /api/breakouts</code> on the control server — may take several minutes; not a GitHub Actions workflow.</p>
+      <div class="breakout-dispatch">
+        <button type="button" id="findBreakoutsBtn">Find Breakouts</button>
+      </div>
+    </div>
+
     <div class="card">
       <h3>Past runs &amp; insights</h3>
       <button type="button" class="secondary" id="openInsightsByRunBtn">Open insights (pick a recent run)</button>
@@ -542,6 +558,6 @@
     </div>
   </div>
 
-  <script defer src="./app.js?v=20260531-3"></script>
+  <script defer src="./app.js?v=20260625-1"></script>
 </body>
 </html>

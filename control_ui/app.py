@@ -9,7 +9,7 @@ from urllib.parse import quote
 
 from breeze_connect import BreezeConnect
 from dotenv import load_dotenv
-from flask import Flask, render_template_string, request
+from flask import Flask, jsonify, render_template_string, request
 from supabase import create_client
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -25,6 +25,7 @@ from portfolio_analysis import (  # noqa: E402
     portfolio_email_digest_plaintext,
 )
 from sector_registry import list_active_sector_ids  # noqa: E402
+from breakout_scanner import run_breakout_scan  # noqa: E402
 
 app = Flask(__name__)
 
@@ -105,6 +106,8 @@ TEMPLATE = """
       }
       button:hover { filter: brightness(0.95); }
       button.btn-reconcile { background: var(--g-green); }
+      button:disabled { opacity: 0.6; cursor: not-allowed; }
+      .hidden { display: none; }
       details { margin-top: 10px; }
       details summary { cursor: pointer; color: var(--muted); font-size: 0.92rem; }
       .ok { color: var(--g-green); font-weight: bold; }
@@ -209,6 +212,13 @@ TEMPLATE = """
     </div>
 
     <div class="card">
+      <h3>Find Breakouts</h3>
+      <p class="hint">Scan Nifty Smallcap 100 and Microcap 250 for volume breakouts. Calls <code>POST /api/breakouts</code> — may take several minutes.</p>
+      <button type="button" id="findBreakoutsBtn">Find Breakouts</button>
+      <pre id="breakoutResult" class="hidden" style="margin-top:12px"></pre>
+    </div>
+
+    <div class="card">
       <h3>Validate Breeze Token (from Supabase session_config)</h3>
       <form method="post" action="/validate-token">
         <button type="submit">Validate Token</button>
@@ -259,6 +269,67 @@ TEMPLATE = """
       </div>
     {% endif %}
     </div>
+    <script>
+      (function () {
+        const btn = document.getElementById("findBreakoutsBtn");
+        const out = document.getElementById("breakoutResult");
+        if (!btn || !out) return;
+
+        function formatBreakout(data) {
+          if (!data || typeof data !== "object") return "Empty breakout response.";
+          const lines = [];
+          lines.push("Breakout scan " + (data.ok ? "completed" : "failed"));
+          if (data.scan_date) lines.push("Scan date: " + data.scan_date);
+          if (data.duration_sec != null) lines.push("Duration: " + data.duration_sec + "s");
+          if (data.tickers_scanned != null) lines.push("Tickers scanned: " + data.tickers_scanned);
+          if (data.candidate_count != null) lines.push("Candidates: " + data.candidate_count);
+          if (data.report_path) lines.push("Report: " + data.report_path);
+          if (data.log_path) lines.push("Log: " + data.log_path);
+          const candidates = Array.isArray(data.candidates) ? data.candidates : [];
+          if (candidates.length) {
+            lines.push("");
+            lines.push("Candidates:");
+            for (const c of candidates) {
+              const ch = c.change_display || (c.change_pct != null ? c.change_pct + "%" : "?");
+              const vol = c.volume_mult_display || (c.volume_mult != null ? c.volume_mult + "x" : "?");
+              lines.push(
+                "  " + c.ticker + " | " + (c.tier || "?") + " | " + ch +
+                " | vol " + vol + " | RSI " + (c.rsi != null ? c.rsi : "?") +
+                " | ADX " + (c.adx != null ? c.adx : "?")
+              );
+            }
+          } else if (data.ok) {
+            lines.push("");
+            lines.push("No breakout candidates met filters today.");
+          }
+          return lines.join("\\n");
+        }
+
+        btn.addEventListener("click", async function () {
+          btn.disabled = true;
+          out.classList.remove("hidden");
+          out.textContent = "Running breakout scan (POST /api/breakouts) ...";
+          try {
+            const res = await fetch("/api/breakouts", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ write_report: true, include_report_markdown: false }),
+            });
+            const data = await res.json().catch(function () { return {}; });
+            if (!res.ok) {
+              const msg = typeof data.error === "string" ? data.error : res.status + " " + res.statusText;
+              out.textContent = "Find Breakouts failed:\\n" + msg;
+              return;
+            }
+            out.textContent = formatBreakout(data);
+          } catch (err) {
+            out.textContent = "Find Breakouts failed:\\n" + (err && err.message ? err.message : String(err));
+          } finally {
+            btn.disabled = false;
+          }
+        });
+      })();
+    </script>
   </body>
 </html>
 """
@@ -653,6 +724,45 @@ def run_portfolio_analysis():
                 os.remove(tmp_pdf_path)
             except OSError:
                 pass
+
+
+def _parse_breakout_request() -> tuple[bool, bool]:
+    """Return (write_report, include_report_markdown) from JSON or form body."""
+    payload = request.get_json(silent=True)
+    if isinstance(payload, dict):
+        write_report = bool(payload.get("write_report", True))
+        include_report = bool(payload.get("include_report_markdown", False))
+        return write_report, include_report
+    write_report = request.form.get("write_report", "true").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+    )
+    include_report = request.form.get("include_report_markdown", "false").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    return write_report, include_report
+
+
+@app.post("/api/breakouts")
+def find_breakouts():
+    """Run the small/micro-cap breakout scanner and return JSON results."""
+    load_dotenv(ROOT / ".env", override=False)
+    write_report, include_report = _parse_breakout_request()
+    try:
+        result = run_breakout_scan(
+            output_dir=ROOT / "data" / "reports" / "breakout",
+            write_report=write_report,
+            emit_to_stdout=False,
+        )
+        if not include_report:
+            result.pop("report_markdown", None)
+        status = 200 if result.get("ok") else 500
+        return jsonify(result), status
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 
 if __name__ == "__main__":
