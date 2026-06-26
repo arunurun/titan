@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,39 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
 from breakout_scanner import serialize_candidate, _build_report_markdown  # noqa: E402
+
+
+def test_nse_ticker_parsing_preserves_ampersand():
+    from breakout_scanner import _parse_nse_ticker_csv
+
+    csv_lines = [
+        "Company Name,Industry,Symbol,Series,ISIN",
+        "Aegis Logistics Ltd.,SERVICES,ARE&M,EQ,INE208C01025",
+        "Mahindra & Mahindra Ltd.,AUTOMOBILES,M&M,EQ,INE101A01026",
+        "Larsen & Toubro Ltd.,CONSTRUCTION,L&T,EQ,INE018A01030",
+        "Reliance Industries Ltd.,OIL & GAS,RELIANCE,EQ,INE002A01018",
+    ]
+    tickers = _parse_nse_ticker_csv(csv_lines)
+    assert "ARE&M.NS" in tickers
+    assert "M&M.NS" in tickers
+    assert "L&T.NS" in tickers
+    assert "RELIANCE.NS" in tickers
+    assert "AREM.NS" not in tickers
+    assert "MM.NS" not in tickers
+
+
+def test_nse_ticker_parsing_decodes_percent26_in_csv():
+    from breakout_scanner import _parse_nse_ticker_csv
+
+    csv_lines = ["Symbol", "ARE%26M", "M%26M"]
+    tickers = _parse_nse_ticker_csv(csv_lines)
+    assert tickers == ["ARE&M.NS", "M&M.NS"]
+
+
+def test_ampersand_ticker_yahoo_quote_encoding():
+    assert urllib.parse.quote("ARE&M.NS", safe="") == "ARE%26M.NS"
+    assert urllib.parse.quote("M&M.NS", safe="") == "M%26M.NS"
+    assert urllib.parse.quote("L&T.NS", safe="") == "L%26T.NS"
 
 
 def test_serialize_candidate_maps_api_fields():

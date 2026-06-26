@@ -142,32 +142,42 @@ def _yahoo_pre_request_sleep():
     time.sleep(random.uniform(2.5, 3.0) + random.uniform(0.0, 1.5))
 
 
+def _normalize_nse_symbol(symbol):
+    """Keep NSE symbol as-is; decode %26 to & only if CSV has URL-encoded form."""
+    return symbol.replace("%26", "&")
+
+
+def _parse_nse_ticker_csv(content_lines):
+    """Parses NSE index CSV lines into Yahoo Finance tickers (SYMBOL.NS)."""
+    tickers = []
+    reader = csv.reader(content_lines)
+    header = next(reader)
+    symbol_idx = -1
+    for idx, col in enumerate(header):
+        if "symbol" in col.lower() or "ticker" in col.lower():
+            symbol_idx = idx
+            break
+    if symbol_idx == -1:
+        symbol_idx = 2 if len(header) > 2 else 0
+    for row in reader:
+        if row and len(row) > symbol_idx:
+            symbol = row[symbol_idx].strip()
+            if symbol and symbol != "Symbol":
+                symbol = _normalize_nse_symbol(symbol)
+                tickers.append(f"{symbol}.NS")
+    return tickers
+
+
 def download_nse_tickers(url):
     """Downloads and parses an official NSE index CSV file to extract ticker symbols."""
     try:
         req = urllib.request.Request(url, headers=HEADERS)
-        tickers = []
         with urllib.request.urlopen(req) as response:
-            content = response.read().decode('utf-8').splitlines()
-            reader = csv.reader(content)
-            header = next(reader)
-            symbol_idx = -1
-            for idx, col in enumerate(header):
-                if "symbol" in col.lower() or "ticker" in col.lower():
-                    symbol_idx = idx
-                    break
-            if symbol_idx == -1:
-                symbol_idx = 2 if len(header) > 2 else 0
-            for row in reader:
-                if row and len(row) > symbol_idx:
-                    symbol = row[symbol_idx].strip()
-                    if symbol and symbol != "Symbol":
-                        symbol = symbol.replace("&", "%26")
-                        symbol = symbol.replace("%26", "")
-                        tickers.append(symbol + ".NS")
+            content = response.read().decode("utf-8").splitlines()
+        return _parse_nse_ticker_csv(content)
     except Exception as e:
         print(f"Warning: Failed to download tickers from {url}: {e}")
-    return tickers
+    return []
 
 def _parse_yahoo_chart_response(data):
     result = data['chart']['result'][0]
