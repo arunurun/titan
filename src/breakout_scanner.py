@@ -147,6 +147,12 @@ def _normalize_nse_symbol(symbol):
     return symbol.replace("%26", "&")
 
 
+def _is_nse_dummy_symbol(symbol):
+    """NSE index CSVs may list internal dummy securities (no Yahoo listing)."""
+    upper = symbol.upper()
+    return upper.startswith("DUMMY") or upper.endswith("NSETEST")
+
+
 def _parse_nse_ticker_csv(content_lines):
     """Parses NSE index CSV lines into Yahoo Finance tickers (SYMBOL.NS)."""
     tickers = []
@@ -164,6 +170,8 @@ def _parse_nse_ticker_csv(content_lines):
             symbol = row[symbol_idx].strip()
             if symbol and symbol != "Symbol":
                 symbol = _normalize_nse_symbol(symbol)
+                if _is_nse_dummy_symbol(symbol):
+                    continue
                 tickers.append(f"{symbol}.NS")
     return tickers
 

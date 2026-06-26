@@ -41,6 +41,21 @@ def test_nse_ticker_parsing_decodes_percent26_in_csv():
     assert tickers == ["ARE&M.NS", "M&M.NS"]
 
 
+def test_nse_ticker_parsing_skips_dummy_symbols():
+    from breakout_scanner import _parse_nse_ticker_csv
+
+    csv_lines = [
+        "Company Name,Industry,Symbol,Series,ISIN",
+        "Dummy Allcargo Logistics Ltd.,Services,DUMMYALCAR,EQ,DUM418H01029",
+        "Reliance Industries Ltd.,OIL & GAS,RELIANCE,EQ,INE002A01018",
+        "Internal Test Co.,SERVICES,FOONSETEST,EQ,INETEST00001",
+    ]
+    tickers = _parse_nse_ticker_csv(csv_lines)
+    assert tickers == ["RELIANCE.NS"]
+    assert "DUMMYALCAR.NS" not in tickers
+    assert "FOONSETEST.NS" not in tickers
+
+
 def test_ampersand_ticker_yahoo_quote_encoding():
     assert urllib.parse.quote("ARE&M.NS", safe="") == "ARE%26M.NS"
     assert urllib.parse.quote("M&M.NS", safe="") == "M%26M.NS"
