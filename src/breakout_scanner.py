@@ -7,13 +7,36 @@ import datetime
 import json
 import os
 import random
-import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
+
+IST = ZoneInfo("Asia/Kolkata")
+
+# Alternate-pass thresholds (see evaluate_bars_as_of)
+PCT_CHANGE_MIN = 3.0
+PCT_CHANGE_MAX_NORMAL = 12.0
+PCT_CHANGE_MAX_POWER_GAP = 20.0
+ADX_SOFT_FLOOR = 20.0
+ADX_HARD_FLOOR = 25.0
+RSI_MIN = 50.0
+RSI_MAX_NORMAL = 70.0
+RSI_MAX_HOT = 75.0
+HOT_VOL_THRESHOLD = 5.0
+SMA20_RECLAIM_VOL_THRESHOLD = 5.0
+MICRO_CAP_VOL_CONTINUATION = 2.5
+VOL_CUM_DAYS = 3
+
+# Pre-signal validation (T-15..T-1 history before signal day T)
+PRE_SIGNAL_FULL_LOOKBACK = 15
+PRE_SIGNAL_CUM_RETURN_LOOKBACK = 10
+PRE_SIGNAL_CUM_RETURN_MAX = 30.0
+PRE_SIGNAL_VOL_SPIKE_MULT = 2.0
+PRE_SIGNAL_VOL_SPIKE_DAYS_MAX = 2
 
 # URLs for official NSE index constituent lists
 INDEX_URLS = {
@@ -42,12 +65,6 @@ _OUTPUT_DIR: Path | None = None
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
-
-
-def _ensure_src_on_path() -> None:
-    src = Path(__file__).resolve().parent
-    if str(src) not in sys.path:
-        sys.path.insert(0, str(src))
 
 
 def default_output_dir() -> Path:
@@ -346,6 +363,379 @@ def get_volume_profile(prices, volumes, bins=10):
     return round((edges[poc_idx] + edges[poc_idx+1]) / 2, 2)
 
 
+def _backtest_yahoo_cache_dir() -> str:
+    cache_path = _repo_root() / "data" / "cache" / "breakout_yahoo" / "backtest"
+    os.makedirs(cache_path, exist_ok=True)
+    return str(cache_path)
+
+
+def _yahoo_backtest_cache_path(ticker: str, range_str: str = "6m") -> str:
+    safe = ticker.replace("/", "_").replace("\\", "_")
+    return os.path.join(_backtest_yahoo_cache_dir(), f"{safe}_{range_str}.json")
+
+
+def fetch_yahoo_history(
+    ticker: str,
+    *,
+    range_str: str = "6m",
+    min_bars: int = 50,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Fetch daily OHLCV from Yahoo chart API with a backtest-specific on-disk cache."""
+    cache_path = _yahoo_backtest_cache_path(ticker, range_str)
+    if os.path.isfile(cache_path):
+        try:
+            with open(cache_path, encoding="utf-8") as f:
+                data = json.load(f)
+            parsed = _parse_yahoo_chart_response(data)
+            if len(parsed["close"]) >= min_bars:
+                return parsed, None
+            print(
+                f"Yahoo backtest cache stale {ticker} ({len(parsed['close'])} bars), refetching.",
+                flush=True,
+            )
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError, OSError) as e:
+            print(f"Yahoo backtest cache read failed {ticker} ({type(e).__name__}), refetching.", flush=True)
+
+    q = urllib.parse.quote(ticker, safe="")
+    if range_str == "6m":
+        period2 = int(time.time())
+        period1 = period2 - 180 * 24 * 3600
+        url = (
+            f"https://query2.finance.yahoo.com/v8/finance/chart/{q}"
+            f"?period1={period1}&period2={period2}&interval=1d"
+        )
+    else:
+        url = f"https://query2.finance.yahoo.com/v8/finance/chart/{q}?range={range_str}&interval=1d"
+    transient_backoffs = (2, 4, 8)
+    max_attempts = 4
+    last_err = None
+
+    for attempt in range(max_attempts):
+        _yahoo_pre_request_sleep()
+        headers = dict(HEADERS)
+        if YAHOO_COOKIE_HEADER:
+            headers["Cookie"] = YAHOO_COOKIE_HEADER
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                raw = response.read().decode("utf-8", errors="replace")
+                data = json.loads(raw)
+            parsed = _parse_yahoo_chart_response(data)
+            if len(parsed["close"]) < min_bars:
+                last_err = f"only {len(parsed['close'])} bars"
+                return None, last_err
+            try:
+                with open(cache_path, "w", encoding="utf-8") as f:
+                    json.dump(data, f)
+            except OSError as e:
+                print(f"Yahoo backtest cache write failed {ticker}: {type(e).__name__}", flush=True)
+            return parsed, None
+        except urllib.error.HTTPError as e:
+            last_err = _yahoo_http_error_msg(e)
+            if e.code == 429 and attempt < max_attempts - 1:
+                wait = YAHOO_429_BACKOFF_SEC[min(attempt, len(YAHOO_429_BACKOFF_SEC) - 1)]
+                print(
+                    f"Yahoo 429 {ticker}: retry {attempt + 1}/{max_attempts} in {wait}s",
+                    flush=True,
+                )
+                time.sleep(wait)
+                continue
+            return None, last_err
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, KeyError, IndexError, TypeError) as e:
+            last_err = type(e).__name__
+            if attempt < max_attempts - 1:
+                wait = transient_backoffs[min(attempt, len(transient_backoffs) - 1)]
+                print(
+                    f"Yahoo transient {ticker} ({last_err}): retry {attempt + 1}/{max_attempts} in {wait}s",
+                    flush=True,
+                )
+                time.sleep(wait)
+                continue
+            return None, last_err
+        except Exception as e:
+            return None, type(e).__name__
+    return None, last_err or "fetch_failed"
+
+
+def bar_dates_from_df(df: dict[str, Any]) -> list[str]:
+    """Map Yahoo bar timestamps to ISO trade dates (IST)."""
+    out: list[str] = []
+    for ts in df.get("timestamp") or []:
+        try:
+            out.append(datetime.datetime.fromtimestamp(int(ts), tz=IST).date().isoformat())
+        except (TypeError, ValueError, OSError):
+            out.append("")
+    return out
+
+
+def _prior_volume_spike(
+    volume: list[float],
+    vol_20_avg: list[float],
+    vol_thresh: float,
+    as_of_idx: int,
+    lookback: int = 2,
+) -> bool:
+    """True when any of the prior `lookback` sessions cleared the tier vol threshold."""
+    start = max(20, as_of_idx - lookback)
+    for i in range(start, as_of_idx):
+        avg = vol_20_avg[i] if vol_20_avg[i] > 0 else 1.0
+        if volume[i] / avg >= vol_thresh:
+            return True
+    return False
+
+
+def _volume_filter_passes(
+    *,
+    vol_mult: float,
+    vol_cum_mult: float,
+    vol_thresh: float,
+    tier_name: str,
+    prior_spike: bool,
+) -> tuple[bool, str | None]:
+    """Standard spike, 3-day cumulative continuation, or micro-cap post-spike path."""
+    if vol_mult >= vol_thresh:
+        return True, None
+    if vol_cum_mult >= vol_thresh:
+        return True, "vol_continuation_cum3d"
+    if tier_name == "MICRO_CAP_250" and prior_spike and vol_mult >= MICRO_CAP_VOL_CONTINUATION:
+        return True, "vol_continuation_prior_spike"
+    return False, None
+
+
+def pre_signal_validation(
+    df: dict[str, Any],
+    as_of_idx: int,
+) -> tuple[bool, str | None, dict[str, Any]]:
+    """Validate pre-signal history on bars strictly before signal day T (as_of_idx).
+
+    Rules (evaluated on T-15..T-1, or max available bars before T):
+    - Skip if cumulative return T-10 → T-1 exceeds +30%
+    - Skip if more than 2 days in the lookback window had volume > 2× 20d avg
+    """
+    closes = df["close"]
+    volumes = df["volume"]
+    t = as_of_idx
+    lookback = min(PRE_SIGNAL_FULL_LOOKBACK, t)
+    w_start = t - lookback
+    w_end = t - 1
+
+    vol_20_avg = calculate_sma(volumes[: t + 1], 20)
+
+    cum_return_t10_t1: float | None = None
+    if t >= PRE_SIGNAL_CUM_RETURN_LOOKBACK:
+        close_t10 = closes[t - PRE_SIGNAL_CUM_RETURN_LOOKBACK]
+        close_t1 = closes[t - 1]
+        if close_t10 > 0:
+            cum_return_t10_t1 = (close_t1 / close_t10 - 1.0) * 100.0
+
+    vol_spike_days = 0
+    if w_end >= w_start >= 0:
+        for i in range(w_start, w_end + 1):
+            vma = vol_20_avg[i] if i < len(vol_20_avg) else 0.0
+            if vma > 0 and volumes[i] > PRE_SIGNAL_VOL_SPIKE_MULT * vma:
+                vol_spike_days += 1
+
+    metrics: dict[str, Any] = {
+        "cum_return_t10_t1": round(cum_return_t10_t1, 4) if cum_return_t10_t1 is not None else None,
+        "vol_spike_days_t15_t1": vol_spike_days,
+        "pre_window_bars": lookback,
+        "pre_window_start_offset": -lookback,
+        "full_window": t >= PRE_SIGNAL_FULL_LOOKBACK,
+        "cum_return_window_bars": PRE_SIGNAL_CUM_RETURN_LOOKBACK if t >= PRE_SIGNAL_CUM_RETURN_LOOKBACK else None,
+    }
+
+    if cum_return_t10_t1 is not None and cum_return_t10_t1 > PRE_SIGNAL_CUM_RETURN_MAX:
+        return False, "pre_filter_cum_return", metrics
+
+    if vol_spike_days > PRE_SIGNAL_VOL_SPIKE_DAYS_MAX:
+        return False, "pre_filter_vol_spike", metrics
+
+    return True, None, metrics
+
+
+def _format_risk_flags(*, power_gap: bool, pass_paths: list[str]) -> str:
+    parts: list[str] = []
+    if power_gap:
+        parts.append("circuit-risk")
+    parts.append("HIGH CIRCUIT RISK")
+    suffix = "Enforce tight capital sizing (1-2%). Audit GSM/ASM status."
+    if pass_paths:
+        suffix += f" Pass paths: {', '.join(pass_paths)}."
+    return ": ".join(parts) + (f": {suffix}" if parts else suffix)
+
+
+def evaluate_bars_as_of(
+    df: dict[str, Any],
+    as_of_idx: int,
+    tier_name: str,
+) -> dict[str, Any]:
+    """Point-in-time breakout filter evaluation using bars[0..as_of_idx] inclusive.
+
+    Alternate pass paths (tracked in pass_paths / risk_flags):
+    - power_gap: pct_change 12–20% with circuit-risk flag
+    - vol_continuation_cum3d: 3-session cumulative vol >= tier threshold
+    - vol_continuation_prior_spike: micro-cap 2.5x after prior spike session
+    - sma20_reclaim: price > SMA20 with vol > 5x despite below SMA50
+    - rsi_hot: RSI 70–75 when vol > 5x
+    - adx_soft: ADX 20–25 with strong vol + above SMA50 + positive day
+    """
+    filt = FILTERS[tier_name]
+    vol_thresh = filt["vol_mult"]
+    n = as_of_idx + 1
+    if n < 50:
+        return {
+            "passed": False,
+            "fail_reason": "insufficient_data",
+            "bar_count": n,
+            "as_of_idx": as_of_idx,
+        }
+
+    close = df["close"][:n]
+    high = df["high"][:n]
+    low = df["low"][:n]
+    volume = df["volume"][:n]
+
+    latest_price = close[-1]
+    prev_price = close[-2]
+    pct_change = ((latest_price - prev_price) / prev_price) * 100
+
+    sma_20 = calculate_sma(close, 20)
+    sma_50 = calculate_sma(close, 50)
+    vol_20_avg = calculate_sma(volume, 20)
+    vol_mult = volume[-1] / (vol_20_avg[-1] if vol_20_avg[-1] > 0 else 1.0)
+    cum_days = min(VOL_CUM_DAYS, n)
+    vol_cum_mult = (
+        sum(volume[-cum_days:]) / (cum_days * vol_20_avg[-1])
+        if vol_20_avg[-1] > 0
+        else 0.0
+    )
+    prior_spike = _prior_volume_spike(volume, vol_20_avg, vol_thresh, as_of_idx)
+    rsi = calculate_rsi(close, 14)
+    adx_arr, _, _ = calculate_adx(high, low, close, period=14)
+    rsi_val = rsi[-1]
+    adx_val = adx_arr[-1]
+    sma20_last = sma_20[-1]
+    sma50_last = sma_50[-1]
+    vol_20_avg_last = vol_20_avg[-1]
+    latest_volume = volume[-1]
+
+    sma_200 = calculate_sma(close, 200) if len(close) > 200 else [0.0] * len(close)
+    sma_200_last = sma_200[-1] if sma_200 else None
+    poc_window = close[-30:] if len(close) >= 30 else close
+    vol_window = volume[-30:] if len(volume) >= 30 else volume
+    poc = get_volume_profile(poc_window, vol_window)
+
+    sl_price = min(sma_50[-1], poc) * 0.98
+    risk = latest_price - sl_price
+    target_price = latest_price + (2.0 * risk)
+    target_gain = ((target_price - latest_price) / latest_price) * 100
+
+    pass_paths: list[str] = []
+    power_gap = False
+
+    metrics = {
+        "latest_price": round(latest_price, 2),
+        "prev_price": round(prev_price, 2),
+        "pct_change": round(pct_change, 4),
+        "vol_mult": round(vol_mult, 4),
+        "vol_cum_mult": round(vol_cum_mult, 4),
+        "prior_volume_spike": prior_spike,
+        "rsi_val": round(rsi_val, 2),
+        "adx_val": round(adx_val, 2),
+        "sma20_last": round(sma20_last, 2),
+        "sma50_last": round(sma50_last, 2),
+        "sma_200_last": round(sma_200_last, 2) if sma_200_last is not None else None,
+        "poc": poc,
+        "vol_20_avg_last": round(vol_20_avg_last, 2),
+        "latest_volume": latest_volume,
+        "sl_price": round(sl_price, 2),
+        "target_price": round(target_price, 2),
+        "target_gain": round(target_gain, 4),
+        "entry_low": round(latest_price * 0.985, 2),
+        "entry_high": round(latest_price * 1.01, 2),
+        "bar_count": n,
+        "as_of_idx": as_of_idx,
+        "min_price_threshold": filt["min_price"],
+        "vol_mult_threshold": vol_thresh,
+        "pass_paths": pass_paths,
+        "risk_flags": "",
+    }
+
+    fail_reason = None
+    if latest_price < filt["min_price"]:
+        fail_reason = "min_price"
+    elif pct_change < PCT_CHANGE_MIN or pct_change > PCT_CHANGE_MAX_POWER_GAP:
+        fail_reason = "pct_change"
+    elif PCT_CHANGE_MAX_NORMAL < pct_change <= PCT_CHANGE_MAX_POWER_GAP:
+        power_gap = True
+        pass_paths.append("power_gap")
+
+    if fail_reason is None and latest_price < sma50_last:
+        sma20_reclaim = (
+            latest_price >= sma20_last
+            and vol_mult >= SMA20_RECLAIM_VOL_THRESHOLD
+        )
+        if sma20_reclaim:
+            pass_paths.append("sma20_reclaim")
+        else:
+            fail_reason = "SMA50"
+
+    if fail_reason is None:
+        vol_ok, vol_path = _volume_filter_passes(
+            vol_mult=vol_mult,
+            vol_cum_mult=vol_cum_mult,
+            vol_thresh=vol_thresh,
+            tier_name=tier_name,
+            prior_spike=prior_spike,
+        )
+        if not vol_ok:
+            fail_reason = "vol"
+        elif vol_path:
+            pass_paths.append(vol_path)
+
+    if fail_reason is None:
+        rsi_ok = RSI_MIN <= rsi_val <= RSI_MAX_NORMAL
+        if not rsi_ok and RSI_MAX_NORMAL < rsi_val <= RSI_MAX_HOT and vol_mult > HOT_VOL_THRESHOLD:
+            rsi_ok = True
+            pass_paths.append("rsi_hot")
+        if not rsi_ok:
+            fail_reason = "RSI"
+
+    if fail_reason is None:
+        adx_ok = adx_val >= ADX_HARD_FLOOR
+        if (
+            not adx_ok
+            and ADX_SOFT_FLOOR <= adx_val < ADX_HARD_FLOOR
+            and vol_mult >= vol_thresh
+            and latest_price > sma50_last
+            and pct_change > 0
+        ):
+            adx_ok = True
+            pass_paths.append("adx_soft")
+        if not adx_ok:
+            fail_reason = "ADX"
+
+    if fail_reason is None and target_gain < 8.0:
+        fail_reason = "target_gain"
+
+    pre_filter_fail: str | None = None
+    if fail_reason is None:
+        pre_ok, pre_fail, pre_metrics = pre_signal_validation(df, as_of_idx)
+        metrics["pre_validation"] = pre_metrics
+        if not pre_ok:
+            pre_filter_fail = pre_fail
+            fail_reason = pre_fail
+
+    metrics["pass_paths"] = pass_paths
+    metrics["risk_flags"] = _format_risk_flags(power_gap=power_gap, pass_paths=pass_paths)
+
+    return {
+        "passed": fail_reason is None,
+        "fail_reason": fail_reason,
+        "pre_filter_fail": pre_filter_fail,
+        **metrics,
+    }
+
 
 def _emit_stock_diagnostic(emit, ticker, tier_name, latest_price=None, pct_change=None,
                            vol_mult=None, vol_thresh=None, rsi_val=None, adx_val=None,
@@ -386,59 +776,24 @@ def evaluate_and_audit_stock(ticker, tier_name, emit=None):
         _emit_stock_diagnostic(emit, ticker, tier_name, fail_reason=fail_reason)
         return None
 
-    close = df["close"]
-    high = df["high"]
-    low = df["low"]
-    volume = df["volume"]
+    eval_result = evaluate_bars_as_of(df, len(df["close"]) - 1, tier_name)
+    latest_price = eval_result["latest_price"]
+    pct_change = eval_result["pct_change"]
+    vol_mult = eval_result["vol_mult"]
+    rsi_val = eval_result["rsi_val"]
+    adx_val = eval_result["adx_val"]
+    sma50_last = eval_result["sma50_last"]
+    sl_price = eval_result["sl_price"]
+    target_price = eval_result["target_price"]
+    target_gain = eval_result["target_gain"]
+    risk_flags = eval_result["risk_flags"]
 
-    latest_price = close[-1]
-    prev_price = close[-2]
-    pct_change = ((latest_price - prev_price) / prev_price) * 100
-
-    sma_50 = calculate_sma(close, 50)
-    vol_20_avg = calculate_sma(volume, 20)
-    vol_mult = volume[-1] / (vol_20_avg[-1] if vol_20_avg[-1] > 0 else 1.0)
-    rsi = calculate_rsi(close, 14)
-    adx_arr, _, _ = calculate_adx(high, low, close, period=14)
-    rsi_val = rsi[-1]
-    adx_val = adx_arr[-1]
-    sma50_last = sma_50[-1]
-
-    fail_reason = None
-    if latest_price < filt["min_price"]:
-        fail_reason = "min_price"
-    elif not (3.0 <= pct_change <= 12.0):
-        fail_reason = "pct_change"
-    elif latest_price < sma50_last:
-        fail_reason = "SMA50"
-    elif vol_mult < vol_thresh:
-        fail_reason = "vol"
-    elif not (50.0 <= rsi_val <= 70.0):
-        fail_reason = "RSI"
-    elif adx_val < 25.0:
-        fail_reason = "ADX"
-
+    fail_reason = eval_result.get("fail_reason")
     if fail_reason:
         _emit_stock_diagnostic(
             emit, ticker, tier_name, latest_price, pct_change,
             vol_mult, vol_thresh, rsi_val, adx_val, sma50_last,
             status="FAIL", fail_reason=fail_reason,
-        )
-        return None
-
-    sma_200 = calculate_sma(close, 200) if len(close) > 200 else [0.0] * len(close)
-    poc = get_volume_profile(close[-30:], volume[-30:])
-
-    sl_price = min(sma_50[-1], poc) * 0.98
-    risk = latest_price - sl_price
-    target_price = latest_price + (2.0 * risk)
-    target_gain = ((target_price - latest_price) / latest_price) * 100
-
-    if target_gain < 8.0:
-        _emit_stock_diagnostic(
-            emit, ticker, tier_name, latest_price, pct_change,
-            vol_mult, vol_thresh, rsi_val, adx_val, sma50_last,
-            status="FAIL", fail_reason="target_gain",
         )
         return None
 
@@ -448,16 +803,19 @@ def evaluate_and_audit_stock(ticker, tier_name, emit=None):
         status="PASS", fail_reason="",
     )
 
+    sma_200_last = eval_result.get("sma_200_last") or 0.0
+    poc = eval_result["poc"]
+
     payload = f"""**TECHNICAL GROUNDING DATA: {ticker.replace(".NS", "")}**
-Data Retrieval Timestamp: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (IST)
+Data Retrieval Timestamp: {datetime.datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')} (IST)
 Latest Market Price: {round(latest_price, 2)} ({'+' if pct_change >= 0 else ''}{round(pct_change, 2)}% today)
 Relative Volume (20-day Average): {round(vol_mult, 2)}x
-Relative Strength Index (RSI 14): {round(rsi[-1], 2)}
-Average Directional Index (ADX 14): {round(adx_arr[-1], 2)}
+Relative Strength Index (RSI 14): {round(rsi_val, 2)}
+Average Directional Index (ADX 14): {round(adx_val, 2)}
 
 Trend Indicators:
-* 50-period SMA: {round(sma_50[-1], 2)} (Price is {'ABOVE' if latest_price > sma_50[-1] else 'BELOW'} 50 SMA)
-* 200-period SMA: {round(sma_200[-1], 2)} (Price is {'ABOVE' if latest_price > sma_200[-1] else 'BELOW'} 200 SMA)
+* 50-period SMA: {round(sma50_last, 2)} (Price is {'ABOVE' if latest_price > sma50_last else 'BELOW'} 50 SMA)
+* 200-period SMA: {round(sma_200_last, 2)} (Price is {'ABOVE' if sma_200_last and latest_price > sma_200_last else 'BELOW'} 200 SMA)
 
 Volume Profile (30-day Visible Range):
 * Point of Control (POC): {round(poc, 2)}
@@ -469,13 +827,13 @@ Volume Profile (30-day Visible Range):
         "Price": round(latest_price, 2),
         "Change": f"+{round(pct_change, 2)}%",
         "Volume Mult": f"{round(vol_mult, 2)}x",
-        "RSI": round(rsi[-1], 2),
-        "ADX": round(adx_arr[-1], 2),
+        "RSI": rsi_val,
+        "ADX": adx_val,
         "Entry Range": f"{round(latest_price * 0.985, 2)} - {round(latest_price * 1.01, 2)}",
         "Est. Stop-Loss": round(sl_price, 2),
         "Est. Target (1:2)": round(target_price, 2),
         "Est. Gain": f"{round(target_gain, 2)}%",
-        "Risk Flags": "HIGH CIRCUIT RISK: Enforce tight capital sizing (1-2%). Audit GSM/ASM status.",
+        "Risk Flags": risk_flags,
         "Payload": payload
     }
 
@@ -572,7 +930,6 @@ def run_breakout_scan(
     *,
     write_report: bool = True,
     emit_to_stdout: bool = True,
-    send_email: bool = True,
 ) -> dict[str, Any]:
     """Run the full breakout scan and return structured results for API/CLI callers."""
     global _OUTPUT_DIR
@@ -640,13 +997,6 @@ def run_breakout_scan(
                 print("\n Scan & Audit complete for this tier.\n")
 
     report_markdown = _build_report_markdown(all_results, scan_date)
-    tier_candidate_counts = {
-        "Small-Cap (Nifty Smallcap 100)": 0,
-        "Micro-Cap (Nifty Microcap 250)": 0,
-    }
-    for row in all_results:
-        tier_candidate_counts[row["Tier"]] = tier_candidate_counts.get(row["Tier"], 0) + 1
-
     if write_report:
         report_path.write_text(report_markdown, encoding="utf-8")
         if emit_to_stdout:
@@ -657,38 +1007,13 @@ def run_breakout_scan(
                 print(" No breakout setups found today. Empty report generated.")
             print(f" Diagnostic log: {log_path}")
 
-    if send_email:
-        _ensure_src_on_path()
-        from email_notify import send_success_post_email
-
-        email_body = report_markdown.strip()
-        if scan_ticker_count or tier_ticker_counts:
-            summary_lines = [
-                f"Tickers scanned: {scan_ticker_count}",
-                f"Candidates: {len(all_results)}",
-            ]
-            if tier_candidate_counts:
-                tier_summary = "; ".join(
-                    f"{tier}: {count}" for tier, count in sorted(tier_candidate_counts.items())
-                )
-                if tier_summary:
-                    summary_lines.append(f"By tier: {tier_summary}")
-            email_body = "\n".join(summary_lines) + "\n\n" + email_body
-        emailed_ok = send_success_post_email(
-            email_body,
-            subject_prefix="Titan V12.0 breakout scan",
-        )
-        if emit_to_stdout:
-            if emailed_ok:
-                print(" Breakout scan report emailed successfully.", flush=True)
-            else:
-                print(
-                    " Email not sent (SMTP not configured or send failed). "
-                    "Set SMTP_HOST, EMAIL_FROM, EMAIL_TO and related env vars.",
-                    flush=True,
-                )
-
     finished_at = datetime.datetime.now()
+    tier_candidate_counts = {
+        "Small-Cap (Nifty Smallcap 100)": 0,
+        "Micro-Cap (Nifty Microcap 250)": 0,
+    }
+    for row in all_results:
+        tier_candidate_counts[row["Tier"]] = tier_candidate_counts.get(row["Tier"], 0) + 1
 
     return {
         "ok": True,
@@ -708,18 +1033,7 @@ def run_breakout_scan(
 
 
 def main() -> None:
-    try:
-        run_breakout_scan()
-    except Exception as exc:
-        _ensure_src_on_path()
-        from email_notify import send_failure_email
-
-        send_failure_email(
-            f"[Breakout scan] {exc}",
-            detail=str(exc),
-            subject_prefix="Titan V12.0 breakout scan",
-        )
-        raise
+    run_breakout_scan()
 
 
 if __name__ == "__main__":
