@@ -37,6 +37,16 @@ PRE_SIGNAL_CUM_RETURN_LOOKBACK = 10
 PRE_SIGNAL_CUM_RETURN_MAX = 30.0
 PRE_SIGNAL_VOL_SPIKE_MULT = 2.0
 PRE_SIGNAL_VOL_SPIKE_DAYS_MAX = 2
+PRE_SIGNAL_ADX_TRAJECTORY_LOOKBACK = 10
+PRE_SIGNAL_ADX_SOFT_SHORT_LOOKBACK = 5
+PRE_SIGNAL_COOLDOWN_SESSIONS = 20
+PRE_SIGNAL_COOLDOWN_CONSOLIDATION_MAX = 12.0
+PRE_SIGNAL_COOLDOWN_DIST_20D_HIGH_MIN = -3.0
+ADX_SOFT_VOL_BONUS = 0.5
+ADX_SOFT_CUM_RETURN_MAX = 20.0
+POWER_GAP_CUM_RETURN_MAX = 15.0
+SIGNAL_TIER_PASS = "PASS"
+SIGNAL_TIER_WATCH = "WATCH"
 
 # URLs for official NSE index constituent lists
 INDEX_URLS = {
@@ -553,7 +563,181 @@ def pre_signal_validation(
     return True, None, metrics
 
 
-def _format_risk_flags(*, power_gap: bool, pass_paths: list[str]) -> str:
+def _pre_signal_cooldown_metrics(
+    df: dict[str, Any],
+    as_of_idx: int,
+) -> dict[str, Any]:
+    """Consolidation range (T-10..T-1) and distance from 20d high at T-1."""
+    t = as_of_idx
+    closes = df["close"]
+    highs = df["high"]
+    lows = df["low"]
+    w10_start = t - PRE_SIGNAL_CUM_RETURN_LOOKBACK
+    w_end = t - 1
+    close_t1 = closes[t - 1]
+
+    cons_high = max(highs[w10_start : w_end + 1])
+    cons_low = min(lows[w10_start : w_end + 1])
+    consolidation_range_pct = (
+        (cons_high - cons_low) / close_t1 * 100.0 if close_t1 > 0 else 0.0
+    )
+
+    high_20_start = max(0, t - 20)
+    high_20 = max(highs[high_20_start:t])
+    dist_from_20d_high_pct = (
+        (close_t1 / high_20 - 1.0) * 100.0 if high_20 > 0 else 0.0
+    )
+
+    return {
+        "consolidation_range_pct": round(consolidation_range_pct, 4),
+        "dist_from_20d_high_pct": round(dist_from_20d_high_pct, 4),
+    }
+
+
+def _adx_trajectory_gate(
+    adx_arr: list[float],
+    as_of_idx: int,
+    pass_paths: list[str],
+) -> tuple[bool, str | None, dict[str, Any]]:
+    """Require rising ADX when adx_soft or rsi_hot alternate paths are used."""
+    needs_gate = "adx_soft" in pass_paths or "rsi_hot" in pass_paths
+    t = as_of_idx
+    metrics: dict[str, Any] = {
+        "adx_trajectory_required": needs_gate,
+        "adx_t1": None,
+        "adx_t10": None,
+        "adx_t5": None,
+    }
+    if not needs_gate:
+        return True, None, metrics
+
+    if t < PRE_SIGNAL_ADX_TRAJECTORY_LOOKBACK:
+        return False, "pre_filter_adx_trajectory", metrics
+
+    adx_t1 = adx_arr[t - 1]
+    adx_t10 = adx_arr[t - PRE_SIGNAL_ADX_TRAJECTORY_LOOKBACK]
+    adx_t5 = (
+        adx_arr[t - PRE_SIGNAL_ADX_SOFT_SHORT_LOOKBACK]
+        if t >= PRE_SIGNAL_ADX_SOFT_SHORT_LOOKBACK
+        else None
+    )
+    metrics.update({
+        "adx_t1": round(adx_t1, 4),
+        "adx_t10": round(adx_t10, 4),
+        "adx_t5": round(adx_t5, 4) if adx_t5 is not None else None,
+    })
+
+    if adx_t1 <= adx_t10:
+        return False, "pre_filter_adx_trajectory", metrics
+
+    if "adx_soft" in pass_paths and adx_t5 is not None and adx_t1 <= adx_t5:
+        return False, "pre_filter_adx_trajectory", metrics
+
+    return True, None, metrics
+
+
+def _signal_cooldown_gate(
+    df: dict[str, Any],
+    as_of_idx: int,
+    last_pass_idx: int | None,
+) -> tuple[bool, str | None, dict[str, Any]]:
+    """Block repeat PASS within cooldown unless consolidation + proximity exemptions."""
+    metrics: dict[str, Any] = {"last_pass_idx": last_pass_idx, "sessions_since_prior_pass": None}
+    if last_pass_idx is None:
+        return True, None, metrics
+
+    sessions_since = as_of_idx - last_pass_idx
+    metrics["sessions_since_prior_pass"] = sessions_since
+    if sessions_since <= 0 or sessions_since > PRE_SIGNAL_COOLDOWN_SESSIONS:
+        return True, None, metrics
+
+    cooldown_metrics = _pre_signal_cooldown_metrics(df, as_of_idx)
+    metrics.update(cooldown_metrics)
+    exempt = (
+        cooldown_metrics["consolidation_range_pct"] <= PRE_SIGNAL_COOLDOWN_CONSOLIDATION_MAX
+        and cooldown_metrics["dist_from_20d_high_pct"] >= PRE_SIGNAL_COOLDOWN_DIST_20D_HIGH_MIN
+    )
+    metrics["cooldown_exempt"] = exempt
+    if exempt:
+        return True, None, metrics
+
+    return False, "pre_filter_signal_cooldown", metrics
+
+
+def _adx_soft_chase_gate(
+    cum_return_t10_t1: float | None,
+    pass_paths: list[str],
+) -> tuple[bool, str | None, dict[str, Any]]:
+    """Block adx_soft when pre-trend run-up exceeds path-specific cap."""
+    metrics: dict[str, Any] = {
+        "adx_soft_chase_required": "adx_soft" in pass_paths,
+        "cum_return_t10_t1": round(cum_return_t10_t1, 4) if cum_return_t10_t1 is not None else None,
+        "adx_soft_cum_return_max": ADX_SOFT_CUM_RETURN_MAX,
+    }
+    if "adx_soft" not in pass_paths:
+        return True, None, metrics
+    if cum_return_t10_t1 is not None and cum_return_t10_t1 > ADX_SOFT_CUM_RETURN_MAX:
+        return False, "pre_filter_adx_soft_chase", metrics
+    return True, None, metrics
+
+
+def _power_gap_confirmation_gate(
+    adx_arr: list[float],
+    as_of_idx: int,
+    cum_return_t10_t1: float | None,
+    pass_paths: list[str],
+) -> tuple[bool, dict[str, Any]]:
+    """power_gap requires rising ADX or modest pre-trend; otherwise downgrade to WATCH."""
+    needs_gate = "power_gap" in pass_paths
+    metrics: dict[str, Any] = {
+        "power_gap_confirmation_required": needs_gate,
+        "adx_t1": None,
+        "adx_t10": None,
+        "cum_return_t10_t1": round(cum_return_t10_t1, 4) if cum_return_t10_t1 is not None else None,
+        "power_gap_cum_return_max": POWER_GAP_CUM_RETURN_MAX,
+        "adx_rising": None,
+        "confirmed": None,
+    }
+    if not needs_gate:
+        metrics["confirmed"] = True
+        return True, metrics
+
+    t = as_of_idx
+    adx_rising = False
+    if t >= PRE_SIGNAL_ADX_TRAJECTORY_LOOKBACK:
+        adx_t1 = adx_arr[t - 1]
+        adx_t10 = adx_arr[t - PRE_SIGNAL_ADX_TRAJECTORY_LOOKBACK]
+        adx_rising = adx_t1 > adx_t10
+        metrics.update({
+            "adx_t1": round(adx_t1, 4),
+            "adx_t10": round(adx_t10, 4),
+            "adx_rising": adx_rising,
+        })
+
+    cum_ok = cum_return_t10_t1 is not None and cum_return_t10_t1 <= POWER_GAP_CUM_RETURN_MAX
+    confirmed = adx_rising or cum_ok
+    metrics["confirmed"] = confirmed
+    return confirmed, metrics
+
+
+def _format_risk_flags(
+    *,
+    power_gap: bool,
+    pass_paths: list[str],
+    signal_tier: str | None = None,
+) -> str:
+    if signal_tier == SIGNAL_TIER_WATCH:
+        parts: list[str] = ["WATCHLIST"]
+        if power_gap:
+            parts.append("circuit-risk")
+        suffix = (
+            "WATCH only — enforce 1% sizing cap; no new entry unless ADX resumes rising. "
+            "Audit GSM/ASM status."
+        )
+        if pass_paths:
+            suffix += f" Pass paths: {', '.join(pass_paths)}."
+        return ": ".join(parts) + f": {suffix}"
+
     parts: list[str] = []
     if power_gap:
         parts.append("circuit-risk")
@@ -568,6 +752,8 @@ def evaluate_bars_as_of(
     df: dict[str, Any],
     as_of_idx: int,
     tier_name: str,
+    *,
+    last_pass_idx: int | None = None,
 ) -> dict[str, Any]:
     """Point-in-time breakout filter evaluation using bars[0..as_of_idx] inclusive.
 
@@ -706,7 +892,7 @@ def evaluate_bars_as_of(
         if (
             not adx_ok
             and ADX_SOFT_FLOOR <= adx_val < ADX_HARD_FLOOR
-            and vol_mult >= vol_thresh
+            and vol_mult >= vol_thresh + ADX_SOFT_VOL_BONUS
             and latest_price > sma50_last
             and pct_change > 0
         ):
@@ -726,11 +912,49 @@ def evaluate_bars_as_of(
             pre_filter_fail = pre_fail
             fail_reason = pre_fail
 
+    if fail_reason is None:
+        traj_ok, traj_fail, traj_metrics = _adx_trajectory_gate(adx_arr, as_of_idx, pass_paths)
+        metrics["adx_trajectory"] = traj_metrics
+        if not traj_ok:
+            pre_filter_fail = traj_fail
+            fail_reason = traj_fail
+
+    if fail_reason is None:
+        cd_ok, cd_fail, cd_metrics = _signal_cooldown_gate(df, as_of_idx, last_pass_idx)
+        metrics["signal_cooldown"] = cd_metrics
+        if not cd_ok:
+            pre_filter_fail = cd_fail
+            fail_reason = cd_fail
+
+    cum_return_t10_t1 = (metrics.get("pre_validation") or {}).get("cum_return_t10_t1")
+
+    if fail_reason is None:
+        chase_ok, chase_fail, chase_metrics = _adx_soft_chase_gate(cum_return_t10_t1, pass_paths)
+        metrics["adx_soft_chase"] = chase_metrics
+        if not chase_ok:
+            pre_filter_fail = chase_fail
+            fail_reason = chase_fail
+
+    signal_tier: str | None = SIGNAL_TIER_PASS if fail_reason is None else None
+    if fail_reason is None and "power_gap" in pass_paths:
+        pg_ok, pg_metrics = _power_gap_confirmation_gate(
+            adx_arr, as_of_idx, cum_return_t10_t1, pass_paths,
+        )
+        metrics["power_gap_confirmation"] = pg_metrics
+        if not pg_ok:
+            signal_tier = SIGNAL_TIER_WATCH
+
     metrics["pass_paths"] = pass_paths
-    metrics["risk_flags"] = _format_risk_flags(power_gap=power_gap, pass_paths=pass_paths)
+    metrics["signal_tier"] = signal_tier
+    metrics["risk_flags"] = _format_risk_flags(
+        power_gap=power_gap,
+        pass_paths=pass_paths,
+        signal_tier=signal_tier,
+    )
 
     return {
-        "passed": fail_reason is None,
+        "passed": fail_reason is None and signal_tier == SIGNAL_TIER_PASS,
+        "signal_tier": signal_tier,
         "fail_reason": fail_reason,
         "pre_filter_fail": pre_filter_fail,
         **metrics,
@@ -789,6 +1013,7 @@ def evaluate_and_audit_stock(ticker, tier_name, emit=None):
     risk_flags = eval_result["risk_flags"]
 
     fail_reason = eval_result.get("fail_reason")
+    signal_tier = eval_result.get("signal_tier")
     if fail_reason:
         _emit_stock_diagnostic(
             emit, ticker, tier_name, latest_price, pct_change,
@@ -797,10 +1022,11 @@ def evaluate_and_audit_stock(ticker, tier_name, emit=None):
         )
         return None
 
+    status = signal_tier or "PASS"
     _emit_stock_diagnostic(
         emit, ticker, tier_name, latest_price, pct_change,
         vol_mult, vol_thresh, rsi_val, adx_val, sma50_last,
-        status="PASS", fail_reason="",
+        status=status, fail_reason="",
     )
 
     sma_200_last = eval_result.get("sma_200_last") or 0.0
@@ -834,6 +1060,7 @@ Volume Profile (30-day Visible Range):
         "Est. Target (1:2)": round(target_price, 2),
         "Est. Gain": f"{round(target_gain, 2)}%",
         "Risk Flags": risk_flags,
+        "Signal Tier": signal_tier or SIGNAL_TIER_PASS,
         "Payload": payload
     }
 
@@ -859,6 +1086,7 @@ def serialize_candidate(row: dict[str, Any]) -> dict[str, Any]:
         "est_gain_pct": float(gain_raw) if gain_raw else None,
         "est_gain_display": row["Est. Gain"],
         "risk_flags": row["Risk Flags"],
+        "signal_tier": row.get("Signal Tier"),
         "payload": row["Payload"],
     }
 

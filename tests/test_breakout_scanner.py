@@ -224,6 +224,22 @@ def _uptrend_closes(n: int, start: float = 50.0, step: float = 0.25) -> list[flo
     return [start + i * step for i in range(n)]
 
 
+def _rising_adx_mock(base: float = 15.0, step: float = 0.15):
+    def _mock(high, low, close, period=14):
+        return (
+            [base + i * step for i in range(len(close))],
+            [0.0] * len(close),
+            [0.0] * len(close),
+        )
+    return _mock
+
+
+def _flat_adx_mock(value: float = 22.0):
+    def _mock(high, low, close, period=14):
+        return ([value] * len(close), [0.0] * len(close), [0.0] * len(close))
+    return _mock
+
+
 def test_power_gap_pass_path(monkeypatch):
     import breakout_scanner
     from breakout_scanner import evaluate_bars_as_of
@@ -281,6 +297,12 @@ def test_vol_continuation_cum3d_pass_path(monkeypatch):
     assert "vol_continuation_cum3d" in result["pass_paths"]
 
 
+def _rising_adx_soft(high, low, close, period=14):
+    n = len(close)
+    arr = [18.0 + i * 0.08 for i in range(n)]
+    return (arr, [0.0] * n, [0.0] * n)
+
+
 def test_adx_soft_band_pass_path(monkeypatch):
     import breakout_scanner
     from breakout_scanner import evaluate_bars_as_of
@@ -291,10 +313,7 @@ def test_adx_soft_band_pass_path(monkeypatch):
     volume = [50000.0] * (n - 1) + [300000.0]
 
     monkeypatch.setattr("breakout_scanner.calculate_rsi", lambda prices, period=14: [60.0] * len(prices))
-    monkeypatch.setattr(
-        "breakout_scanner.calculate_adx",
-        lambda high, low, close, period=14: ([22.0] * len(close), [0.0] * len(close), [0.0] * len(close)),
-    )
+    monkeypatch.setattr("breakout_scanner.calculate_adx", _rising_adx_soft)
 
     result = evaluate_bars_as_of(_synthetic_df(close, volume), n - 1, "SMALL_CAP_100")
     assert result["passed"] is True
@@ -311,10 +330,7 @@ def test_rsi_hot_pass_path(monkeypatch):
     volume = [40000.0] * (n - 1) + [350000.0]
 
     monkeypatch.setattr("breakout_scanner.calculate_rsi", lambda prices, period=14: [72.0] * len(prices))
-    monkeypatch.setattr(
-        "breakout_scanner.calculate_adx",
-        lambda high, low, close, period=14: ([28.0] * len(close), [0.0] * len(close), [0.0] * len(close)),
-    )
+    monkeypatch.setattr("breakout_scanner.calculate_adx", _rising_adx_soft)
 
     result = evaluate_bars_as_of(_synthetic_df(close, volume), n - 1, "SMALL_CAP_100")
     assert result["passed"] is True
@@ -432,3 +448,273 @@ def test_evaluate_bars_as_of_pre_filter_blocks_after_breakout_pass(monkeypatch):
     assert result["fail_reason"] == "pre_filter_cum_return"
     assert result["pre_filter_fail"] == "pre_filter_cum_return"
     assert "pre_validation" in result
+
+
+def test_adx_trajectory_gate_blocks_flat_adx_on_adx_soft(monkeypatch):
+    import breakout_scanner
+    from breakout_scanner import evaluate_bars_as_of
+
+    n = 80
+    close = _uptrend_closes(n, start=50.0, step=0.25)
+    close[-1] = close[-2] * 1.05
+    volume = [50000.0] * (n - 1) + [300000.0]
+
+    monkeypatch.setattr("breakout_scanner.calculate_rsi", lambda prices, period=14: [60.0] * len(prices))
+    monkeypatch.setattr("breakout_scanner.calculate_adx", _flat_adx_mock(22.0))
+    monkeypatch.setattr(
+        "breakout_scanner.pre_signal_validation",
+        lambda df, idx: (True, None, {"full_window": True}),
+    )
+
+    result = evaluate_bars_as_of(_synthetic_df(close, volume), n - 1, "SMALL_CAP_100")
+    assert result["passed"] is False
+    assert result["fail_reason"] == "pre_filter_adx_trajectory"
+    assert "adx_soft" in result["pass_paths"] or result.get("adx_val", 0) < 25
+
+
+def test_adx_trajectory_gate_blocks_flat_adx_on_rsi_hot(monkeypatch):
+    import breakout_scanner
+    from breakout_scanner import evaluate_bars_as_of
+
+    n = 80
+    close = _uptrend_closes(n, start=40.0, step=0.3)
+    close[-1] = close[-2] * 1.05
+    volume = [40000.0] * (n - 1) + [350000.0]
+
+    monkeypatch.setattr("breakout_scanner.calculate_rsi", lambda prices, period=14: [72.0] * len(prices))
+    monkeypatch.setattr("breakout_scanner.calculate_adx", _flat_adx_mock(28.0))
+    monkeypatch.setattr(
+        "breakout_scanner.pre_signal_validation",
+        lambda df, idx: (True, None, {"full_window": True}),
+    )
+
+    result = evaluate_bars_as_of(_synthetic_df(close, volume), n - 1, "SMALL_CAP_100")
+    assert result["passed"] is False
+    assert result["fail_reason"] == "pre_filter_adx_trajectory"
+    assert "rsi_hot" in result["pass_paths"]
+
+
+def test_signal_cooldown_gate_blocks_extended_repeat():
+    from breakout_scanner import _signal_cooldown_gate
+
+    n = 80
+    close = [100.0] * n
+    for i in range(50, 60):
+        close[i] = 130.0
+    for i in range(60, n - 1):
+        close[i] = 95.0
+    high = [c * 1.08 for c in close]
+    low = [c * 0.92 for c in close]
+    df = {
+        "open": close[:],
+        "high": high,
+        "low": low,
+        "close": close,
+        "volume": [50000.0] * n,
+    }
+
+    ok, reason, metrics = _signal_cooldown_gate(df, n - 1, n - 11)
+    assert ok is False
+    assert reason == "pre_filter_signal_cooldown"
+    assert metrics["sessions_since_prior_pass"] == 10
+    assert metrics["cooldown_exempt"] is False
+
+
+def test_signal_cooldown_gate_allows_tight_consolidation_exempt():
+    from breakout_scanner import _signal_cooldown_gate
+
+    n = 80
+    close = [100.0] * (n - 6) + [100.5, 100.8, 101.0, 101.2, 101.5, 106.0]
+    high = [c * 1.005 for c in close]
+    low = [c * 0.995 for c in close]
+    df = {
+        "open": close[:],
+        "high": high,
+        "low": low,
+        "close": close,
+        "volume": [50000.0] * n,
+    }
+
+    ok, reason, metrics = _signal_cooldown_gate(df, n - 1, n - 11)
+    assert ok is True
+    assert reason is None
+    assert metrics["cooldown_exempt"] is True
+    assert metrics["consolidation_range_pct"] <= 12.0
+    assert metrics["dist_from_20d_high_pct"] >= -3.0
+
+
+def test_signal_cooldown_exempt_on_tight_consolidation_near_high(monkeypatch):
+    import breakout_scanner
+    from breakout_scanner import evaluate_bars_as_of
+
+    n = 80
+    close = [100.0] * (n - 6) + [100.5, 100.8, 101.0, 101.2, 101.5, 106.0]
+    volume = [50000.0] * (n - 1) + [300000.0]
+    high = [c * 1.005 for c in close]
+    low = [c * 0.995 for c in close]
+    df = {
+        "open": [close[i - 1] if i else close[0] for i in range(n)],
+        "high": high,
+        "low": low,
+        "close": close,
+        "volume": volume,
+        "timestamp": list(range(n)),
+    }
+
+    monkeypatch.setattr("breakout_scanner.calculate_rsi", lambda prices, period=14: [60.0] * len(prices))
+    monkeypatch.setattr("breakout_scanner.calculate_adx", _rising_adx_mock(base=26.0, step=0.2))
+    monkeypatch.setattr(
+        "breakout_scanner.pre_signal_validation",
+        lambda df, idx: (True, None, {"full_window": True}),
+    )
+
+    prior_idx = n - 11
+    result = evaluate_bars_as_of(df, n - 1, "SMALL_CAP_100", last_pass_idx=prior_idx)
+    cd = result["signal_cooldown"]
+    assert cd["cooldown_exempt"] is True
+    assert cd["consolidation_range_pct"] <= 12.0
+    assert cd["dist_from_20d_high_pct"] >= -3.0
+    assert result["passed"] is True
+
+
+def test_adx_trajectory_blocks_adx_soft_when_short_slope_fails(monkeypatch):
+    import breakout_scanner
+    from breakout_scanner import evaluate_bars_as_of
+
+    n = 80
+    close = _uptrend_closes(n, start=50.0, step=0.25)
+    close[-1] = close[-2] * 1.05
+    volume = [50000.0] * (n - 1) + [300000.0]
+
+    def _adx_falling_short_term(high, low, close, period=14):
+        arr = [18.0 + i * 0.08 for i in range(len(close))]
+        arr[-6] = 25.5
+        arr[-5:] = [25.5, 25.2, 24.8, 24.3, 24.0]
+        return (arr, [0.0] * len(close), [0.0] * len(close))
+
+    monkeypatch.setattr("breakout_scanner.calculate_rsi", lambda prices, period=14: [60.0] * len(prices))
+    monkeypatch.setattr("breakout_scanner.calculate_adx", _adx_falling_short_term)
+    monkeypatch.setattr(
+        "breakout_scanner.pre_signal_validation",
+        lambda df, idx: (True, None, {"full_window": True}),
+    )
+
+    result = evaluate_bars_as_of(_synthetic_df(close, volume), n - 1, "SMALL_CAP_100")
+    assert result["passed"] is False
+    assert result["fail_reason"] == "pre_filter_adx_trajectory"
+    assert "adx_soft" in result["pass_paths"]
+
+
+def test_adx_soft_requires_elevated_volume(monkeypatch):
+    import breakout_scanner
+    from breakout_scanner import evaluate_bars_as_of
+
+    n = 80
+    close = _uptrend_closes(n, start=50.0, step=0.25)
+    close[-1] = close[-2] * 1.05
+    volume = [50000.0] * (n - 1) + [210000.0]
+
+    monkeypatch.setattr("breakout_scanner.calculate_rsi", lambda prices, period=14: [60.0] * len(prices))
+    monkeypatch.setattr("breakout_scanner.calculate_adx", _rising_adx_soft)
+    monkeypatch.setattr(
+        "breakout_scanner.pre_signal_validation",
+        lambda df, idx: (True, None, {"full_window": True, "cum_return_t10_t1": 5.0}),
+    )
+
+    result = evaluate_bars_as_of(_synthetic_df(close, volume), n - 1, "SMALL_CAP_100")
+    assert result["passed"] is False
+    assert result["fail_reason"] == "ADX"
+    assert "adx_soft" not in result["pass_paths"]
+
+
+def test_adx_soft_chase_blocks_extended_runup(monkeypatch):
+    import breakout_scanner
+    from breakout_scanner import evaluate_bars_as_of
+
+    n = 80
+    close = _uptrend_closes(n, start=50.0, step=0.25)
+    close[-1] = close[-2] * 1.05
+    volume = [50000.0] * (n - 1) + [300000.0]
+
+    monkeypatch.setattr("breakout_scanner.calculate_rsi", lambda prices, period=14: [60.0] * len(prices))
+    monkeypatch.setattr("breakout_scanner.calculate_adx", _rising_adx_soft)
+    monkeypatch.setattr(
+        "breakout_scanner.pre_signal_validation",
+        lambda df, idx: (True, None, {"full_window": True, "cum_return_t10_t1": 22.0}),
+    )
+
+    result = evaluate_bars_as_of(_synthetic_df(close, volume), n - 1, "SMALL_CAP_100")
+    assert result["passed"] is False
+    assert result["fail_reason"] == "pre_filter_adx_soft_chase"
+    assert "adx_soft" in result["pass_paths"]
+
+
+def test_power_gap_downgrades_to_watch_without_adx_rising(monkeypatch):
+    import breakout_scanner
+    from breakout_scanner import evaluate_bars_as_of
+
+    n = 80
+    close = _uptrend_closes(n, start=50.0, step=0.2)
+    close[-2] = close[-3]
+    close[-1] = close[-2] * 1.15
+    volume = [80000.0] * (n - 1) + [400000.0]
+
+    monkeypatch.setattr("breakout_scanner.calculate_rsi", lambda prices, period=14: [60.0] * len(prices))
+    monkeypatch.setattr("breakout_scanner.calculate_adx", _flat_adx_mock(28.0))
+    monkeypatch.setattr(
+        "breakout_scanner.pre_signal_validation",
+        lambda df, idx: (True, None, {"full_window": True, "cum_return_t10_t1": 18.0}),
+    )
+
+    result = evaluate_bars_as_of(_synthetic_df(close, volume), n - 1, "SMALL_CAP_100")
+    assert result["passed"] is False
+    assert result["signal_tier"] == "WATCH"
+    assert result["fail_reason"] is None
+    assert "power_gap" in result["pass_paths"]
+    assert "1% sizing" in result["risk_flags"]
+
+
+def test_power_gap_stays_pass_with_rising_adx(monkeypatch):
+    import breakout_scanner
+    from breakout_scanner import evaluate_bars_as_of
+
+    n = 80
+    close = _uptrend_closes(n, start=50.0, step=0.2)
+    close[-2] = close[-3]
+    close[-1] = close[-2] * 1.15
+    volume = [80000.0] * (n - 1) + [400000.0]
+
+    monkeypatch.setattr("breakout_scanner.calculate_rsi", lambda prices, period=14: [60.0] * len(prices))
+    monkeypatch.setattr("breakout_scanner.calculate_adx", _rising_adx_mock(base=20.0, step=0.15))
+    monkeypatch.setattr(
+        "breakout_scanner.pre_signal_validation",
+        lambda df, idx: (True, None, {"full_window": True, "cum_return_t10_t1": 18.0}),
+    )
+
+    result = evaluate_bars_as_of(_synthetic_df(close, volume), n - 1, "SMALL_CAP_100")
+    assert result["passed"] is True
+    assert result["signal_tier"] == "PASS"
+    assert "power_gap" in result["pass_paths"]
+
+
+def test_power_gap_stays_pass_with_low_cum_return(monkeypatch):
+    import breakout_scanner
+    from breakout_scanner import evaluate_bars_as_of
+
+    n = 80
+    close = _uptrend_closes(n, start=50.0, step=0.2)
+    close[-2] = close[-3]
+    close[-1] = close[-2] * 1.15
+    volume = [80000.0] * (n - 1) + [400000.0]
+
+    monkeypatch.setattr("breakout_scanner.calculate_rsi", lambda prices, period=14: [60.0] * len(prices))
+    monkeypatch.setattr("breakout_scanner.calculate_adx", _flat_adx_mock(28.0))
+    monkeypatch.setattr(
+        "breakout_scanner.pre_signal_validation",
+        lambda df, idx: (True, None, {"full_window": True, "cum_return_t10_t1": 12.0}),
+    )
+
+    result = evaluate_bars_as_of(_synthetic_df(close, volume), n - 1, "SMALL_CAP_100")
+    assert result["passed"] is True
+    assert result["signal_tier"] == "PASS"
+    assert "power_gap" in result["pass_paths"]

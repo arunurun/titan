@@ -709,21 +709,25 @@ def replay_stock(
 
     evaluations: list[dict[str, Any]] = []
     signals: list[dict[str, Any]] = []
+    watch_signals: list[dict[str, Any]] = []
+    last_pass_idx: int | None = None
 
     for idx in range(MIN_HISTORY_BARS - 1, n):
-        eval_result = evaluate_bars_as_of(df, idx, tier_key)
+        eval_result = evaluate_bars_as_of(df, idx, tier_key, last_pass_idx=last_pass_idx)
         signal_date = dates[idx] if idx < len(dates) else ""
         row = {
             "signal_date": signal_date,
             "bar_idx": idx,
             "prediction": {
                 "passed": eval_result["passed"],
+                "signal_tier": eval_result.get("signal_tier"),
                 "fail_reason": eval_result.get("fail_reason"),
-                "metrics": {k: eval_result[k] for k in eval_result if k not in ("passed", "fail_reason")},
+                "metrics": {k: eval_result[k] for k in eval_result if k not in ("passed", "fail_reason", "signal_tier")},
             },
         }
         evaluations.append(row)
         if eval_result["passed"]:
+            last_pass_idx = idx
             outcome = validate_forward_path(
                 df,
                 idx,
@@ -732,6 +736,18 @@ def replay_stock(
                 target=eval_result["target_price"],
             )
             signals.append({
+                **row,
+                "outcome": outcome,
+            })
+        elif eval_result.get("signal_tier") == "WATCH":
+            outcome = validate_forward_path(
+                df,
+                idx,
+                entry=eval_result["latest_price"],
+                stop=eval_result["sl_price"],
+                target=eval_result["target_price"],
+            )
+            watch_signals.append({
                 **row,
                 "outcome": outcome,
             })
@@ -748,7 +764,9 @@ def replay_stock(
         },
         "evaluation_days": len(evaluations),
         "signal_count": len(signals),
+        "watch_signal_count": len(watch_signals),
         "signals": signals,
+        "watch_signals": watch_signals,
         "near_miss_top_failures": _top_fail_reasons(evaluations),
     }
 
