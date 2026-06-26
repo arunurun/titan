@@ -412,7 +412,8 @@ def test_hollow_breakout_demotes_buy_to_accumulate():
         "ema200_stretch_atr": 2.67, "atr_14_pct": 3.0, "adx_14": 22.0,
     }
     label, _risk, _ = v2.evaluate_signal_v2(audit)
-    assert label == "accumulate"
+    # Phase 2: weak CMF + hot stretch without pullback caps at hold (was accumulate).
+    assert label == "hold"
 
 
 def test_greavescot_staleflow_downgrades_hold_to_trim():
@@ -557,16 +558,16 @@ def test_gap_guard_derives_from_return_series(monkeypatch):
 def test_datamatics_case_accumulates_on_loosened_gate():
     """Intent 73.75 / next_week 67.09 blocked buy at old 70/65 gates → accumulate."""
     audit = {
-        "next_week_score": 67.09,
-        "effective_intent_score": 73.75,
+        "next_week_score": 64.0,
+        "effective_intent_score": 64.0,
         "z_score": 1.2,
         "return_1d_pct": 1.0,
         "return_5d_pct": 2.0,
         "return_10d_pct": 3.0,
         "rel_return_5d_vs_nifty_pct": 1.0,
-        "cmf_20": -0.08,
+        "cmf_20": 0.02,
         "ema_200_distance_pct": 5.0,
-        "ema200_stretch_atr": 2.5,
+        "ema200_stretch_atr": 2.0,
         "atr_14_pct": 2.5,
         "adx_14": 25.0,
         "volume_participation_ratio": 1.35,

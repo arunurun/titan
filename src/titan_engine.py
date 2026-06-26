@@ -35,6 +35,25 @@ def calculate_ema(data: pd.Series | pd.DataFrame, span: int = 200) -> float:
     return float(ema.iloc[-1])
 
 
+def calculate_rsi(data: pd.Series | pd.DataFrame, period: int = 14) -> float:
+    """Last RSI value from close series (Wilder smoothing; NaN when insufficient history)."""
+    series = data["close"] if isinstance(data, pd.DataFrame) else data
+    s = pd.to_numeric(series, errors="coerce").dropna()
+    if len(s) < period + 1 or period < 1:
+        return float("nan")
+    delta = s.diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = (-delta).where(delta < 0, 0.0)
+    avg_gain = gain.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+    last_loss = float(avg_loss.iloc[-1])
+    if last_loss == 0.0 or math.isnan(last_loss):
+        return 100.0 if float(avg_gain.iloc[-1]) > 0.0 else 50.0
+    rs = float(avg_gain.iloc[-1]) / last_loss
+    out = 100.0 - (100.0 / (1.0 + rs))
+    return float(out) if not math.isnan(out) else float("nan")
+
+
 def calculate_atr(data: pd.DataFrame, window: int = 14) -> float:
     """
     Last ATR value from OHLC frame.

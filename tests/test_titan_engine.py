@@ -14,6 +14,7 @@ from titan_engine import (
     calculate_equity_technical_score,
     calculate_intent_score,
     calculate_obv_slope,
+    calculate_rsi,
     calculate_z_score,
     find_call_put_oi_walls,
     find_oi_walls,
@@ -146,3 +147,11 @@ def test_calculate_cmf_and_obv_slope():
     obv_slope = calculate_obv_slope(df, window=5)
     assert not math.isnan(cmf)
     assert not math.isnan(obv_slope)
+
+
+def test_calculate_rsi_range():
+    closes = [100 + i * 0.5 for i in range(30)]
+    df = pd.DataFrame({"close": closes})
+    rsi = calculate_rsi(df, period=14)
+    assert not math.isnan(rsi)
+    assert 0.0 <= rsi <= 100.0

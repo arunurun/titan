@@ -312,13 +312,39 @@ def _rel_strength_accelerating(audit: dict[str, Any]) -> bool:
     return rel5 >= accel_min and (math.isnan(ret1d) or ret1d > 0.0)
 
 
+def _sector_leader_carveout(audit: dict[str, Any]) -> bool:
+    """Sector leader: skip chase / mild-stretch hold when tape quality is strong."""
+    adx = _sf(audit.get("adx_14"))
+    cmf = _sf(audit.get("cmf_20"))
+    stretch = _sf(audit.get("ema200_stretch_atr"))
+    pctile = _sf(
+        audit.get("sector_pctile_effective_intent", audit.get("sector_pctile_next_week_score"))
+    )
+    q_min = _env_float("TITAN_SIGV2_LEADER_PCTILE_MIN", 75.0)
+    adx_min = _env_float("TITAN_SIGV2_LEADER_ADX_MIN", 25.0)
+    stretch_max = _env_float("TITAN_SIGV2_LEADER_STRETCH_MAX", 5.0)
+    return (
+        not math.isnan(pctile)
+        and pctile >= q_min
+        and not math.isnan(adx)
+        and adx > adx_min
+        and (math.isnan(stretch) or stretch < stretch_max)
+        and not math.isnan(cmf)
+        and cmf > 0.0
+    )
+
+
 def _post_rally_chase_block(audit: dict[str, Any]) -> bool:
-    """Block constructive entry after a sharp 5d rally unless rel strength accelerates."""
+    """Block constructive entry after a sharp 5d rally unless rel strength + pullback."""
+    if _sector_leader_carveout(audit):
+        return False
     ret5d = _sf(audit.get("return_5d_pct"))
     chase_pct = _env_float("TITAN_SIGV2_CHASE_RET5D_PCT", 8.0)
     if math.isnan(ret5d) or ret5d <= chase_pct:
         return False
-    return not _rel_strength_accelerating(audit)
+    if _rel_strength_accelerating(audit) and _pullback_quality_proxy(audit):
+        return False
+    return True
 
 
 def _effective_next_week_for_gate(audit: dict[str, Any]) -> float:
@@ -863,8 +889,304 @@ def layer_d(audit: dict[str, Any], c: dict[str, Any]) -> dict[str, Any]:
         out["staleflow_downgrade"] = True
         reasons.append("stale-flow: neutral CMF + over-extended + weak ADX + OBV below EMA")
 
+    _apply_indicator_trajectory_layer_d(out, audit, c, reasons)
+
+    prior_ceil = _prior_session_label_ceiling(audit)
+    if prior_ceil is not None:
+        out["label_ceiling"] = _combine_ceilings(out.get("label_ceiling"), prior_ceil)
+        cs = int(audit.get("prior_constructive_streak") or 0)
+        fs = int(audit.get("prior_fail_streak") or 0)
+        reasons.append(
+            f"prior-session corroborator: constructive={cs}/5 fail={fs}/5 -> ceiling {prior_ceil}"
+        )
+
     out["reasons"] = reasons
     return out
+
+
+_CONSTRUCTIVE_LABELS = frozenset({"buy", "accumulate"})
+
+
+def _prior_trajectory_window() -> int:
+    raw = _env_int("TITAN_SIGV2_PRIOR_WINDOW", 5)
+    return max(1, min(10, raw))
+
+
+def _parse_tape_extras(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            import json
+
+            parsed = json.loads(raw)
+            return dict(parsed) if isinstance(parsed, dict) else {}
+        except (ValueError, TypeError):
+            return {}
+    return {}
+
+
+def _session_metrics_from_row(row: dict[str, Any]) -> dict[str, Any]:
+    tape = _parse_tape_extras(row.get("tape_extras"))
+    z = _sf(row.get("z_score"))
+    if math.isnan(z):
+        z = _sf(tape.get("z_score"))
+    return {
+        "cmf": _sf(tape.get("cmf_20")),
+        "adx": _sf(tape.get("adx_14")),
+        "plus_di": _sf(tape.get("adx_plus_di_14")),
+        "minus_di": _sf(tape.get("adx_minus_di_14")),
+        "z": z,
+        "rsi": _sf(tape.get("rsi_14")),
+        "obv_confirm": tape.get("obv_trend_confirm"),
+    }
+
+
+def _session_metrics_from_audit(audit: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "cmf": _sf(audit.get("cmf_20")),
+        "adx": _sf(audit.get("adx_14")),
+        "plus_di": _sf(audit.get("adx_plus_di_14")),
+        "minus_di": _sf(audit.get("adx_minus_di_14")),
+        "z": _sf(audit.get("z_score")),
+        "rsi": _sf(audit.get("rsi_14")),
+        "obv_confirm": audit.get("obv_trend_confirm"),
+    }
+
+
+def _series_slope(values: list[float]) -> float:
+    """Simple slope over values ordered newest-first (positive = improving toward today)."""
+    clean = [v for v in values if not math.isnan(v)]
+    if len(clean) < 2:
+        return float("nan")
+    return (clean[0] - clean[-1]) / (len(clean) - 1)
+
+
+def _z_reverting_sessions(z_values: list[float]) -> bool:
+    """True when |z| falls for 3+ consecutive sessions (newest-first)."""
+    abs_z = [abs(v) for v in z_values if not math.isnan(v)]
+    if len(abs_z) < 3:
+        return False
+    streak = 1
+    for i in range(len(abs_z) - 1):
+        if abs_z[i] < abs_z[i + 1]:
+            streak += 1
+            if streak >= 3:
+                return True
+        else:
+            streak = 1
+    return False
+
+
+def _session_flow_score(session: dict[str, Any]) -> float:
+    score = 0.0
+    cmf = _sf(session.get("cmf"))
+    if not math.isnan(cmf):
+        if cmf > 0.05:
+            score += 0.35
+        elif cmf < -0.05:
+            score -= 0.35
+    adx = _sf(session.get("adx"))
+    plus_di = _sf(session.get("plus_di"))
+    minus_di = _sf(session.get("minus_di"))
+    if not math.isnan(adx) and adx >= 25.0:
+        if not math.isnan(plus_di) and not math.isnan(minus_di):
+            score += 0.25 if plus_di > minus_di else -0.25
+        else:
+            score += 0.15
+    obv = session.get("obv_confirm")
+    if obv is True:
+        score += 0.2
+    elif obv is False:
+        score -= 0.15
+    rsi = _sf(session.get("rsi"))
+    if not math.isnan(rsi):
+        if rsi > 70.0:
+            score -= 0.15
+        elif rsi < 30.0:
+            score += 0.1
+    return max(-1.0, min(1.0, score))
+
+
+def compute_indicator_trajectory(
+    prior_rows: list[dict[str, Any]],
+    *,
+    current_audit: dict[str, Any] | None = None,
+    window: int | None = None,
+) -> dict[str, Any]:
+    """Summarize multi-session CMF/ADX/z/RSI/OBV tape from stored feature rows.
+
+    ``prior_rows`` must be newest-first (same order as analysis_store history).
+    When ``current_audit`` is supplied it is treated as the latest session.
+    """
+    win = _prior_trajectory_window() if window is None else max(1, min(10, window))
+    sessions: list[dict[str, Any]] = []
+    if current_audit is not None:
+        sessions.append(_session_metrics_from_audit(current_audit))
+    for row in prior_rows:
+        if not isinstance(row, dict):
+            continue
+        sessions.append(_session_metrics_from_row(row))
+        if len(sessions) >= win:
+            break
+
+    cmf_vals = [_sf(s.get("cmf")) for s in sessions]
+    adx_vals = [_sf(s.get("adx")) for s in sessions]
+    z_vals = [_sf(s.get("z")) for s in sessions]
+    rsi_vals = [_sf(s.get("rsi")) for s in sessions]
+
+    cmf_clean = [v for v in cmf_vals if not math.isnan(v)]
+    adx_clean = [v for v in adx_vals if not math.isnan(v)]
+
+    cmf_slope = _series_slope(cmf_clean)
+    adx_slope = _series_slope(adx_clean)
+    cmf_positive_sessions = sum(1 for v in cmf_clean if v > 0.0)
+    cmf_deteriorating = (
+        not math.isnan(cmf_slope)
+        and cmf_slope < -0.01
+        and len(cmf_clean) >= 2
+        and cmf_clean[0] < cmf_clean[-1]
+    )
+
+    adx_strong = _env_float("TITAN_SIGV2_D_ADX_STRONG", 25.0)
+    adx_strong_bull_sessions = 0
+    for s in sessions:
+        adx = _sf(s.get("adx"))
+        plus_di = _sf(s.get("plus_di"))
+        minus_di = _sf(s.get("minus_di"))
+        if math.isnan(adx) or adx < adx_strong:
+            continue
+        if not math.isnan(plus_di) and not math.isnan(minus_di) and plus_di > minus_di:
+            adx_strong_bull_sessions += 1
+
+    z_elevated_sessions = sum(1 for v in z_vals if not math.isnan(v) and abs(v) > 2.0)
+    z_reverting = _z_reverting_sessions(z_vals)
+
+    rsi_overbought_sessions = sum(1 for v in rsi_vals if not math.isnan(v) and v > 70.0)
+    rsi_oversold_sessions = sum(1 for v in rsi_vals if not math.isnan(v) and v < 30.0)
+
+    obv_confirm_sessions = sum(1 for s in sessions if s.get("obv_confirm") is True)
+
+    flow_scores = [_session_flow_score(s) for s in sessions]
+    flow_clean = [v for v in flow_scores if not math.isnan(v)]
+    flow_tape_score = (
+        round(sum(flow_clean) / len(flow_clean), 4) if flow_clean else float("nan")
+    )
+
+    return {
+        "window": len(sessions),
+        "cmf_slope": round(cmf_slope, 6) if not math.isnan(cmf_slope) else None,
+        "cmf_positive_sessions": cmf_positive_sessions,
+        "cmf_deteriorating": cmf_deteriorating,
+        "adx_slope": round(adx_slope, 6) if not math.isnan(adx_slope) else None,
+        "adx_strong_bull_sessions": adx_strong_bull_sessions,
+        "z_elevated_sessions": z_elevated_sessions,
+        "z_reverting": z_reverting,
+        "rsi_overbought_sessions": rsi_overbought_sessions,
+        "rsi_oversold_sessions": rsi_oversold_sessions,
+        "obv_confirm_sessions": obv_confirm_sessions,
+        "flow_tape_score": flow_tape_score if not math.isnan(flow_tape_score) else None,
+    }
+
+
+def _trajectory_bearish(audit: dict[str, Any]) -> bool:
+    traj = audit.get("indicator_trajectory")
+    if not isinstance(traj, dict):
+        return False
+    fts = _sf(traj.get("flow_tape_score"))
+    if not math.isnan(fts) and fts < -0.15:
+        return True
+    if traj.get("cmf_deteriorating") and int(traj.get("cmf_positive_sessions") or 0) <= 1:
+        return True
+    if int(traj.get("z_elevated_sessions") or 0) >= 4 and not traj.get("z_reverting"):
+        return True
+    return False
+
+
+def _apply_indicator_trajectory_layer_d(
+    out: dict[str, Any],
+    audit: dict[str, Any],
+    c: dict[str, Any],
+    reasons: list[str],
+) -> None:
+    traj = audit.get("indicator_trajectory")
+    if not isinstance(traj, dict) or int(traj.get("window") or 0) < 2:
+        return
+
+    cmf_pos = int(traj.get("cmf_positive_sessions") or 0)
+    if traj.get("cmf_deteriorating") and cmf_pos <= 1:
+        ceil = "hold" if cmf_pos == 0 else "accumulate"
+        out["label_ceiling"] = _combine_ceilings(out.get("label_ceiling"), ceil)
+        reasons.append(
+            f"trajectory CMF deteriorating ({cmf_pos} positive / {traj.get('window')} sessions)"
+        )
+
+    adx_slope = _sf(traj.get("adx_slope"))
+    cmf_slope = _sf(traj.get("cmf_slope"))
+    if not math.isnan(adx_slope) and adx_slope > 0.0 and not math.isnan(cmf_slope) and cmf_slope > 0.0:
+        boost = _env_float("TITAN_SIGV2_TRAJ_MOMENTUM_BOOST", 1.1)
+        out["mult_momentum"] *= boost
+        reasons.append(
+            f"trajectory ADX+CMF improving (adx_slope {adx_slope:.3f}, cmf_slope {cmf_slope:.3f})"
+        )
+
+    if int(traj.get("z_elevated_sessions") or 0) >= 4 and not traj.get("z_reverting"):
+        tight = _env_float("TITAN_SIGV2_TRAJ_Z_ELEVATED_CAP", 0.55)
+        cap = out.get("buy_confidence_cap")
+        out["buy_confidence_cap"] = tight if cap is None else min(float(cap), tight)
+        reasons.append(
+            f"trajectory z elevated {traj.get('z_elevated_sessions')} sessions without reversion"
+        )
+
+    if int(traj.get("rsi_overbought_sessions") or 0) >= 3 and _stretch_is_hot(audit, c):
+        out["label_ceiling"] = _combine_ceilings(out.get("label_ceiling"), "hold")
+        reasons.append(
+            f"trajectory RSI overbought {traj.get('rsi_overbought_sessions')} sessions + hot stretch"
+        )
+
+
+def compute_prior_session_streaks(
+    prior_rows: list[dict[str, Any]],
+    *,
+    window: int = 5,
+) -> dict[str, int]:
+    """Count constructive labels and constructive+negative-fwd sessions in prior rows.
+
+    ``prior_rows`` must be newest-first (same order as analysis_store history).
+    """
+    constructive = 0
+    fail = 0
+    for row in prior_rows[:window]:
+        if not isinstance(row, dict):
+            continue
+        sig = str(row.get("action_signal") or "").strip().lower()
+        if sig not in _CONSTRUCTIVE_LABELS:
+            continue
+        constructive += 1
+        tape = row.get("tape_extras")
+        if not isinstance(tape, dict):
+            continue
+        fo = tape.get("forward_outcomes")
+        if isinstance(fo, dict):
+            f5 = _sf(fo.get("forward_5d_pct"))
+            if not math.isnan(f5) and f5 < 0.0:
+                fail += 1
+    return {"prior_constructive_streak": constructive, "prior_fail_streak": fail}
+
+
+def _prior_session_label_ceiling(audit: dict[str, Any]) -> str | None:
+    """Hybrid corroborator: prior label streaks apply only when trajectory is bearish."""
+    if not _trajectory_bearish(audit):
+        return None
+    cs = int(audit.get("prior_constructive_streak") or 0)
+    fs = int(audit.get("prior_fail_streak") or 0)
+    cs_thresh = _env_int("TITAN_SIGV2_PRIOR_CONSTRUCTIVE_STREAK", 3)
+    fs_thresh = _env_int("TITAN_SIGV2_PRIOR_FAIL_STREAK", 2)
+    if cs >= cs_thresh and fs >= fs_thresh:
+        return "hold"
+    if fs >= fs_thresh:
+        return "accumulate"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1093,7 +1415,7 @@ def _buy_gate(audit: dict[str, Any], a: dict[str, Any], c: dict[str, Any]) -> di
     )
     chase_block = _post_rally_chase_block(audit)
     stretch_ok = _stretch_constructive_ok(audit, c)
-    accum_cmf_floor = _env_float("TITAN_SIGV2_ACCUM_CMF_FLOOR", -0.10)
+    accum_cmf_floor = _env_float("TITAN_SIGV2_ACCUM_CMF_FLOOR", -0.05)
     cmf_accum_ok = math.isnan(cmf) or cmf >= accum_cmf_floor
     core = (
         bool(a.get("buy_allowed"))
@@ -1127,6 +1449,12 @@ def _accumulate_band(audit: dict[str, Any], risk_net: float, *, buy_allowed: boo
         return False
     nw_min = _profile_float(audit, "accum_nw_min", _env_float("TITAN_SIGV2_ACCUM_NEXT_WEEK_MIN", _ACCUM_NEXT_WEEK_MIN))
     intent_min = _profile_float(audit, "accum_intent_min", _env_float("TITAN_SIGV2_ACCUM_INTENT_MIN", _ACCUM_INTENT_MIN))
+    cmf = _sf(audit.get("cmf_20"))
+    if risk_net > 2.0 and not math.isnan(cmf) and cmf < 0.0:
+        nw_min = max(
+            nw_min,
+            _env_float("TITAN_SIGV2_ACCUM_NW_MIN_RISK_CMF", _ACCUM_NW_MIN_RISK_NEG_CMF),
+        )
     next_week = _sf(audit.get("next_week_score"))
     eff = _sf(audit.get("effective_intent_score", audit.get("intent_score")))
     return (
@@ -1346,8 +1674,8 @@ def _resolve_layer_a_final_label(mapped_label: str, layer_a_out: dict[str, Any])
 # its 20d high) should not earn a *fresh* buy even when the risk score is low; cap the
 # constructive label. Shadow-first: default mode records the would-be ceiling without
 # changing the label. NaN inputs simply don't contribute (degrades to no ceiling).
-_SIGV2_CEIL_STRETCH_ACCUM = 3.5    # ATR stretch -> at least accumulate ceiling
-_SIGV2_CEIL_STRETCH_HOLD = 6.0     # ATR stretch -> hold ceiling
+_SIGV2_CEIL_STRETCH_ACCUM = 2.5    # ATR stretch -> at least accumulate ceiling
+_SIGV2_CEIL_STRETCH_HOLD = 7.0     # extreme ATR stretch -> always hold
 _SIGV2_CEIL_Z_HOT = 2.5            # upside z that corroborates over-extension
 _SIGV2_CEIL_EMA_DIST_HOT = 18.0    # % above EMA200 that corroborates
 _SIGV2_CEIL_NEAR_HIGH_PCT = 1.0    # within this % of the 20d high = pinned to high
@@ -1568,6 +1896,7 @@ _PARTICIPATION_INTENT_MIN = 65.0
 _PARTICIPATION_NW_MIN = 62.0
 _PARTICIPATION_VPR_MIN = 1.2
 _ACCUM_NEXT_WEEK_MIN = 58.0
+_ACCUM_NW_MIN_RISK_NEG_CMF = 62.0
 _ACCUM_INTENT_MIN = 58.0
 _MID_BAND_SCORE_MIN = 55.0
 _MID_BAND_SCORE_MAX = 64.0
@@ -2035,10 +2364,18 @@ def evaluate_signal_v2(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
     oe = _overextension_ceiling(audit)
     oe_ceiling = oe.get("ceiling")
     applied_oe_ceiling = _resolve_overext_applied_ceiling(audit, oe_ceiling, oe_mode)
-    if _stretch_is_hot(audit, c) and not _pullback_quality_proxy(audit):
+    stretch_atr = _sf(audit.get("ema200_stretch_atr"))
+    s_hold_extreme = _env_float("TITAN_SIGV2_CEIL_STRETCH_HOLD", _SIGV2_CEIL_STRETCH_HOLD)
+    if not math.isnan(stretch_atr) and stretch_atr >= s_hold_extreme:
         applied_oe_ceiling = _combine_ceilings(applied_oe_ceiling, "hold")
+    elif _stretch_is_hot(audit, c) and not _pullback_quality_proxy(audit):
+        if not _sector_leader_carveout(audit):
+            applied_oe_ceiling = _combine_ceilings(applied_oe_ceiling, "hold")
     label_before_oe = label
-    label = _apply_ceiling(label, _combine_ceilings(a.get("label_ceiling"), applied_oe_ceiling))
+    label = _apply_ceiling(
+        label,
+        _combine_ceilings(a.get("label_ceiling"), applied_oe_ceiling, d.get("label_ceiling")),
+    )
     audit["signal_overext_ceiling"] = {
         "mode": oe_mode,
         "would_ceiling": oe_ceiling,

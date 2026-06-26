@@ -55,6 +55,7 @@ _TAPE_AUDIT_KEYS = (
     "sell_signal",
     "cmf_20",
     "adx_14",
+    "rsi_14",
     "obv_slope_20",
     "ema200_stretch_atr",
     "gap_down_proxy",
@@ -296,6 +297,35 @@ def group_rows_by_symbol(rows: Sequence[dict[str, Any]]) -> dict[tuple[str, str]
     return dict(out)
 
 
+def _attach_replay_memory(
+    audit: dict[str, Any],
+    prior_rows: list[dict[str, Any]],
+) -> None:
+    """Replay prior-session streaks and indicator trajectory from ordered feature rows."""
+    if not prior_rows:
+        return
+    try:
+        from signal_v2 import compute_indicator_trajectory, compute_prior_session_streaks
+    except ImportError:
+        return
+    newest_first = list(reversed(prior_rows))
+    streaks = compute_prior_session_streaks(newest_first)
+    audit["prior_constructive_streak"] = streaks["prior_constructive_streak"]
+    audit["prior_fail_streak"] = streaks["prior_fail_streak"]
+    audit["indicator_trajectory"] = compute_indicator_trajectory(
+        newest_first,
+        current_audit=audit,
+    )
+    if len(newest_first) >= 1:
+        prior = str(newest_first[0].get("action_signal") or "").strip().lower()
+        if prior:
+            audit["prev_action_signal"] = prior
+    if len(newest_first) >= 2:
+        prev_prev = str(newest_first[1].get("action_signal") or "").strip().lower()
+        if prev_prev:
+            audit["prev_prev_action_signal"] = prev_prev
+
+
 def walk_labels(
     rows: Sequence[dict[str, Any]],
     *,
@@ -306,11 +336,12 @@ def walk_labels(
     """Return (row, label) pairs; label None when audit inputs insufficient."""
     prior: str | None = None
     out: list[tuple[dict[str, Any], str | None]] = []
-    for row in rows:
+    for idx, row in enumerate(rows):
         audit = feature_row_to_audit(row)
         if audit is None or not audit_has_signal_inputs(audit):
             out.append((row, None))
             continue
+        _attach_replay_memory(audit, list(rows[:idx]))
         label = recompute_label(
             audit,
             use_v2=use_v2,

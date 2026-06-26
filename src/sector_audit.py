@@ -2524,6 +2524,18 @@ def _attach_prior_action_signals(
             prev_prev = str(rows[1].get("action_signal") or "").strip().lower()
             if prev_prev:
                 audit["prev_prev_action_signal"] = prev_prev
+        try:
+            from signal_v2 import compute_indicator_trajectory, compute_prior_session_streaks
+
+            streaks = compute_prior_session_streaks(rows)
+            audit["prior_constructive_streak"] = streaks["prior_constructive_streak"]
+            audit["prior_fail_streak"] = streaks["prior_fail_streak"]
+            audit["indicator_trajectory"] = compute_indicator_trajectory(
+                rows,
+                current_audit=audit,
+            )
+        except ImportError:
+            pass
         tape = latest.get("tape_extras")
         if isinstance(tape, dict):
             prev_risk = tape.get("sell_signal_risk_score", tape.get("risk_net"))
@@ -3406,6 +3418,7 @@ def build_equity_live_audit(
         calculate_obv_latest,
         calculate_obv_slope,
         calculate_obv_trend_confirm,
+        calculate_rsi,
     )
 
     if lookback_calendar_days is None:
@@ -3477,6 +3490,7 @@ def build_equity_live_audit(
             "obv_latest": float("nan"),
             "obv_ema_20": float("nan"),
             "obv_trend_confirm": None,
+            "rsi_14": float("nan"),
         }
         return skip, ""
     metrics_df, ohlc_meta = _prepare_ohlc_for_metrics(df)
@@ -3532,6 +3546,7 @@ def build_equity_live_audit(
     obv_latest = calculate_obv_latest(df)
     obv_ema_20 = calculate_obv_ema(df, span=20)
     obv_trend_confirm = calculate_obv_trend_confirm(df, span=20)
+    rsi_14 = calculate_rsi(series, period=14)
     atr_14_pct = (
         (atr_14 / close_last) * 100.0
         if (not math.isnan(atr_14) and not math.isnan(close_last) and close_last != 0.0)
@@ -3696,6 +3711,7 @@ def build_equity_live_audit(
         "obv_latest": obv_latest,
         "obv_ema_20": obv_ema_20,
         "obv_trend_confirm": obv_trend_confirm,
+        "rsi_14": rsi_14,
         "atr_break_multiple": atr_break_multiple,
         "structural_break_proxy": (
             not math.isnan(atr_break_multiple) and atr_break_multiple >= 1.5

@@ -847,6 +847,10 @@ def build_symbol_daily_feature(
             else None
         ),
         "sell_signal_risk_score": audit.get("sell_signal_risk_score"),
+        "prior_constructive_streak": audit.get("prior_constructive_streak"),
+        "prior_fail_streak": audit.get("prior_fail_streak"),
+        "rsi_14": audit.get("rsi_14"),
+        "indicator_trajectory": audit.get("indicator_trajectory"),
         "technical_confidence": audit.get("technical_confidence"),
         "predicted_probability": audit.get("predicted_probability"),
         "position_confidence": audit.get("position_confidence", audit.get("position_score")),
@@ -2044,7 +2048,7 @@ def _fetch_symbol_history_by_sector(
     try:
         res = (
             client.table("symbol_daily_features")
-            .select("trade_date,symbol,action_signal,tape_extras")
+            .select("trade_date,symbol,action_signal,z_score,tape_extras")
             .eq("sector", sector)
             .gte("trade_date", start)
             .order("trade_date", desc=True)
