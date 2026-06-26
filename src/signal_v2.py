@@ -255,6 +255,103 @@ def _overext_counts_as_corroborator(audit: dict[str, Any], c: dict[str, Any]) ->
     return distribution or weak_rel
 
 
+def _divergence_bear_proxy(audit: dict[str, Any]) -> bool:
+    """Price-up / CMF-down without OBV confirm; audit may pre-set the proxy."""
+    raw = audit.get("divergence_bear_proxy")
+    if raw is not None:
+        return bool(raw)
+    ret1d = _sf(audit.get("return_1d_pct"))
+    cmf = _sf(audit.get("cmf_20"))
+    obv_confirm = _obv_trend_confirm(audit)
+    divergence_ret1d = _env_float("TITAN_SIGV2_D_DIVERGENCE_RET1D", 2.0)
+    return (
+        (not math.isnan(ret1d) and ret1d > divergence_ret1d)
+        and (not math.isnan(cmf) and cmf < -0.05)
+        and obv_confirm is False
+    )
+
+
+def _pullback_quality_proxy(audit: dict[str, Any]) -> bool:
+    """Healthy pullback or institutional absorption; audit may pre-set the proxy."""
+    raw = audit.get("pullback_quality_proxy")
+    if raw is not None:
+        return bool(raw)
+    ret1d = _sf(audit.get("return_1d_pct"))
+    cmf = _sf(audit.get("cmf_20"))
+    obv_confirm = _obv_trend_confirm(audit)
+    vpr = _sf(audit.get("volume_participation_ratio", audit.get("absorption_ratio")))
+    ret5d = _sf(audit.get("return_5d_pct"))
+    ema_dist = _sf(audit.get("ema_200_distance_pct"))
+    pullback_vpr = _env_float("TITAN_SIGV2_D_PULLBACK_VPR", 1.0)
+    if (
+        (not math.isnan(ret1d) and ret1d < 0.0)
+        and (not math.isnan(cmf) and cmf > 0.05)
+        and obv_confirm is True
+    ):
+        return True
+    return (
+        (not math.isnan(ret1d) and ret1d < 0.0)
+        and (not math.isnan(vpr) and vpr < pullback_vpr)
+        and (not math.isnan(cmf) and cmf > 0.05)
+        and (not math.isnan(ret5d) and ret5d >= -3.0)
+        and (not math.isnan(ema_dist) and ema_dist >= 0.0)
+    )
+
+
+def _rel_strength_accelerating(audit: dict[str, Any]) -> bool:
+    """Relative 5d outperformance still rising vs prior session (or strong fallback)."""
+    rel5 = _sf(audit.get("rel_return_5d_vs_nifty_pct"))
+    if math.isnan(rel5):
+        return False
+    prev_rel = _sf(audit.get("prev_rel_return_5d_vs_nifty_pct"))
+    if not math.isnan(prev_rel):
+        margin = _env_float("TITAN_SIGV2_CHASE_REL_ACCEL_MARGIN", 0.25)
+        return rel5 > prev_rel + margin
+    ret1d = _sf(audit.get("return_1d_pct"))
+    accel_min = _env_float("TITAN_SIGV2_CHASE_REL5_MIN", 4.0)
+    return rel5 >= accel_min and (math.isnan(ret1d) or ret1d > 0.0)
+
+
+def _post_rally_chase_block(audit: dict[str, Any]) -> bool:
+    """Block constructive entry after a sharp 5d rally unless rel strength accelerates."""
+    ret5d = _sf(audit.get("return_5d_pct"))
+    chase_pct = _env_float("TITAN_SIGV2_CHASE_RET5D_PCT", 8.0)
+    if math.isnan(ret5d) or ret5d <= chase_pct:
+        return False
+    return not _rel_strength_accelerating(audit)
+
+
+def _effective_next_week_for_gate(audit: dict[str, Any]) -> float:
+    """Dampen stale high next_week scores after the tape has already rallied."""
+    nw = _sf(audit.get("next_week_score"))
+    if math.isnan(nw):
+        return nw
+    ret5d = _sf(audit.get("return_5d_pct"))
+    rally_lo = _env_float("TITAN_SIGV2_NW_DAMP_RALLY_LO", 5.0)
+    rally_hi = _env_float("TITAN_SIGV2_NW_DAMP_RALLY_HI", 10.0)
+    max_penalty = _env_float("TITAN_SIGV2_NW_DAMP_MAX_PENALTY", 10.0)
+    if math.isnan(ret5d) or ret5d <= rally_lo:
+        return nw
+    frac = min(1.0, (ret5d - rally_lo) / max(rally_hi - rally_lo, 0.01))
+    return nw - frac * max_penalty
+
+
+def _stretch_is_hot(audit: dict[str, Any], c: dict[str, Any]) -> bool:
+    """True when Layer-C or ceiling logic flags meaningful upside stretch."""
+    if bool(c.get("over_extension_hot")):
+        return True
+    stretch = _sf(audit.get("ema200_stretch_atr"))
+    s_accum = _env_float("TITAN_SIGV2_CEIL_STRETCH_ACCUM", _SIGV2_CEIL_STRETCH_ACCUM)
+    return (not math.isnan(stretch)) and stretch >= s_accum
+
+
+def _stretch_constructive_ok(audit: dict[str, Any], c: dict[str, Any]) -> bool:
+    """Hot stretch needs pullback quality before constructive upgrade."""
+    if not _stretch_is_hot(audit, c):
+        return True
+    return _pullback_quality_proxy(audit)
+
+
 # ---------------------------------------------------------------------------
 # small numeric helpers
 # ---------------------------------------------------------------------------
@@ -401,13 +498,15 @@ def layer_a(audit: dict[str, Any]) -> dict[str, Any]:
             reasons.append("short history: IPO leader precheck passed (buy allowed if risk ok)")
         else:
             out["buy_allowed"] = False
-            out["label_ceiling"] = "accumulate"
+            out["label_ceiling"] = _combine_ceilings(out.get("label_ceiling"), "accumulate")
             seed *= short_hist_conf
             reasons.append("short history (<200 sessions): ceiling=accumulate")
 
     if bool(audit.get("liquidity_thin_proxy")):
         out["buy_allowed"] = False
-        reasons.append("thin liquidity: buy forbidden")
+        out["label_ceiling"] = _combine_ceilings(out.get("label_ceiling"), "accumulate")
+        seed *= 0.75
+        reasons.append("thin liquidity: buy forbidden, ceiling=accumulate")
 
     out["confidence_seed"] = _clamp(seed, 0.0, 1.0)
     out["reasons"] = reasons
@@ -968,7 +1067,7 @@ def _buy_gate(audit: dict[str, Any], a: dict[str, Any], c: dict[str, Any]) -> di
     constructive_core (everything except the flow / over-extension checks),
     and constructive_scores (intent/next_week tier only).
     """
-    next_week = _sf(audit.get("next_week_score"))
+    next_week = _effective_next_week_for_gate(audit)
     eff = _sf(audit.get("effective_intent_score", audit.get("intent_score")))
     ret5d = _sf(audit.get("return_5d_pct"))
     rel5 = _sf(audit.get("rel_return_5d_vs_nifty_pct"))
@@ -992,19 +1091,29 @@ def _buy_gate(audit: dict[str, Any], a: dict[str, Any], c: dict[str, Any]) -> di
         and not math.isnan(eff)
         and eff >= buy_intent_min
     )
+    chase_block = _post_rally_chase_block(audit)
+    stretch_ok = _stretch_constructive_ok(audit, c)
+    accum_cmf_floor = _env_float("TITAN_SIGV2_ACCUM_CMF_FLOOR", -0.10)
+    cmf_accum_ok = math.isnan(cmf) or cmf >= accum_cmf_floor
     core = (
         bool(a.get("buy_allowed"))
         and not bool(audit.get("trap_exit_proxy"))
         and not bool(audit.get("liquidity_thin_proxy"))
         and not extreme_move
         and constructive_scores
+        and not chase_block
+        and stretch_ok
+        and cmf_accum_ok
         and not (not math.isnan(ret5d) and ret5d <= -4.0)
         and not (not math.isnan(rel5) and rel5 <= -3.0)
     )
     cmf_min = _profile_float(audit, "cmf_constructive_min", -0.05)
     flow_ok = math.isnan(cmf) or cmf >= cmf_min
+    divergence_block = (
+        not math.isnan(cmf) and cmf < -0.05 and _divergence_bear_proxy(audit)
+    )
     not_overextended = not bool(c.get("over_extension_hot"))
-    clean = core and flow_ok and not_overextended
+    clean = core and flow_ok and not_overextended and not divergence_block
     return {
         "clean_buy": clean,
         "constructive_core": core,
@@ -1237,7 +1346,7 @@ def _resolve_layer_a_final_label(mapped_label: str, layer_a_out: dict[str, Any])
 # its 20d high) should not earn a *fresh* buy even when the risk score is low; cap the
 # constructive label. Shadow-first: default mode records the would-be ceiling without
 # changing the label. NaN inputs simply don't contribute (degrades to no ceiling).
-_SIGV2_CEIL_STRETCH_ACCUM = 4.0    # ATR stretch -> at least accumulate ceiling
+_SIGV2_CEIL_STRETCH_ACCUM = 3.5    # ATR stretch -> at least accumulate ceiling
 _SIGV2_CEIL_STRETCH_HOLD = 6.0     # ATR stretch -> hold ceiling
 _SIGV2_CEIL_Z_HOT = 2.5            # upside z that corroborates over-extension
 _SIGV2_CEIL_EMA_DIST_HOT = 18.0    # % above EMA200 that corroborates
@@ -1926,6 +2035,8 @@ def evaluate_signal_v2(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
     oe = _overextension_ceiling(audit)
     oe_ceiling = oe.get("ceiling")
     applied_oe_ceiling = _resolve_overext_applied_ceiling(audit, oe_ceiling, oe_mode)
+    if _stretch_is_hot(audit, c) and not _pullback_quality_proxy(audit):
+        applied_oe_ceiling = _combine_ceilings(applied_oe_ceiling, "hold")
     label_before_oe = label
     label = _apply_ceiling(label, _combine_ceilings(a.get("label_ceiling"), applied_oe_ceiling))
     audit["signal_overext_ceiling"] = {

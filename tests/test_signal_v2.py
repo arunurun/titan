@@ -115,7 +115,7 @@ def test_layer_a_short_history_always_applies():
 
 def test_layer_a_boundary_blocks_buy_after_hysteresis():
     a = v2.layer_a({"liquidity_thin_proxy": True, "z_score": 1.0, "cmf_20": 0.1})
-    assert v2._resolve_layer_a_final_label("buy", a) == "hold"
+    assert v2._resolve_layer_a_final_label("buy", a) == "accumulate"
 
 
 def test_layer_a_boundary_ceiling_caps_constructive():
