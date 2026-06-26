@@ -4,6 +4,7 @@ import json
 import sys
 import urllib.parse
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -56,6 +57,27 @@ def test_nse_ticker_parsing_skips_dummy_symbols():
     assert "FOONSETEST.NS" not in tickers
 
 
+def test_nse_ticker_parsing_preserves_gmrpui_microcap_symbol():
+    from breakout_scanner import _parse_nse_ticker_csv
+
+    csv_lines = [
+        "Company Name,Industry,Symbol,Series,ISIN",
+        "GMR Power and Urban Infra Ltd.,Power,GMRP&UI,EQ,INE0CU601026",
+    ]
+    tickers = _parse_nse_ticker_csv(csv_lines)
+    assert tickers == ["GMRP&UI.NS"]
+    assert "GMRPUI.NS" not in tickers
+
+
+def test_normalize_nse_symbol_repairs_mangled_gmrpui():
+    from breakout_scanner import _normalize_nse_symbol, _resolve_yahoo_ticker
+
+    assert _normalize_nse_symbol("GMRPUI") == "GMRP&UI"
+    assert _normalize_nse_symbol("GMRP&UI") == "GMRP&UI"
+    assert _normalize_nse_symbol("GMRP%26UI") == "GMRP&UI"
+    assert _resolve_yahoo_ticker("GMRPUI.NS") == "GMRP&UI.NS"
+
+
 def test_ampersand_ticker_yahoo_quote_encoding():
     assert urllib.parse.quote("ARE&M.NS", safe="") == "ARE%26M.NS"
     assert urllib.parse.quote("M&M.NS", safe="") == "M%26M.NS"
@@ -91,6 +113,188 @@ def test_build_report_markdown_empty():
 
     md = _build_report_markdown([], datetime.date(2026, 6, 25))
     assert "No small-cap or micro-cap stocks met" in md
+
+
+def _sample_candidate_row(*, signal_tier: str = "PASS") -> dict:
+    return {
+        "Ticker": "ABC",
+        "Tier": "Small-Cap (Nifty Smallcap 100)",
+        "Price": 100.0,
+        "Change": "▲ +5.25%",
+        "Volume Mult": "3.5x",
+        "RSI": 55.0,
+        "ADX": 28.0,
+        "Entry Range": "98.5 - 101.0",
+        "Est. Stop-Loss": 95.0,
+        "Est. Target (1:2)": 110.0,
+        "Est. Gain": "10.0%",
+        "Risk Flags": "HIGH CIRCUIT RISK",
+        "Signal Tier": signal_tier,
+        "Liquidity Quality": 72.0,
+        "Persistence Score": 3,
+        "Breakout Stage": 1,
+        "Base Score": 65.0,
+        "Composite Rank": 58.3,
+        "Pass Paths": "rsi_hot",
+        "Watch Reason": "v7_low_volume_persistence" if signal_tier == "WATCH" else "",
+        "Payload": "payload text",
+    }
+
+
+def test_build_report_markdown_includes_v7_columns():
+    import datetime
+    from breakout_scanner import _build_report_markdown
+
+    rows = [
+        _sample_candidate_row(signal_tier="PASS"),
+        _sample_candidate_row(signal_tier="WATCH") | {"Ticker": "XYZ", "Composite Rank": 40.0},
+    ]
+    md = _build_report_markdown(rows, datetime.date(2026, 6, 26))
+    assert "Signal Tier" in md
+    assert "Breakout Stage" in md
+    assert "Persistence" in md
+    assert "Liquidity Quality" not in md  # column header is "LQ"
+    assert "| LQ |" in md
+    assert "Pass Paths" in md
+    assert "🟢 PASS" in md
+    assert "🟡 WATCH" in md
+    assert "Stage 1 Fresh" in md
+    assert "**v7:**" in md
+    assert "**WATCH reason:** v7_low_volume_persistence" in md
+
+
+def test_build_breakout_email_body_pass_watch_sections():
+    import datetime
+    from breakout_scanner import _build_breakout_email_body
+
+    rows = [
+        _sample_candidate_row(signal_tier="PASS"),
+        _sample_candidate_row(signal_tier="WATCH") | {"Ticker": "XYZ"},
+    ]
+    body = _build_breakout_email_body(
+        scan_date=datetime.date(2026, 6, 26),
+        tickers_scanned=100,
+        all_results=rows,
+        report_markdown=None,
+    )
+    assert "Candidates: 2 total (1 PASS, 1 WATCH)" in body
+    assert "## PASS candidates (1)" in body
+    assert "## WATCH candidates (1)" in body
+    assert "## Top candidates (all tiers)" in body
+    assert "Stage | Persist" in body
+
+
+def test_format_change_arrow_direction_cues():
+    from breakout_scanner import _format_change_arrow
+
+    assert _format_change_arrow(3.2).startswith("▲")
+    assert _format_change_arrow(-1.5).startswith("▼")
+    assert _format_change_arrow(0.0).startswith("●")
+    assert "▲ +3.20%" == _format_change_arrow(3.2)
+
+
+@patch("email_notify.send_success_post_email")
+def test_run_breakout_scan_email_passes_html_body(mock_email, monkeypatch, tmp_path):
+    from breakout_scanner import FILTERS, run_breakout_scan
+
+    mock_email.return_value = True
+    monkeypatch.setattr("breakout_scanner.warm_yahoo_session", lambda: None)
+    monkeypatch.setattr(
+        "breakout_scanner.download_nse_tickers",
+        lambda url: ["PASS.NS"],
+    )
+
+    def _fake_evaluate(ticker, tier_name, emit=None):
+        return _sample_candidate_row(signal_tier="PASS") | {
+            "Ticker": ticker.replace(".NS", ""),
+            "Tier": FILTERS[tier_name]["type"],
+        }
+
+    monkeypatch.setattr("breakout_scanner.evaluate_and_audit_stock", _fake_evaluate)
+    output_dir = ROOT / "output" / "breakouts" / ".pytest_email_html"
+    run_breakout_scan(output_dir=output_dir, emit_to_stdout=False)
+
+    kwargs = mock_email.call_args[1]
+    assert "html_body" in kwargs
+    assert "PASS" in kwargs["html_body"]
+    assert "#34a853" in kwargs["html_body"]
+
+
+@patch("email_notify.send_success_post_email")
+def test_run_breakout_scan_sends_success_email_zero_candidates(mock_email, monkeypatch, tmp_path):
+    from breakout_scanner import run_breakout_scan
+
+    mock_email.return_value = True
+    monkeypatch.setattr("breakout_scanner.warm_yahoo_session", lambda: None)
+    monkeypatch.setattr("breakout_scanner.download_nse_tickers", lambda url: [])
+    output_dir = ROOT / "output" / "breakouts" / ".pytest_email"
+
+    result = run_breakout_scan(output_dir=output_dir, emit_to_stdout=False)
+
+    mock_email.assert_called_once()
+    body = mock_email.call_args[0][0]
+    kwargs = mock_email.call_args[1]
+    assert kwargs["subject_prefix"] == "Titan breakout scan"
+    assert "Tickers scanned: 0" in body
+    assert "No breakouts today" in body
+    assert result["email_sent"] is True
+    assert result["candidate_count"] == 0
+
+
+@patch("email_notify.send_success_post_email")
+def test_run_breakout_scan_email_includes_pass_watch_counts(mock_email, monkeypatch, tmp_path):
+    from breakout_scanner import FILTERS, run_breakout_scan
+
+    mock_email.return_value = True
+    monkeypatch.setattr("breakout_scanner.warm_yahoo_session", lambda: None)
+    monkeypatch.setattr(
+        "breakout_scanner.download_nse_tickers",
+        lambda url: ["PASS.NS"] if "smallcap" in url.lower() else ["WATCH.NS"],
+    )
+
+    def _fake_evaluate(ticker, tier_name, emit=None):
+        tier = FILTERS[tier_name]["type"]
+        signal_tier = "PASS" if ticker == "PASS.NS" else "WATCH"
+        return _sample_candidate_row(signal_tier=signal_tier) | {
+            "Ticker": ticker.replace(".NS", ""),
+            "Tier": tier,
+        }
+
+    monkeypatch.setattr("breakout_scanner.evaluate_and_audit_stock", _fake_evaluate)
+    output_dir = ROOT / "output" / "breakouts" / ".pytest_email_tiers"
+
+    result = run_breakout_scan(output_dir=output_dir, emit_to_stdout=False)
+
+    mock_email.assert_called_once()
+    body = mock_email.call_args[0][0]
+    assert "Candidates: 2 total (1 PASS, 1 WATCH)" in body
+    assert "## PASS candidates (1)" in body
+    assert "## WATCH candidates (1)" in body
+    assert "Consolidated Daily Breakout" in body
+    assert result["candidate_count"] == 2
+
+
+@patch("email_notify.send_failure_email")
+@patch("email_notify.send_success_post_email")
+def test_run_breakout_scan_sends_failure_email_on_error(mock_success, mock_failure, monkeypatch):
+    from breakout_scanner import run_breakout_scan
+
+    mock_failure.return_value = True
+    monkeypatch.setattr("breakout_scanner.warm_yahoo_session", lambda: None)
+    output_dir = ROOT / "output" / "breakouts" / ".pytest_email_fail"
+
+    def _boom(url):
+        raise RuntimeError("nse download failed")
+
+    monkeypatch.setattr("breakout_scanner.download_nse_tickers", _boom)
+
+    with pytest.raises(RuntimeError, match="nse download failed"):
+        run_breakout_scan(output_dir=output_dir, emit_to_stdout=False)
+
+    mock_success.assert_not_called()
+    mock_failure.assert_called_once()
+    assert "[Breakout scan]" in mock_failure.call_args[0][0]
+    assert mock_failure.call_args[1]["subject_prefix"] == "Titan breakout scan"
 
 
 @pytest.fixture

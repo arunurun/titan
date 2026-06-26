@@ -486,6 +486,7 @@ def send_success_post_email(
     *,
     subject_prefix: str = "Titan V12.0 audit",
     eod_as_of_date: str | None = None,
+    html_body: str | None = None,
 ) -> bool:
     """
     Send plain-text email with the narrative post (matches what we store in Supabase).
@@ -517,10 +518,10 @@ def send_success_post_email(
     msg["From"] = from_addr
     msg["To"] = ", ".join(to_list)
     msg.set_content(body, subtype="plain", charset="utf-8")
-    msg.add_alternative(
-        _render_success_html(post_text, subject=subject, footer_note=footer_note),
-        subtype="html",
+    html = html_body if html_body is not None else _render_success_html(
+        post_text, subject=subject, footer_note=footer_note,
     )
+    msg.add_alternative(html, subtype="html")
 
     if not _send_message(msg, cfg):
         return False

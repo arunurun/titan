@@ -5,9 +5,11 @@ from __future__ import annotations
 import csv
 import datetime
 import json
+import logging
 import os
 import random
 import time
+import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -29,6 +31,7 @@ except ImportError:
     )
 
 IST = ZoneInfo("Asia/Kolkata")
+logger = logging.getLogger(__name__)
 
 # Alternate-pass thresholds (see evaluate_bars_as_of)
 PCT_CHANGE_MIN = 3.0
@@ -62,6 +65,12 @@ STANDARD_ADX_TRAJECTORY_VOL_EXCEPTION = 7.0
 POWER_GAP_VOL_RECOVERY_THRESHOLD = 5.5
 SIGNAL_TIER_PASS = "PASS"
 SIGNAL_TIER_WATCH = "WATCH"
+
+_BREAKOUT_STAGE_LABELS: dict[int, str] = {
+    1: "Stage 1 Fresh",
+    2: "Stage 2 Young",
+    3: "Stage 3 Parabolic",
+}
 
 # URLs for official NSE index constituent lists
 INDEX_URLS = {
@@ -142,9 +151,25 @@ def _yahoo_pre_request_sleep():
     time.sleep(random.uniform(2.5, 3.0) + random.uniform(0.0, 1.5))
 
 
+# NSE symbols that were mangled (e.g. & stripped) before Yahoo fetch.
+_NSE_YAHOO_SYMBOL_ALIASES: dict[str, str] = {
+    "GMRPUI": "GMRP&UI",  # GMR Power and Urban Infra (Nifty Microcap 250)
+}
+
+
 def _normalize_nse_symbol(symbol):
     """Keep NSE symbol as-is; decode %26 to & only if CSV has URL-encoded form."""
-    return symbol.replace("%26", "&")
+    decoded = symbol.replace("%26", "&")
+    return _NSE_YAHOO_SYMBOL_ALIASES.get(decoded, decoded)
+
+
+def _resolve_yahoo_ticker(ticker: str) -> str:
+    """Apply NSE symbol normalization to a Yahoo ticker (SYMBOL.NS)."""
+    if not ticker.endswith(".NS"):
+        return ticker
+    sym = ticker[:-3]
+    fixed = _normalize_nse_symbol(sym)
+    return f"{fixed}.NS" if fixed != sym else ticker
 
 
 def _is_nse_dummy_symbol(symbol):
@@ -225,6 +250,7 @@ def _yahoo_http_error_msg(e):
 
 def fetch_yahoo_data(ticker):
     """Fetches ~1 year of daily historical stock data from Yahoo Finance API."""
+    ticker = _resolve_yahoo_ticker(ticker)
     cache_path = _yahoo_cache_path(ticker)
     if os.path.isfile(cache_path):
         try:
@@ -1151,11 +1177,14 @@ Volume Profile (30-day Visible Range):
 * Point of Control (POC): {round(poc, 2)}
 """
 
+    pass_paths = eval_result.get("pass_paths") or []
+    watch_reason = _derive_watch_reason(eval_result)
+
     return {
         "Ticker": ticker.replace(".NS", ""),
         "Tier": filt["type"],
         "Price": round(latest_price, 2),
-        "Change": f"+{round(pct_change, 2)}%",
+        "Change": _format_change_arrow(pct_change),
         "Volume Mult": f"{round(vol_mult, 2)}x",
         "RSI": rsi_val,
         "ADX": adx_val,
@@ -1170,13 +1199,110 @@ Volume Profile (30-day Visible Range):
         "Breakout Stage": eval_result.get("breakout_stage"),
         "Base Score": eval_result.get("base_score"),
         "Composite Rank": eval_result.get("composite_rank"),
+        "Pass Paths": ", ".join(pass_paths) if pass_paths else "",
+        "Watch Reason": watch_reason or "",
         "Payload": payload
     }
 
 
+_BREAKOUT_STAGE_LABELS: dict[int, str] = {
+    1: "Stage 1 Fresh",
+    2: "Stage 2 Young",
+    3: "Stage 3 Parabolic",
+}
+
+
+def _format_change_arrow(pct_change: float | str) -> str:
+    """Format daily change with unicode direction cue (▲ up, ▼ down, ● flat)."""
+    if isinstance(pct_change, str):
+        raw = pct_change.lstrip("▲▼● ").lstrip("+").rstrip("%").strip()
+        try:
+            value = float(raw)
+        except ValueError:
+            return pct_change
+    else:
+        value = float(pct_change)
+    arrow = "▲" if value > 0 else ("▼" if value < 0 else "●")
+    sign = "+" if value > 0 else ""
+    return f"{arrow} {sign}{value:.2f}%"
+
+
+def _format_breakout_stage(stage: int | None) -> str:
+    if stage is None:
+        return "—"
+    label = _BREAKOUT_STAGE_LABELS.get(int(stage), f"Stage {stage}")
+    return f"{int(stage)} — {label}"
+
+
+def _format_signal_tier_badge(tier: str | None) -> str:
+    if tier == SIGNAL_TIER_PASS:
+        return "🟢 PASS"
+    if tier == SIGNAL_TIER_WATCH:
+        return "🟡 WATCH"
+    return tier or "—"
+
+
+def _derive_watch_reason(eval_result: dict[str, Any]) -> str | None:
+    reason = eval_result.get("v7_watch_reason")
+    if reason:
+        return str(reason)
+    if eval_result.get("adx_soft_solo_watch"):
+        return "v6_adx_soft_solo"
+    if (
+        eval_result.get("signal_tier") == SIGNAL_TIER_WATCH
+        and "power_gap" in (eval_result.get("pass_paths") or [])
+    ):
+        pg = eval_result.get("power_gap_confirmation") or {}
+        if pg.get("power_gap_confirmation_required") and not pg.get("confirmed"):
+            return "v6_power_gap_unconfirmed"
+    return None
+
+
+def _format_v7_summary_line(row: dict[str, Any]) -> str:
+    tier = row.get("Signal Tier") or "—"
+    stage = _format_breakout_stage(row.get("Breakout Stage"))
+    persist = row.get("Persistence Score")
+    persist_s = f"{persist}/4" if persist is not None else "—"
+    lq = row.get("Liquidity Quality")
+    lq_s = f"{lq:.1f}" if isinstance(lq, (int, float)) else (str(lq) if lq is not None else "—")
+    rank = row.get("Composite Rank")
+    rank_s = f"{rank:.1f}" if isinstance(rank, (int, float)) else (str(rank) if rank is not None else "—")
+    paths = row.get("Pass Paths") or ""
+    parts = [
+        f"Signal {_format_signal_tier_badge(tier)}",
+        stage,
+        f"Persistence {persist_s}",
+        f"LQ {lq_s}",
+        f"Rank {rank_s}",
+    ]
+    if paths:
+        parts.append(f"Paths: {paths}")
+    return " · ".join(parts)
+
+
+def _display_num(value: Any, *, decimals: int = 1) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, (int, float)):
+        return f"{float(value):.{decimals}f}"
+    return str(value)
+
+
+def _sort_report_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """PASS first, then WATCH, each group by composite rank descending."""
+
+    def _key(row: dict[str, Any]) -> tuple[int, float]:
+        tier_rank = 0 if row.get("Signal Tier") == SIGNAL_TIER_PASS else 1
+        composite = row.get("Composite Rank")
+        rank_val = float(composite) if isinstance(composite, (int, float)) else 0.0
+        return (tier_rank, -rank_val)
+
+    return sorted(rows, key=_key)
+
+
 def serialize_candidate(row: dict[str, Any]) -> dict[str, Any]:
     """Normalize a scanner row for JSON API responses."""
-    change_raw = str(row.get("Change", "")).lstrip("+").rstrip("%")
+    change_raw = str(row.get("Change", "")).lstrip("▲▼● ").lstrip("+").rstrip("%").strip()
     vol_raw = str(row.get("Volume Mult", "")).rstrip("x")
     gain_raw = str(row.get("Est. Gain", "")).rstrip("%")
     return {
@@ -1201,6 +1327,8 @@ def serialize_candidate(row: dict[str, Any]) -> dict[str, Any]:
         "breakout_stage": row.get("Breakout Stage"),
         "base_score": row.get("Base Score"),
         "composite_rank": row.get("Composite Rank"),
+        "pass_paths": row.get("Pass Paths") or None,
+        "watch_reason": row.get("Watch Reason") or None,
         "payload": row["Payload"],
     }
 
@@ -1232,20 +1360,34 @@ This is typical during consolidative, bearish, or highly volatile market days.
             tables_md += "No stocks met the criteria in this tier today.\n"
             continue
 
+        sorted_rows = _sort_report_candidates(rows)
         tables_md += (
-            "| Ticker | Price | Change | Volume Mult | RSI | ADX | Est. Entry | Est. Stop-Loss | "
-            "Est. Target | Est. Gain | Risk Flags |\n"
+            "| Ticker | Signal Tier | Breakout Stage | Persistence | LQ | Base | Rank | "
+            "Price | Change | Vol | RSI | ADX | Entry | Stop | Target | Gain | Pass Paths | Risk Flags |\n"
         )
-        tables_md += "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n"
+        tables_md += (
+            "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | "
+            ":--- | :--- | :--- | :--- | :--- | :--- |\n"
+        )
 
-        for r in rows:
+        for r in sorted_rows:
             tables_md += (
-                f"| {r['Ticker']} | {r['Price']} | {r['Change']} | {r['Volume Mult']} | "
+                f"| {r['Ticker']} | {_format_signal_tier_badge(r.get('Signal Tier'))} | "
+                f"{_format_breakout_stage(r.get('Breakout Stage'))} | "
+                f"{r.get('Persistence Score', '—')}/4 | "
+                f"{_display_num(r.get('Liquidity Quality'))} | "
+                f"{_display_num(r.get('Base Score'))} | "
+                f"{_display_num(r.get('Composite Rank'))} | "
+                f"{r['Price']} | {r['Change']} | {r['Volume Mult']} | "
                 f"{r['RSI']} | {r['ADX']} | {r['Entry Range']} | {r['Est. Stop-Loss']} | "
-                f"{r['Est. Target (1:2)']} | {r['Est. Gain']} | {r['Risk Flags']} |\n"
+                f"{r['Est. Target (1:2)']} | {r['Est. Gain']} | "
+                f"{r.get('Pass Paths') or '—'} | {r['Risk Flags']} |\n"
             )
-            detailed_payloads_md += f"### {r['Ticker']} Technical Grounding Data\n"
-            detailed_payloads_md += "```markdown\n"
+            detailed_payloads_md += f"### {r['Ticker']}\n"
+            detailed_payloads_md += f"**v7:** {_format_v7_summary_line(r)}\n"
+            if r.get("Watch Reason"):
+                detailed_payloads_md += f"**WATCH reason:** {r['Watch Reason']}\n"
+            detailed_payloads_md += "\n```markdown\n"
             detailed_payloads_md += r["Payload"]
             detailed_payloads_md += "```\n\n"
 
@@ -1265,6 +1407,236 @@ Copy the technical grounding data block for your ticker of interest from the sec
 ## Compliance Disclaimer
 This analysis is for educational and informational purposes only. It does not constitute registered investment advice or a personal recommendation. Indian stock market investing involves high risk. Please consult a SEBI-registered financial advisor before making any investment decisions.
 """
+
+
+def _format_top_candidates_table(rows: list[dict[str, Any]], *, limit: int = 15) -> str:
+    if not rows:
+        return ""
+    lines = [
+        "| Ticker | Tier | Price | Change | Vol | Signal Tier | Stage | Persist | Rank |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for row in _sort_report_candidates(rows)[:limit]:
+        persist = row.get("Persistence Score")
+        persist_s = f"{persist}/4" if persist is not None else "—"
+        lines.append(
+            f"| {row['Ticker']} | {row['Tier']} | {row['Price']} | {row['Change']} | "
+            f"{row['Volume Mult']} | {_format_signal_tier_badge(row.get('Signal Tier'))} | "
+            f"{_format_breakout_stage(row.get('Breakout Stage'))} | {persist_s} | "
+            f"{_display_num(row.get('Composite Rank'))} |"
+        )
+    return "\n".join(lines)
+
+
+def _format_tier_summary_table(rows: list[dict[str, Any]], *, limit: int = 10) -> str:
+    if not rows:
+        return "_None in this tier._"
+    return _format_top_candidates_table(rows, limit=limit)
+
+
+def _build_breakout_email_html(
+    *,
+    scan_date: datetime.date,
+    tickers_scanned: int,
+    all_results: list[dict[str, Any]],
+) -> str:
+    from html import escape
+
+    pass_rows = [r for r in all_results if r.get("Signal Tier") == SIGNAL_TIER_PASS]
+    watch_rows = [r for r in all_results if r.get("Signal Tier") == SIGNAL_TIER_WATCH]
+    sorted_all = _sort_report_candidates(all_results)
+
+    def _tier_badge(tier: str | None) -> str:
+        if tier == SIGNAL_TIER_PASS:
+            return (
+                '<span style="display:inline-block;padding:2px 8px;border-radius:999px;'
+                'background:#34a853;color:#fff;font-weight:700;font-size:11px;">PASS</span>'
+            )
+        if tier == SIGNAL_TIER_WATCH:
+            return (
+                '<span style="display:inline-block;padding:2px 8px;border-radius:999px;'
+                'background:#f9ab00;color:#fff;font-weight:700;font-size:11px;">WATCH</span>'
+            )
+        return escape(tier or "—")
+
+    def _stage_badge(stage: int | None) -> str:
+        colors = {1: "#34a853", 2: "#4285f4", 3: "#ea4335"}
+        if stage is None:
+            return "—"
+        color = colors.get(int(stage), "#5f6368")
+        label = _BREAKOUT_STAGE_LABELS.get(int(stage), f"Stage {stage}")
+        return (
+            f'<span style="color:{color};font-weight:700;font-size:11px;">'
+            f"S{int(stage)} {escape(label.split(' ', 1)[-1])}</span>"
+        )
+
+    def _change_cell(change: str) -> str:
+        text = str(change)
+        color = "#34a853" if "▲" in text else ("#ea4335" if "▼" in text else "#5f6368")
+        return f'<span style="color:{color};font-weight:600;">{escape(text)}</span>'
+
+    def _candidate_table(rows: list[dict[str, Any]], *, limit: int = 10) -> str:
+        if not rows:
+            return '<p style="margin:0;color:#5f6368;font-size:12px;">None.</p>'
+        thead = (
+            "<tr>"
+            '<th style="text-align:left;padding:6px 8px;border-bottom:2px solid #ddd;font-size:11px;">Ticker</th>'
+            '<th style="text-align:left;padding:6px 8px;border-bottom:2px solid #ddd;font-size:11px;">Tier</th>'
+            '<th style="text-align:left;padding:6px 8px;border-bottom:2px solid #ddd;font-size:11px;">Signal</th>'
+            '<th style="text-align:left;padding:6px 8px;border-bottom:2px solid #ddd;font-size:11px;">Stage</th>'
+            '<th style="text-align:left;padding:6px 8px;border-bottom:2px solid #ddd;font-size:11px;">Persist</th>'
+            '<th style="text-align:right;padding:6px 8px;border-bottom:2px solid #ddd;font-size:11px;">Rank</th>'
+            '<th style="text-align:right;padding:6px 8px;border-bottom:2px solid #ddd;font-size:11px;">Price</th>'
+            '<th style="text-align:right;padding:6px 8px;border-bottom:2px solid #ddd;font-size:11px;">Change</th>'
+            "</tr>"
+        )
+        body_rows = []
+        for row in _sort_report_candidates(rows)[:limit]:
+            persist = row.get("Persistence Score")
+            persist_s = f"{persist}/4" if persist is not None else "—"
+            body_rows.append(
+                "<tr>"
+                f'<td style="padding:6px 8px;border-bottom:1px solid #eee;font-weight:600;">{escape(row["Ticker"])}</td>'
+                f'<td style="padding:6px 8px;border-bottom:1px solid #eee;font-size:11px;">{escape(row["Tier"])}</td>'
+                f'<td style="padding:6px 8px;border-bottom:1px solid #eee;">{_tier_badge(row.get("Signal Tier"))}</td>'
+                f'<td style="padding:6px 8px;border-bottom:1px solid #eee;">{_stage_badge(row.get("Breakout Stage"))}</td>'
+                f'<td style="padding:6px 8px;border-bottom:1px solid #eee;">{escape(persist_s)}</td>'
+                f'<td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right;">{escape(_display_num(row.get("Composite Rank")))}</td>'
+                f'<td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right;">{row["Price"]}</td>'
+                f'<td style="padding:6px 8px;border-bottom:1px solid #eee;text-align:right;">{_change_cell(row["Change"])}</td>'
+                "</tr>"
+            )
+        return (
+            '<table style="width:100%;border-collapse:collapse;margin:0 0 12px;">'
+            f"<thead>{thead}</thead><tbody>{''.join(body_rows)}</tbody></table>"
+        )
+
+    summary = (
+        f"<p style=\"margin:0 0 8px;\"><strong>Tickers scanned:</strong> {tickers_scanned}</p>"
+        f"<p style=\"margin:0 0 12px;\"><strong>Candidates:</strong> {len(all_results)} total "
+        f"({len(pass_rows)} PASS, {len(watch_rows)} WATCH)</p>"
+    )
+    pass_section = (
+        '<div style="margin:0 0 16px;">'
+        f'<h3 style="margin:0 0 8px;color:#34a853;font-size:14px;">PASS ({len(pass_rows)})</h3>'
+        f"{_candidate_table(pass_rows)}</div>"
+    )
+    watch_section = (
+        '<div style="margin:0 0 16px;">'
+        f'<h3 style="margin:0 0 8px;color:#f9ab00;font-size:14px;">WATCH ({len(watch_rows)})</h3>'
+        f"{_candidate_table(watch_rows)}</div>"
+    )
+    top_section = ""
+    if sorted_all:
+        top_section = (
+            '<div style="margin:0 0 16px;">'
+            '<h3 style="margin:0 0 8px;color:#4285f4;font-size:14px;">Top candidates (all tiers)</h3>'
+            f"{_candidate_table(sorted_all, limit=15)}</div>"
+        )
+
+    return (
+        "<html><body style=\"margin:0;padding:16px;background:#f8f9fa;color:#202124;"
+        "font-family:Arial,sans-serif;\">"
+        f'<h2 style="margin:0 0 6px;">Titan breakout scan — {escape(scan_date.isoformat())}</h2>'
+        f"{summary}{pass_section}{watch_section}{top_section}"
+        '<p style="color:#5f6368;font-size:12px;margin-top:12px;">Full report in plain-text part. '
+        "Generated by Titan V12.0</p>"
+        "</body></html>"
+    )
+
+
+def _build_breakout_email_body(
+    *,
+    scan_date: datetime.date,
+    tickers_scanned: int,
+    all_results: list[dict[str, Any]],
+    report_markdown: str | None,
+) -> str:
+    pass_count = sum(1 for row in all_results if row.get("Signal Tier") == SIGNAL_TIER_PASS)
+    watch_count = sum(1 for row in all_results if row.get("Signal Tier") == SIGNAL_TIER_WATCH)
+    candidate_count = len(all_results)
+    has_signal_tier = any("Signal Tier" in row for row in all_results)
+
+    lines = [
+        f"Titan breakout scan — {scan_date.isoformat()}",
+        "",
+        f"Tickers scanned: {tickers_scanned}",
+    ]
+    if has_signal_tier:
+        lines.append(
+            f"Candidates: {candidate_count} total ({pass_count} PASS, {watch_count} WATCH)"
+        )
+    else:
+        lines.append(f"Candidates: {candidate_count}")
+
+    if candidate_count == 0:
+        lines.extend(["", "No breakouts today."])
+    else:
+        pass_rows = [r for r in all_results if r.get("Signal Tier") == SIGNAL_TIER_PASS]
+        watch_rows = [r for r in all_results if r.get("Signal Tier") == SIGNAL_TIER_WATCH]
+        if pass_rows:
+            lines.extend(["", f"## PASS candidates ({len(pass_rows)})", ""])
+            lines.append(_format_tier_summary_table(pass_rows))
+        if watch_rows:
+            lines.extend(["", f"## WATCH candidates ({len(watch_rows)})", ""])
+            lines.append(_format_tier_summary_table(watch_rows))
+        lines.extend(["", "## Top candidates (all tiers)", ""])
+        lines.append(_format_top_candidates_table(all_results))
+        if report_markdown:
+            lines.extend(["", report_markdown])
+
+    return "\n".join(lines).strip()
+
+
+def _send_breakout_success_email(
+    *,
+    scan_date: datetime.date,
+    tickers_scanned: int,
+    all_results: list[dict[str, Any]],
+    report_markdown: str | None,
+) -> bool:
+    from email_notify import send_success_post_email
+
+    body = _build_breakout_email_body(
+        scan_date=scan_date,
+        tickers_scanned=tickers_scanned,
+        all_results=all_results,
+        report_markdown=report_markdown,
+    )
+    html_body = _build_breakout_email_html(
+        scan_date=scan_date,
+        tickers_scanned=tickers_scanned,
+        all_results=all_results,
+    )
+    emailed_ok = send_success_post_email(
+        body,
+        subject_prefix="Titan breakout scan",
+        eod_as_of_date=scan_date.isoformat(),
+        html_body=html_body,
+    )
+    if emailed_ok:
+        logger.info("Breakout scan success email sent.")
+    else:
+        logger.info("Breakout scan success email skipped (SMTP not configured).")
+    return emailed_ok
+
+
+def _send_breakout_failure_email(exc: BaseException) -> bool:
+    from email_notify import send_failure_email
+
+    summary = str(exc).strip().split("\n", 1)[0].strip()
+    if len(summary) > 180:
+        summary = summary[:177] + "..."
+    emailed_ok = send_failure_email(
+        f"[Breakout scan] {summary}",
+        detail=traceback.format_exc(),
+        subject_prefix="Titan breakout scan",
+    )
+    if emailed_ok:
+        logger.info("Breakout scan failure email sent.")
+    else:
+        logger.info("Breakout scan failure email skipped (SMTP not configured).")
+    return emailed_ok
 
 
 def run_breakout_scan(
@@ -1298,87 +1670,103 @@ def run_breakout_scan(
 
     all_results: list[dict[str, Any]] = []
     tier_ticker_counts: dict[str, int] = {}
+    scan_ticker_count = 0
 
-    with log_path.open("w", encoding="utf-8") as log_file:
+    try:
+        with log_path.open("w", encoding="utf-8") as log_file:
 
-        def emit_and_log(line: str) -> None:
-            emit_line(line)
-            log_file.write(line + "\n")
-            log_file.flush()
+            def emit_and_log(line: str) -> None:
+                emit_line(line)
+                log_file.write(line + "\n")
+                log_file.flush()
 
-        emit_and_log(f"=== Breakout scanner run {started_at.isoformat()} ===")
-        warm_yahoo_session()
-        emit_and_log("Yahoo session warm-up complete.")
-        scan_ticker_count = 0
+            emit_and_log(f"=== Breakout scanner run {started_at.isoformat()} ===")
+            warm_yahoo_session()
+            emit_and_log("Yahoo session warm-up complete.")
 
-        for tier_key, url in INDEX_URLS.items():
-            tier_label = FILTERS[tier_key]["type"]
-            if emit_to_stdout:
-                print(f"Downloading constituent list for {tier_label} ...")
-            tickers = download_nse_tickers(url)
-            tier_ticker_counts[tier_label] = len(tickers)
-            if not tickers:
+            for tier_key, url in INDEX_URLS.items():
+                tier_label = FILTERS[tier_key]["type"]
                 if emit_to_stdout:
-                    print(f" Warning: No tickers found for {tier_key}. Skipping.")
-                continue
+                    print(f"Downloading constituent list for {tier_label} ...")
+                tickers = download_nse_tickers(url)
+                tier_ticker_counts[tier_label] = len(tickers)
+                if not tickers:
+                    if emit_to_stdout:
+                        print(f" Warning: No tickers found for {tier_key}. Skipping.")
+                    continue
 
-            total = len(tickers)
+                total = len(tickers)
+                if emit_to_stdout:
+                    print(f" Found {total} tickers. Scanning & Auditing technicals...")
+
+                for ticker in tickers:
+                    res = evaluate_and_audit_stock(ticker, tier_key, emit=emit_and_log)
+                    if res:
+                        all_results.append(res)
+                    scan_ticker_count += 1
+                    if scan_ticker_count % 50 == 0:
+                        msg = f"Chunk cool-down: {scan_ticker_count} tickers scanned, sleeping 120s..."
+                        emit_and_log(msg)
+                        time.sleep(120)
+                if emit_to_stdout:
+                    print("\n Scan & Audit complete for this tier.\n")
+
+        report_markdown = _build_report_markdown(all_results, scan_date)
+        if write_report:
+            report_path.write_text(report_markdown, encoding="utf-8")
             if emit_to_stdout:
-                print(f" Found {total} tickers. Scanning & Auditing technicals...")
+                if all_results:
+                    print("\n Consolidated Daily Breakout & Audit report saved successfully!")
+                    print(f" File Link: daily_breakout_report_v2.md (file://{report_path})")
+                else:
+                    print(" No breakout setups found today. Empty report generated.")
+                print(f" Diagnostic log: {log_path}")
 
-            for ticker in tickers:
-                res = evaluate_and_audit_stock(ticker, tier_key, emit=emit_and_log)
-                if res:
-                    all_results.append(res)
-                scan_ticker_count += 1
-                if scan_ticker_count % 50 == 0:
-                    msg = f"Chunk cool-down: {scan_ticker_count} tickers scanned, sleeping 120s..."
-                    emit_and_log(msg)
-                    time.sleep(120)
-            if emit_to_stdout:
-                print("\n Scan & Audit complete for this tier.\n")
+        finished_at = datetime.datetime.now()
+        tier_candidate_counts = {
+            "Small-Cap (Nifty Smallcap 100)": 0,
+            "Micro-Cap (Nifty Microcap 250)": 0,
+        }
+        all_results.sort(
+            key=lambda r: (r.get("Composite Rank") is None, -(r.get("Composite Rank") or 0)),
+        )
+        for row in all_results:
+            tier_candidate_counts[row["Tier"]] = tier_candidate_counts.get(row["Tier"], 0) + 1
 
-    report_markdown = _build_report_markdown(all_results, scan_date)
-    if write_report:
-        report_path.write_text(report_markdown, encoding="utf-8")
-        if emit_to_stdout:
-            if all_results:
-                print("\n Consolidated Daily Breakout & Audit report saved successfully!")
-                print(f" File Link: daily_breakout_report_v2.md (file://{report_path})")
-            else:
-                print(" No breakout setups found today. Empty report generated.")
-            print(f" Diagnostic log: {log_path}")
+        email_report_markdown = report_markdown if write_report else None
+        emailed_ok = _send_breakout_success_email(
+            scan_date=scan_date,
+            tickers_scanned=scan_ticker_count,
+            all_results=all_results,
+            report_markdown=email_report_markdown,
+        )
 
-    finished_at = datetime.datetime.now()
-    tier_candidate_counts = {
-        "Small-Cap (Nifty Smallcap 100)": 0,
-        "Micro-Cap (Nifty Microcap 250)": 0,
-    }
-    all_results.sort(
-        key=lambda r: (r.get("Composite Rank") is None, -(r.get("Composite Rank") or 0)),
-    )
-    for row in all_results:
-        tier_candidate_counts[row["Tier"]] = tier_candidate_counts.get(row["Tier"], 0) + 1
-
-    return {
-        "ok": True,
-        "scan_date": scan_date.isoformat(),
-        "started_at": started_at.isoformat(),
-        "finished_at": finished_at.isoformat(),
-        "duration_sec": round((finished_at - started_at).total_seconds(), 2),
-        "tickers_scanned": scan_ticker_count,
-        "tier_ticker_counts": tier_ticker_counts,
-        "candidate_count": len(all_results),
-        "tier_candidate_counts": tier_candidate_counts,
-        "candidates": [serialize_candidate(row) for row in all_results],
-        "report_path": str(report_path.relative_to(_repo_root())).replace("\\", "/"),
-        "log_path": str(log_path.relative_to(_repo_root())).replace("\\", "/"),
-        "report_markdown": report_markdown if write_report else None,
-    }
+        return {
+            "ok": True,
+            "scan_date": scan_date.isoformat(),
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "duration_sec": round((finished_at - started_at).total_seconds(), 2),
+            "tickers_scanned": scan_ticker_count,
+            "tier_ticker_counts": tier_ticker_counts,
+            "candidate_count": len(all_results),
+            "tier_candidate_counts": tier_candidate_counts,
+            "candidates": [serialize_candidate(row) for row in all_results],
+            "report_path": str(report_path.relative_to(_repo_root())).replace("\\", "/"),
+            "log_path": str(log_path.relative_to(_repo_root())).replace("\\", "/"),
+            "report_markdown": email_report_markdown,
+            "email_sent": emailed_ok,
+        }
+    except Exception as exc:
+        _send_breakout_failure_email(exc)
+        raise
 
 
 def main() -> None:
-    run_breakout_scan()
+    try:
+        run_breakout_scan()
+    except Exception:
+        raise
 
 
 if __name__ == "__main__":
