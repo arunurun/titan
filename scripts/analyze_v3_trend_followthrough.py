@@ -30,6 +30,8 @@ from analyze_t15_pre_signal_patterns import (  # noqa: E402
 
 OUT_DIR = ROOT / "output" / "breakoutcheck"
 V5_FIX_CHECKLIST = OUT_DIR / "v5_fix_checklist.md"
+V6_FIX_CHECKLIST = OUT_DIR / "v6_fix_checklist.md"
+V7_FIX_CHECKLIST = OUT_DIR / "v7_fix_checklist.md"
 DEFAULT_UNIVERSE = OUT_DIR / "universe_40.json"
 FORWARD_DAYS = 20
 CLASSIFY_HORIZON = 15
@@ -50,6 +52,26 @@ V4_BASELINE = {
     "no_follow_through_rate": 35.0,
     "mixed_count": 5,
     "label": "v4 post-fix (100-stock 6m cohort)",
+}
+V5_BASELINE = {
+    "total_pass_signals": 18,
+    "total_watch_signals": 1,
+    "follow_through_count": 7,
+    "follow_through_rate": 38.89,
+    "no_follow_through_count": 6,
+    "no_follow_through_rate": 33.33,
+    "mixed_count": 5,
+    "label": "v5 post-fix (100-stock 6m cohort)",
+}
+V6_BASELINE = {
+    "total_pass_signals": 14,
+    "total_watch_signals": 3,
+    "follow_through_count": 8,
+    "follow_through_rate": 57.14,
+    "no_follow_through_count": 2,
+    "no_follow_through_rate": 14.29,
+    "mixed_count": 4,
+    "label": "v6 post-fix (100-stock 6m cohort)",
 }
 
 
@@ -351,52 +373,115 @@ def _v5_implemented_filters() -> list[dict[str, str]]:
     """Filters shipped in v5 — mirrors output/breakoutcheck/v5_fix_checklist.md."""
     return [
         {
-            "area": "ADX trajectory gate",
+            "checklist_ref": "Fix 1",
             "description": (
-                "When `adx_soft` or `rsi_hot` in pass_paths: require ADX(T-1) > ADX(T-10). "
-                "Fail reason: `pre_filter_adx_trajectory`."
+                "ADX trajectory gate (T-1 vs T-10) for `adx_soft` / `rsi_hot`; "
+                "fail reason `pre_filter_adx_trajectory`"
             ),
-            "code": "src/breakout_scanner.py `_adx_trajectory_gate`",
         },
         {
-            "area": "ADX short slope (adx_soft)",
+            "checklist_ref": "Fix 1b",
             "description": (
-                "When `adx_soft` in pass_paths: require ADX(T-1) > ADX(T-5) "
-                "(PRE_SIGNAL_ADX_SOFT_SHORT_LOOKBACK = 5)."
+                "ADX short slope for `adx_soft`: ADX(T-1) > ADX(T-5) "
+                "(PRE_SIGNAL_ADX_SOFT_SHORT_LOOKBACK = 5)"
             ),
-            "code": "src/breakout_scanner.py `_adx_trajectory_gate`",
         },
         {
-            "area": "adx_soft elevated volume",
+            "checklist_ref": "Fix 2a",
             "description": (
-                "`adx_soft` path only when vol_mult ≥ tier threshold + 0.5 "
-                "(ADX_SOFT_VOL_BONUS)."
+                "`adx_soft` elevated volume: vol_mult ≥ tier + 0.5 (ADX_SOFT_VOL_BONUS)"
             ),
-            "code": "src/breakout_scanner.py `evaluate_bars_as_of`",
         },
         {
-            "area": "adx_soft chase block",
+            "checklist_ref": "Fix 2b",
             "description": (
-                "Block `adx_soft` when pre-trend cum_ret_t10_t1 > 20%. "
-                "Fail reason: `pre_filter_adx_soft_chase`."
+                "`adx_soft` chase block when cum_ret_t10_t1 > 20%; "
+                "fail reason `pre_filter_adx_soft_chase`"
             ),
-            "code": "src/breakout_scanner.py `_adx_soft_chase_gate`",
         },
         {
-            "area": "power_gap confirmation",
+            "checklist_ref": "Fix 3",
             "description": (
-                "PASS when ADX(T-1) > ADX(T-10) OR cum_ret_t10_t1 ≤ 15%; "
-                "otherwise downgrade to WATCH (1% sizing cap messaging)."
+                "`power_gap` confirmation: PASS when ADX rising OR cum_ret_t10_t1 ≤ 15%; "
+                "else WATCH with 1% sizing cap"
             ),
-            "code": "src/breakout_scanner.py `_power_gap_confirmation_gate`",
         },
         {
-            "area": "signal cooldown",
+            "checklist_ref": "Cooldown",
             "description": (
-                "Block repeat PASS within 20 sessions unless tight-consolidation exempt. "
-                "Fail reason: `pre_filter_signal_cooldown`."
+                "Repeat PASS blocked within 20 sessions unless consolidation exempt; "
+                "fail reason `pre_filter_signal_cooldown`"
             ),
-            "code": "src/breakout_scanner.py `_signal_cooldown_gate`",
+        },
+        {
+            "checklist_ref": "Pre-signal validation",
+            "description": (
+                "Cumulative return T-10→T-1 > 30% and volume spike days > 2 gates "
+                "(baseline, unchanged in v5)"
+            ),
+        },
+    ]
+
+
+def _v7_implemented_filters() -> list[dict[str, str]]:
+    """Filters shipped in v7 — mirrors output/breakoutcheck/v7_fix_checklist.md."""
+    return [
+        {
+            "checklist_ref": "V7-A",
+            "description": (
+                "Liquidity hard gate: small-cap median turnover ≥ ₹2cr, micro-cap ≥ ₹3cr "
+                "(bhav turnover or median notional proxy); fail `pre_filter_liquidity`"
+            ),
+        },
+        {
+            "checklist_ref": "V7-B",
+            "description": (
+                "Volume persistence: micro PASS requires score ≥ 2, small PASS requires ≥ 1; "
+                "else WATCH (`v7_low_volume_persistence`)"
+            ),
+        },
+        {
+            "checklist_ref": "V7-C",
+            "description": (
+                "Breakout stage 3 (parabolic, stretch > 4 ATR) → WATCH only "
+                "(`v7_breakout_stage_3`); stage 1 preferred via ranking"
+            ),
+        },
+        {
+            "checklist_ref": "V7-D",
+            "description": (
+                "Base quality score in candidate metrics; composite rank weights: "
+                "Breakout 25%, Sector 20%, Base 15%, Persistence 15%, "
+                "Acceleration 10%, RS 10%, Risk 5%"
+            ),
+        },
+    ]
+
+
+def _v6_implemented_filters() -> list[dict[str, str]]:
+    """Filters shipped in v6 — mirrors output/breakoutcheck/v6_fix_checklist.md."""
+    return [
+        {
+            "checklist_ref": "V6-A",
+            "description": (
+                "Solo `adx_soft` only (`pass_paths == ['adx_soft']`) → WATCH with 1% sizing; "
+                "`passed=False` but emitted as WATCH candidate"
+            ),
+        },
+        {
+            "checklist_ref": "V6-B",
+            "description": (
+                "Standard path ADX trajectory: require ADX(T-1) > ADX(T-10) unless "
+                f"vol_mult >= {7.0} (STANDARD_ADX_TRAJECTORY_VOL_EXCEPTION); "
+                "fail reason `pre_filter_standard_adx_trajectory`"
+            ),
+        },
+        {
+            "checklist_ref": "V6-C",
+            "description": (
+                "power_gap vol recovery: unconfirmed gap may PASS when "
+                f"vol_mult >= {5.5} (POWER_GAP_VOL_RECOVERY_THRESHOLD)"
+            ),
         },
     ]
 
@@ -452,22 +537,42 @@ def build_markdown(report: dict[str, Any]) -> str:
         ])
     multi = report.get("multi_baseline_comparison") or {}
     if multi:
+        version_cols = ["v3", "v4", "v5"]
+        if "v6" in multi:
+            version_cols.append("v6")
+        if "v7" in multi:
+            version_cols.append("v7")
+        header = " | ".join(version_cols)
+        sep = " | ".join(["---:"] * len(version_cols))
         lines.extend([
             "---",
             "",
-            "## Version Comparison (v3 → v4 → v5)",
+            f"## Version Comparison (v3 → v4 → v5"
+            + (" → v6" if "v6" in multi else "")
+            + (" → v7" if "v7" in multi else "")
+            + ")",
             "",
-            "| Metric | v3 baseline | v4 | v5 |",
-            "| :--- | ---: | ---: | ---: |",
-            f"| PASS signals | {multi['v3']['total_pass_signals']} | "
-            f"{multi['v4']['total_pass_signals']} | {multi['v5']['total_pass_signals']} |",
-            f"| Follow-through | {multi['v3']['follow_through_count']} "
-            f"({multi['v3']['follow_through_rate']}%) | "
-            f"{multi['v4']['follow_through_count']} ({multi['v4']['follow_through_rate']}%) | "
-            f"{multi['v5']['follow_through_count']} ({multi['v5']['follow_through_rate']}%) |",
-            f"| WATCH signals | — | — | {multi['v5'].get('total_watch_signals', 0)} |",
-            "",
+            f"| Metric | {header} |",
+            f"| :--- | {sep} |",
         ])
+        pass_row = " | ".join(
+            str(multi[v].get("total_pass_signals", "—")) for v in version_cols
+        )
+        lines.append(f"| PASS signals | {pass_row} |")
+        ft_parts = []
+        for v in version_cols:
+            m = multi[v]
+            ft_parts.append(
+                f"{m['follow_through_count']} ({m['follow_through_rate']}%)"
+            )
+        lines.append(f"| Follow-through | {' | '.join(ft_parts)} |")
+        if any(multi[v].get("total_watch_signals") is not None for v in version_cols):
+            watch_parts = []
+            for v in version_cols:
+                w = multi[v].get("total_watch_signals")
+                watch_parts.append(str(w) if w is not None else "—")
+            lines.append(f"| WATCH signals | {' | '.join(watch_parts)} |")
+        lines.append("")
     lines.extend([
         "---",
         "",
@@ -511,7 +616,46 @@ def build_markdown(report: dict[str, Any]) -> str:
         lines.append(f"- **{cause}**: {cnt}")
 
     is_v5 = meta.get("analysis_version") == "v5"
-    if is_v5:
+    is_v6 = meta.get("analysis_version") == "v6"
+    is_v7 = meta.get("analysis_version") == "v7"
+    if is_v7:
+        checklist_rel = V7_FIX_CHECKLIST.relative_to(ROOT).as_posix()
+        lines.extend([
+            "",
+            "---",
+            "",
+            "## Implemented Filters (v7)",
+            "",
+            f"All items below are **implemented** in `src/breakout_scanner.py` + "
+            f"`src/breakout_evidence.py` "
+            f"(see [`{checklist_rel}`]({checklist_rel})).",
+            "",
+        ])
+        for filt in report.get("implemented_filters") or _v7_implemented_filters():
+            ref = filt["checklist_ref"]
+            lines.append(
+                f"- [x] **{ref}** — {filt['description']} "
+                f"([checklist]({checklist_rel}))"
+            )
+    elif is_v6:
+        checklist_rel = V6_FIX_CHECKLIST.relative_to(ROOT).as_posix()
+        lines.extend([
+            "",
+            "---",
+            "",
+            "## Implemented Filters (v6)",
+            "",
+            f"All items below are **implemented** in `src/breakout_scanner.py` "
+            f"(see [`{checklist_rel}`]({checklist_rel})).",
+            "",
+        ])
+        for filt in report.get("implemented_filters") or _v6_implemented_filters():
+            ref = filt["checklist_ref"]
+            lines.append(
+                f"- [x] **{ref}** — {filt['description']} "
+                f"([checklist]({checklist_rel}))"
+            )
+    elif is_v5:
         checklist_rel = V5_FIX_CHECKLIST.relative_to(ROOT).as_posix()
         lines.extend([
             "",
@@ -519,11 +663,16 @@ def build_markdown(report: dict[str, Any]) -> str:
             "",
             "## Implemented Filters (v5)",
             "",
-            f"Active in `src/breakout_scanner.py`. Full checklist: `{checklist_rel}`.",
+            f"All items below are **implemented** in `src/breakout_scanner.py` "
+            f"(see [`{checklist_rel}`]({checklist_rel})).",
             "",
         ])
-        for i, filt in enumerate(report.get("implemented_filters") or _v5_implemented_filters(), 1):
-            lines.append(f"{i}. **{filt['area']}** — {filt['description']} ({filt['code']})")
+        for filt in report.get("implemented_filters") or _v5_implemented_filters():
+            ref = filt["checklist_ref"]
+            lines.append(
+                f"- [x] **{ref}** — {filt['description']} "
+                f"([checklist]({checklist_rel}))"
+            )
     else:
         lines.extend(["", "---", "", "## Suggested Code Fixes", ""])
         for i, fix in enumerate(report.get("suggested_fixes") or [], 1):
@@ -772,7 +921,13 @@ def run_analysis(
         "signals": analyzed,
         "watch_signals": raw_watch_signals,
     }
-    if analysis_version == "v5":
+    if analysis_version == "v7":
+        report["meta"]["analysis_version"] = "v7"
+        report["implemented_filters"] = _v7_implemented_filters()
+    elif analysis_version == "v6":
+        report["meta"]["analysis_version"] = "v6"
+        report["implemented_filters"] = _v6_implemented_filters()
+    elif analysis_version == "v5":
         report["meta"]["analysis_version"] = "v5"
         report["implemented_filters"] = _v5_implemented_filters()
     else:
@@ -824,12 +979,41 @@ def run_analysis(
                 "follow_through_rate": multi_baselines["v4"]["follow_through_rate"],
             },
             "v5": {
+                "total_pass_signals": multi_baselines["v5"]["total_pass_signals"],
+                "total_watch_signals": multi_baselines["v5"].get("total_watch_signals"),
+                "follow_through_count": multi_baselines["v5"]["follow_through_count"],
+                "follow_through_rate": multi_baselines["v5"]["follow_through_rate"],
+            },
+        }
+        v6_bl = multi_baselines.get("v6")
+        if isinstance(v6_bl, dict):
+            report["multi_baseline_comparison"]["v6"] = {
+                "total_pass_signals": v6_bl["total_pass_signals"],
+                "total_watch_signals": v6_bl.get("total_watch_signals"),
+                "follow_through_count": v6_bl["follow_through_count"],
+                "follow_through_rate": v6_bl["follow_through_rate"],
+            }
+        elif v6_bl is True:
+            report["multi_baseline_comparison"]["v6"] = {
                 "total_pass_signals": after["total_pass_signals"],
                 "total_watch_signals": after.get("total_watch_signals", 0),
                 "follow_through_count": after["follow_through_count"],
                 "follow_through_rate": after["follow_through_rate"],
-            },
-        }
+            }
+        if multi_baselines.get("v7"):
+            report["multi_baseline_comparison"]["v7"] = {
+                "total_pass_signals": after["total_pass_signals"],
+                "total_watch_signals": after.get("total_watch_signals", 0),
+                "follow_through_count": after["follow_through_count"],
+                "follow_through_rate": after["follow_through_rate"],
+            }
+        elif analysis_version not in ("v6", "v7"):
+            report["multi_baseline_comparison"]["v5"].update({
+                "total_pass_signals": after["total_pass_signals"],
+                "total_watch_signals": after.get("total_watch_signals", 0),
+                "follow_through_count": after["follow_through_count"],
+                "follow_through_rate": after["follow_through_rate"],
+            })
     return report
 
 
@@ -857,13 +1041,42 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="v5 run: multi-baseline v3/v4/v5 comparison and default v5 output paths",
     )
+    ap.add_argument(
+        "--v7",
+        action="store_true",
+        help="v7 run: multi-baseline v3/v4/v5/v6/v7 comparison and default v7 output paths",
+    )
+    ap.add_argument(
+        "--v6",
+        action="store_true",
+        help="v6 run: multi-baseline v3/v4/v5/v6 comparison and default v6 output paths",
+    )
     args = ap.parse_args(argv)
 
     if not args.universe.is_file():
         print(f"Missing universe file: {args.universe}", file=sys.stderr)
         return 1
 
-    if args.v5:
+    if "v7" in args.output_md.stem.lower():
+        args.v7 = True
+    elif "v6" in args.output_md.stem.lower():
+        args.v6 = True
+    elif "v5" in args.output_md.stem.lower():
+        args.v5 = True
+
+    if args.v7:
+        args.with_baseline = True
+        args.output_md = OUT_DIR / "v3_100stock_trend_analysis_v7_report.md"
+        args.output_json = OUT_DIR / "v3_100stock_trend_analysis_v7.json"
+        if args.universe == DEFAULT_UNIVERSE:
+            args.universe = OUT_DIR / "universe_100.json"
+    elif args.v6:
+        args.with_baseline = True
+        args.output_md = OUT_DIR / "v3_100stock_trend_analysis_v6_report.md"
+        args.output_json = OUT_DIR / "v3_100stock_trend_analysis_v6.json"
+        if args.universe == DEFAULT_UNIVERSE:
+            args.universe = OUT_DIR / "universe_100.json"
+    elif args.v5:
         args.with_baseline = True
         args.output_md = OUT_DIR / "v3_100stock_trend_analysis_v5_report.md"
         args.output_json = OUT_DIR / "v3_100stock_trend_analysis_v5.json"
@@ -873,18 +1086,40 @@ def main(argv: list[str] | None = None) -> int:
     report = run_analysis(
         universe_path=args.universe,
         range_str=args.range_str,
-        baseline=V4_BASELINE if args.v5 else (V3_BASELINE if args.with_baseline else None),
-        multi_baselines={"v3": V3_BASELINE, "v4": V4_BASELINE} if args.v5 else None,
-        report_title=(
-            "v3 Breakout Trend Follow-Through Analysis v5 (100-Stock Cohort, Post-Fix)"
-            if args.v5
-            else (
-                "v3 Breakout Trend Follow-Through Analysis v4 (100-Stock Cohort, Post-Fix)"
-                if args.with_baseline
-                else None
+        baseline=(
+            V6_BASELINE if args.v7 else (
+                V5_BASELINE if args.v6 else (
+                    V4_BASELINE if args.v5 else (V3_BASELINE if args.with_baseline else None)
+                )
             )
         ),
-        analysis_version="v5" if args.v5 else None,
+        multi_baselines=(
+            {"v3": V3_BASELINE, "v4": V4_BASELINE, "v5": V5_BASELINE, "v6": V6_BASELINE, "v7": True}
+            if args.v7
+            else (
+                {"v3": V3_BASELINE, "v4": V4_BASELINE, "v5": V5_BASELINE, "v6": True}
+                if args.v6
+                else ({"v3": V3_BASELINE, "v4": V4_BASELINE} if args.v5 else None)
+            )
+        ),
+        report_title=(
+            "v3 Breakout Trend Follow-Through Analysis v7 (100-Stock Cohort, Post-Fix)"
+            if args.v7
+            else (
+                "v3 Breakout Trend Follow-Through Analysis v6 (100-Stock Cohort, Post-Fix)"
+                if args.v6
+                else (
+                    "v3 Breakout Trend Follow-Through Analysis v5 (100-Stock Cohort, Post-Fix)"
+                    if args.v5
+                    else (
+                        "v3 Breakout Trend Follow-Through Analysis v4 (100-Stock Cohort, Post-Fix)"
+                        if args.with_baseline
+                        else None
+                    )
+                )
+            )
+        ),
+        analysis_version="v7" if args.v7 else ("v6" if args.v6 else ("v5" if args.v5 else None)),
     )
 
     args.output_md.parent.mkdir(parents=True, exist_ok=True)

@@ -713,7 +713,13 @@ def replay_stock(
     last_pass_idx: int | None = None
 
     for idx in range(MIN_HISTORY_BARS - 1, n):
-        eval_result = evaluate_bars_as_of(df, idx, tier_key, last_pass_idx=last_pass_idx)
+        eval_result = evaluate_bars_as_of(
+            df,
+            idx,
+            tier_key,
+            last_pass_idx=last_pass_idx,
+            bhav_turnover_lacs=stock_data.get("liquidity_turnover_lacs_avg"),
+        )
         signal_date = dates[idx] if idx < len(dates) else ""
         row = {
             "signal_date": signal_date,
@@ -850,6 +856,7 @@ def load_cached_universe_history(
                 "tier_label": entry["tier_label"],
                 "yahoo_ticker": ticker,
                 "bar_count": len(df["close"]),
+                "liquidity_turnover_lacs_avg": entry.get("liquidity_turnover_lacs_avg"),
             }
     return data_by_symbol
 

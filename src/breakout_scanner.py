@@ -15,6 +15,12 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from breakout_evidence import (
+    composite_rank_score,
+    compute_evidence_metrics,
+    persistence_pass_min,
+)
+
 IST = ZoneInfo("Asia/Kolkata")
 
 # Alternate-pass thresholds (see evaluate_bars_as_of)
@@ -45,6 +51,8 @@ PRE_SIGNAL_COOLDOWN_DIST_20D_HIGH_MIN = -3.0
 ADX_SOFT_VOL_BONUS = 0.5
 ADX_SOFT_CUM_RETURN_MAX = 20.0
 POWER_GAP_CUM_RETURN_MAX = 15.0
+STANDARD_ADX_TRAJECTORY_VOL_EXCEPTION = 7.0
+POWER_GAP_VOL_RECOVERY_THRESHOLD = 5.5
 SIGNAL_TIER_PASS = "PASS"
 SIGNAL_TIER_WATCH = "WATCH"
 
@@ -598,21 +606,32 @@ def _adx_trajectory_gate(
     adx_arr: list[float],
     as_of_idx: int,
     pass_paths: list[str],
+    *,
+    vol_mult: float | None = None,
 ) -> tuple[bool, str | None, dict[str, Any]]:
-    """Require rising ADX when adx_soft or rsi_hot alternate paths are used."""
-    needs_gate = "adx_soft" in pass_paths or "rsi_hot" in pass_paths
+    """Require rising ADX on standard, adx_soft, or rsi_hot paths.
+
+    Standard path (empty pass_paths): falling ADX allowed when vol_mult >= 7.0.
+    """
+    is_standard = not pass_paths
+    needs_gate = is_standard or "adx_soft" in pass_paths or "rsi_hot" in pass_paths
     t = as_of_idx
     metrics: dict[str, Any] = {
         "adx_trajectory_required": needs_gate,
+        "standard_path": is_standard,
         "adx_t1": None,
         "adx_t10": None,
         "adx_t5": None,
+        "standard_vol_exception": False,
     }
     if not needs_gate:
         return True, None, metrics
 
+    fail_reason = (
+        "pre_filter_standard_adx_trajectory" if is_standard else "pre_filter_adx_trajectory"
+    )
     if t < PRE_SIGNAL_ADX_TRAJECTORY_LOOKBACK:
-        return False, "pre_filter_adx_trajectory", metrics
+        return False, fail_reason, metrics
 
     adx_t1 = adx_arr[t - 1]
     adx_t10 = adx_arr[t - PRE_SIGNAL_ADX_TRAJECTORY_LOOKBACK]
@@ -628,7 +647,14 @@ def _adx_trajectory_gate(
     })
 
     if adx_t1 <= adx_t10:
-        return False, "pre_filter_adx_trajectory", metrics
+        if (
+            is_standard
+            and vol_mult is not None
+            and vol_mult >= STANDARD_ADX_TRAJECTORY_VOL_EXCEPTION
+        ):
+            metrics["standard_vol_exception"] = True
+            return True, None, metrics
+        return False, fail_reason, metrics
 
     if "adx_soft" in pass_paths and adx_t5 is not None and adx_t1 <= adx_t5:
         return False, "pre_filter_adx_trajectory", metrics
@@ -686,8 +712,13 @@ def _power_gap_confirmation_gate(
     as_of_idx: int,
     cum_return_t10_t1: float | None,
     pass_paths: list[str],
+    *,
+    vol_mult: float | None = None,
 ) -> tuple[bool, dict[str, Any]]:
-    """power_gap requires rising ADX or modest pre-trend; otherwise downgrade to WATCH."""
+    """power_gap requires rising ADX or modest pre-trend; otherwise downgrade to WATCH.
+
+    High-volume gaps (vol_mult >= 5.5) may PASS without ADX/cum_ret confirmation.
+    """
     needs_gate = "power_gap" in pass_paths
     metrics: dict[str, Any] = {
         "power_gap_confirmation_required": needs_gate,
@@ -695,7 +726,10 @@ def _power_gap_confirmation_gate(
         "adx_t10": None,
         "cum_return_t10_t1": round(cum_return_t10_t1, 4) if cum_return_t10_t1 is not None else None,
         "power_gap_cum_return_max": POWER_GAP_CUM_RETURN_MAX,
+        "power_gap_vol_recovery_threshold": POWER_GAP_VOL_RECOVERY_THRESHOLD,
+        "vol_mult": round(vol_mult, 4) if vol_mult is not None else None,
         "adx_rising": None,
+        "vol_recovery": None,
         "confirmed": None,
     }
     if not needs_gate:
@@ -715,7 +749,9 @@ def _power_gap_confirmation_gate(
         })
 
     cum_ok = cum_return_t10_t1 is not None and cum_return_t10_t1 <= POWER_GAP_CUM_RETURN_MAX
-    confirmed = adx_rising or cum_ok
+    vol_recovery = vol_mult is not None and vol_mult >= POWER_GAP_VOL_RECOVERY_THRESHOLD
+    metrics["vol_recovery"] = vol_recovery
+    confirmed = adx_rising or cum_ok or vol_recovery
     metrics["confirmed"] = confirmed
     return confirmed, metrics
 
@@ -754,6 +790,7 @@ def evaluate_bars_as_of(
     tier_name: str,
     *,
     last_pass_idx: int | None = None,
+    bhav_turnover_lacs: float | None = None,
 ) -> dict[str, Any]:
     """Point-in-time breakout filter evaluation using bars[0..as_of_idx] inclusive.
 
@@ -913,7 +950,9 @@ def evaluate_bars_as_of(
             fail_reason = pre_fail
 
     if fail_reason is None:
-        traj_ok, traj_fail, traj_metrics = _adx_trajectory_gate(adx_arr, as_of_idx, pass_paths)
+        traj_ok, traj_fail, traj_metrics = _adx_trajectory_gate(
+            adx_arr, as_of_idx, pass_paths, vol_mult=vol_mult,
+        )
         metrics["adx_trajectory"] = traj_metrics
         if not traj_ok:
             pre_filter_fail = traj_fail
@@ -938,19 +977,59 @@ def evaluate_bars_as_of(
     signal_tier: str | None = SIGNAL_TIER_PASS if fail_reason is None else None
     if fail_reason is None and "power_gap" in pass_paths:
         pg_ok, pg_metrics = _power_gap_confirmation_gate(
-            adx_arr, as_of_idx, cum_return_t10_t1, pass_paths,
+            adx_arr, as_of_idx, cum_return_t10_t1, pass_paths, vol_mult=vol_mult,
         )
         metrics["power_gap_confirmation"] = pg_metrics
         if not pg_ok:
             signal_tier = SIGNAL_TIER_WATCH
 
+    if fail_reason is None and pass_paths == ["adx_soft"]:
+        signal_tier = SIGNAL_TIER_WATCH
+        metrics["adx_soft_solo_watch"] = True
+
+    evidence = compute_evidence_metrics(
+        df, as_of_idx, tier_name, vol_20_avg, bhav_turnover_lacs=bhav_turnover_lacs,
+    )
+    metrics["evidence"] = evidence
+    metrics["liquidity_quality"] = evidence.get("liquidity_quality")
+    metrics["persistence_score"] = evidence.get("persistence_score")
+    metrics["breakout_stage"] = evidence.get("breakout_stage")
+    metrics["base_score"] = evidence.get("base_score")
+    metrics["median_turnover_inr"] = evidence.get("median_turnover_inr")
+
+    if fail_reason is None and not evidence.get("liquidity_gate_pass", True):
+        pre_filter_fail = evidence.get("liquidity_gate_fail") or "pre_filter_liquidity"
+        fail_reason = pre_filter_fail
+        signal_tier = None
+
+    v7_watch_reason: str | None = None
+    if fail_reason is None and signal_tier == SIGNAL_TIER_PASS:
+        persist_min = persistence_pass_min(tier_name)
+        if (evidence.get("persistence_score") or 0) < persist_min:
+            signal_tier = SIGNAL_TIER_WATCH
+            v7_watch_reason = "v7_low_volume_persistence"
+        elif evidence.get("breakout_stage") == 3:
+            signal_tier = SIGNAL_TIER_WATCH
+            v7_watch_reason = "v7_breakout_stage_3"
+
+    if v7_watch_reason:
+        metrics["v7_watch_reason"] = v7_watch_reason
+        metrics["risk_flags"] = _format_risk_flags(
+            power_gap=power_gap,
+            pass_paths=pass_paths,
+            signal_tier=signal_tier,
+        )
+
+    metrics["composite_rank"] = composite_rank_score(metrics)
+
     metrics["pass_paths"] = pass_paths
     metrics["signal_tier"] = signal_tier
-    metrics["risk_flags"] = _format_risk_flags(
-        power_gap=power_gap,
-        pass_paths=pass_paths,
-        signal_tier=signal_tier,
-    )
+    if not v7_watch_reason:
+        metrics["risk_flags"] = _format_risk_flags(
+            power_gap=power_gap,
+            pass_paths=pass_paths,
+            signal_tier=signal_tier,
+        )
 
     return {
         "passed": fail_reason is None and signal_tier == SIGNAL_TIER_PASS,
@@ -1061,6 +1140,11 @@ Volume Profile (30-day Visible Range):
         "Est. Gain": f"{round(target_gain, 2)}%",
         "Risk Flags": risk_flags,
         "Signal Tier": signal_tier or SIGNAL_TIER_PASS,
+        "Liquidity Quality": eval_result.get("liquidity_quality"),
+        "Persistence Score": eval_result.get("persistence_score"),
+        "Breakout Stage": eval_result.get("breakout_stage"),
+        "Base Score": eval_result.get("base_score"),
+        "Composite Rank": eval_result.get("composite_rank"),
         "Payload": payload
     }
 
@@ -1087,6 +1171,11 @@ def serialize_candidate(row: dict[str, Any]) -> dict[str, Any]:
         "est_gain_display": row["Est. Gain"],
         "risk_flags": row["Risk Flags"],
         "signal_tier": row.get("Signal Tier"),
+        "liquidity_quality": row.get("Liquidity Quality"),
+        "persistence_score": row.get("Persistence Score"),
+        "breakout_stage": row.get("Breakout Stage"),
+        "base_score": row.get("Base Score"),
+        "composite_rank": row.get("Composite Rank"),
         "payload": row["Payload"],
     }
 
@@ -1240,6 +1329,9 @@ def run_breakout_scan(
         "Small-Cap (Nifty Smallcap 100)": 0,
         "Micro-Cap (Nifty Microcap 250)": 0,
     }
+    all_results.sort(
+        key=lambda r: (r.get("Composite Rank") is None, -(r.get("Composite Rank") or 0)),
+    )
     for row in all_results:
         tier_candidate_counts[row["Tier"]] = tier_candidate_counts.get(row["Tier"], 0) + 1
 
