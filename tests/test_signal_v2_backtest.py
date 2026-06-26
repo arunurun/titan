@@ -58,12 +58,21 @@ def test_feature_row_to_audit_merges_tape_extras():
     row = {
         "symbol": "X",
         "next_week_score": 70.0,
-        "tape_extras": {"cmf_20": 0.1, "return_5d_pct": 3.0},
+        "tape_extras": {
+            "cmf_20": 0.1,
+            "return_5d_pct": 3.0,
+            "rel_return_5d_vs_nifty_pct": 1.5,
+            "sector_pctile_effective_intent": 82.0,
+            "sector_pctile_return_5d_pct": 71.0,
+        },
     }
     audit = feature_row_to_audit(row)
     assert audit is not None
     assert audit["cmf_20"] == 0.1
     assert audit["return_5d_pct"] == 3.0
+    assert audit["rel_return_5d_vs_nifty_pct"] == 1.5
+    assert audit["sector_pctile_effective_intent"] == 82.0
+    assert audit["sector_pctile_return_5d_pct"] == 71.0
     assert audit_has_signal_inputs(audit)
 
 

@@ -62,6 +62,8 @@ _TAPE_AUDIT_KEYS = (
     "sector_pctile_cmf_20",
     "sector_pctile_adx_14",
     "sector_pctile_ema200_stretch",
+    "sector_pctile_effective_intent",
+    "sector_pctile_return_5d_pct",
     "fundamental_status",
     "trap_exit_proxy",
     "high_volume_down_day_proxy",
@@ -317,9 +319,14 @@ def _attach_replay_memory(
         current_audit=audit,
     )
     if len(newest_first) >= 1:
-        prior = str(newest_first[0].get("action_signal") or "").strip().lower()
+        prior_row = newest_first[0]
+        prior = str(prior_row.get("action_signal") or "").strip().lower()
         if prior:
             audit["prev_action_signal"] = prior
+        prior_tape = _parse_tape_extras(prior_row)
+        prev_rel = prior_tape.get("rel_return_5d_vs_nifty_pct")
+        if prev_rel is not None and _safe_float(prev_rel) == _safe_float(prev_rel):
+            audit.setdefault("prev_rel_return_5d_vs_nifty_pct", prev_rel)
     if len(newest_first) >= 2:
         prev_prev = str(newest_first[1].get("action_signal") or "").strip().lower()
         if prev_prev:

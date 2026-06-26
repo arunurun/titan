@@ -200,6 +200,7 @@ _MOMENTUM_SECTORS = frozenset({
     "telecom",
     "data_centre",
     "ai",
+    "capital_goods",
 })
 
 
@@ -234,12 +235,27 @@ def _profile_float(audit: dict[str, Any], key: str, default: float) -> float:
     return default
 
 
+def _momentum_positive_tape(audit: dict[str, Any]) -> bool:
+    """Momentum-sector trim guard: 5d return and CMF both supportive."""
+    ret5d = _sf(audit.get("return_5d_pct"))
+    cmf = _sf(audit.get("cmf_20"))
+    return (
+        not math.isnan(ret5d)
+        and ret5d > 0.0
+        and not math.isnan(cmf)
+        and cmf > 0.0
+    )
+
+
 def _tier2_thresholds(audit: dict[str, Any]) -> tuple[int, int]:
     trim = _env_int("TITAN_SIGV2_B_TIER2_TRIM_COUNT", 2)
     exit_c = _env_int("TITAN_SIGV2_B_TIER2_EXIT_COUNT", 3)
     if _is_momentum_sector(audit):
-        trim = 3
-        exit_c = 4
+        if _momentum_positive_tape(audit):
+            trim = max(trim, _env_int("TITAN_SIGV2_B_MOMENTUM_POS_TRIM_COUNT", 2))
+        else:
+            trim = 3
+            exit_c = 4
     return trim, exit_c
 
 
@@ -312,8 +328,14 @@ def _rel_strength_accelerating(audit: dict[str, Any]) -> bool:
     return rel5 >= accel_min and (math.isnan(ret1d) or ret1d > 0.0)
 
 
-def _sector_leader_carveout(audit: dict[str, Any]) -> bool:
-    """Sector leader: skip chase / mild-stretch hold when tape quality is strong."""
+def _sector_leader_carveout(
+    audit: dict[str, Any], risk_net: float | None = None
+) -> bool:
+    """Sector leader: skip chase / mild-stretch hold when tape quality is strong.
+
+  v2: rank>=75, ADX>=25, CMF>0, improving CMF trajectory may skip stretch hold
+  at 5-6 ATR when risk_net < 3.5.
+    """
     adx = _sf(audit.get("adx_14"))
     cmf = _sf(audit.get("cmf_20"))
     stretch = _sf(audit.get("ema200_stretch_atr"))
@@ -323,15 +345,144 @@ def _sector_leader_carveout(audit: dict[str, Any]) -> bool:
     q_min = _env_float("TITAN_SIGV2_LEADER_PCTILE_MIN", 75.0)
     adx_min = _env_float("TITAN_SIGV2_LEADER_ADX_MIN", 25.0)
     stretch_max = _env_float("TITAN_SIGV2_LEADER_STRETCH_MAX", 5.0)
+    stretch_v2_max = _env_float("TITAN_SIGV2_LEADER_STRETCH_V2_MAX", 6.0)
+    risk_v2_max = _env_float("TITAN_SIGV2_LEADER_STRETCH_V2_RISK_MAX", 3.5)
+    if (
+        math.isnan(pctile)
+        or pctile < q_min
+        or math.isnan(adx)
+        or adx < adx_min
+        or math.isnan(cmf)
+        or cmf <= 0.0
+    ):
+        return False
+    if math.isnan(stretch) or stretch < stretch_max:
+        return True
+    if (
+        risk_net is not None
+        and not math.isnan(stretch)
+        and stretch_max <= stretch <= stretch_v2_max
+        and risk_net < risk_v2_max
+        and _cmf_trajectory_improving(audit)
+    ):
+        return True
+    return False
+
+
+def _cmf_trajectory_improving(audit: dict[str, Any]) -> bool:
+    """True when multi-session CMF slope is positive and not deteriorating."""
+    traj = audit.get("indicator_trajectory")
+    if not isinstance(traj, dict):
+        return False
+    if traj.get("cmf_deteriorating"):
+        return False
+    cmf_slope = _sf(traj.get("cmf_slope"))
+    return not math.isnan(cmf_slope) and cmf_slope > 0.0
+
+
+def _cmf_trajectory_not_deteriorating(audit: dict[str, Any]) -> bool:
+    traj = audit.get("indicator_trajectory")
+    if not isinstance(traj, dict):
+        return True
+    return not bool(traj.get("cmf_deteriorating"))
+
+
+def _cmf_deteriorating_sessions(audit: dict[str, Any]) -> int:
+    """Consecutive session-over-session CMF declines (newest first)."""
+    traj = audit.get("indicator_trajectory")
+    if isinstance(traj, dict) and traj.get("cmf_deteriorating_sessions") is not None:
+        try:
+            return max(0, int(traj.get("cmf_deteriorating_sessions") or 0))
+        except (TypeError, ValueError):
+            pass
+    return 0
+
+
+def _cmf_trajectory_deteriorating_2plus(audit: dict[str, Any]) -> bool:
+    """True when CMF has been deteriorating over 2+ sessions in trajectory."""
+    traj = audit.get("indicator_trajectory")
+    if not isinstance(traj, dict):
+        return False
+    if not traj.get("cmf_deteriorating"):
+        return False
+    return _cmf_deteriorating_sessions(audit) >= 2
+
+
+def _cmf_sector_weak(audit: dict[str, Any]) -> bool:
+    """Sector-relative CMF weakness: bottom quartile within sector."""
+    cmf_pctile = _sf(audit.get("sector_pctile_cmf_20"))
+    if not math.isnan(cmf_pctile):
+        floor = _env_float("TITAN_SIGV2_CMF_SECTOR_PCTILE_FLOOR", 25.0)
+        return cmf_pctile < floor
+    cmf = _sf(audit.get("cmf_20"))
+    return not math.isnan(cmf) and cmf < -0.05
+
+
+def _cmf_distribution_corroborator(audit: dict[str, Any]) -> bool:
+    """Tier-2 / gate CMF distribution: sector percentile, not absolute alone."""
+    return _cmf_sector_weak(audit)
+
+
+def _accumulate_risk_ok(audit: dict[str, Any], risk_net: float) -> bool:
+    """Standard accumulate ceiling, with soft band to 3.5 when flow tape is supportive."""
+    if risk_net < _buy_risk_ceiling():
+        return True
+    soft_max = _env_float("TITAN_SIGV2_ACCUM_RISK_SOFT_MAX", 3.5)
+    if risk_net >= soft_max:
+        return False
+    cmf = _sf(audit.get("cmf_20"))
+    cmf_min = _env_float("TITAN_SIGV2_ACCUM_RISK_SOFT_CMF_MIN", 0.1)
     return (
-        not math.isnan(pctile)
-        and pctile >= q_min
-        and not math.isnan(adx)
-        and adx > adx_min
-        and (math.isnan(stretch) or stretch < stretch_max)
-        and not math.isnan(cmf)
-        and cmf > 0.0
+        not math.isnan(cmf)
+        and cmf > cmf_min
+        and not _trajectory_bearish(audit)
     )
+
+
+def _adx_momentum_ok(audit: dict[str, Any]) -> bool:
+    adx = _sf(audit.get("adx_14"))
+    if not math.isnan(adx) and adx >= 25.0:
+        return True
+    traj = audit.get("indicator_trajectory")
+    if isinstance(traj, dict):
+        return int(traj.get("adx_strong_bull_sessions") or 0) >= 2
+    return False
+
+
+def _sector_rank_momentum_ok(audit: dict[str, Any]) -> bool:
+    for key in ("sector_pctile_effective_intent", "sector_pctile_return_5d_pct"):
+        pctile = _sf(audit.get(key))
+        if not math.isnan(pctile) and pctile >= 60.0:
+            return True
+    return False
+
+
+def _momentum_continuation_ok(audit: dict[str, Any]) -> bool:
+    """Strong tape participation: CMF/ADX/momentum/sector rank with stable flow trajectory."""
+    cmf = _sf(audit.get("cmf_20"))
+    ret5d = _sf(audit.get("return_5d_pct"))
+    if math.isnan(cmf) or cmf <= 0.05:
+        return False
+    if not _adx_momentum_ok(audit):
+        return False
+    if math.isnan(ret5d) or ret5d <= 5.0:
+        return False
+    if not _rel_strength_accelerating(audit):
+        return False
+    if not _sector_rank_momentum_ok(audit):
+        return False
+    return _cmf_trajectory_not_deteriorating(audit)
+
+
+def _momentum_stretch_relaxed(audit: dict[str, Any], c: dict[str, Any]) -> bool:
+    """Momentum leaders may skip pullback requirement when stretch is hot but <= 6 ATR."""
+    if not _momentum_continuation_ok(audit):
+        return False
+    stretch = _sf(audit.get("ema200_stretch_atr"))
+    s_accum = _env_float("TITAN_SIGV2_CEIL_STRETCH_ACCUM", _SIGV2_CEIL_STRETCH_ACCUM)
+    if math.isnan(stretch) or stretch < s_accum:
+        return False
+    return stretch <= 6.0
 
 
 def _post_rally_chase_block(audit: dict[str, Any]) -> bool:
@@ -360,6 +511,23 @@ def _effective_next_week_for_gate(audit: dict[str, Any]) -> float:
         return nw
     frac = min(1.0, (ret5d - rally_lo) / max(rally_hi - rally_lo, 0.01))
     return nw - frac * max_penalty
+
+
+def _effective_next_week_for_accumulate(audit: dict[str, Any]) -> float:
+    """Next-week for accumulate band; proxy from intent when nw missing but tape improving."""
+    nw = _sf(audit.get("next_week_score"))
+    if not math.isnan(nw):
+        return nw
+    eff = _sf(audit.get("effective_intent_score", audit.get("intent_score")))
+    intent_floor = _env_float("TITAN_SIGV2_NW_PROXY_INTENT_MIN", 55.0)
+    cmf_min = _env_float("TITAN_SIGV2_NW_PROXY_CMF_MIN", 0.15)
+    cmf = _sf(audit.get("cmf_20"))
+    if math.isnan(eff) or eff < intent_floor:
+        return float("nan")
+    if math.isnan(cmf) or cmf <= cmf_min:
+        return float("nan")
+    proxy_cap = _env_float("TITAN_SIGV2_NW_PROXY_CAP", 65.0)
+    return min(eff, proxy_cap)
 
 
 def _stretch_is_hot(audit: dict[str, Any], c: dict[str, Any]) -> bool:
@@ -1041,6 +1209,12 @@ def compute_indicator_trajectory(
     cmf_slope = _series_slope(cmf_clean)
     adx_slope = _series_slope(adx_clean)
     cmf_positive_sessions = sum(1 for v in cmf_clean if v > 0.0)
+    cmf_deteriorating_sessions = 0
+    for i in range(len(cmf_clean) - 1):
+        if cmf_clean[i] < cmf_clean[i + 1]:
+            cmf_deteriorating_sessions += 1
+        else:
+            break
     cmf_deteriorating = (
         not math.isnan(cmf_slope)
         and cmf_slope < -0.01
@@ -1078,6 +1252,7 @@ def compute_indicator_trajectory(
         "cmf_slope": round(cmf_slope, 6) if not math.isnan(cmf_slope) else None,
         "cmf_positive_sessions": cmf_positive_sessions,
         "cmf_deteriorating": cmf_deteriorating,
+        "cmf_deteriorating_sessions": cmf_deteriorating_sessions,
         "adx_slope": round(adx_slope, 6) if not math.isnan(adx_slope) else None,
         "adx_strong_bull_sessions": adx_strong_bull_sessions,
         "z_elevated_sessions": z_elevated_sessions,
@@ -1253,7 +1428,7 @@ def layer_b(audit: dict[str, Any], c: dict[str, Any], d: dict[str, Any]) -> dict
         or bool(audit.get("panic_absorption_proxy"))
     ):
         signals.append("vpr-proxy stress")
-    if not math.isnan(cmf) and cmf < -0.05:
+    if not math.isnan(cmf) and _cmf_distribution_corroborator(audit):
         signals.append("cmf distribution")
     if _overext_counts_as_corroborator(audit, c):
         signals.append("over-extension hot")
@@ -1277,9 +1452,13 @@ def layer_b(audit: dict[str, Any], c: dict[str, Any], d: dict[str, Any]) -> dict
     if effective_count >= exit_count:
         out["forced_label"] = "exit-risk"
         reasons.append(f"Tier-2: {count} corroborators -> exit-risk ({', '.join(signals)})")
-    elif effective_count >= trim_count or bool(d.get("staleflow_downgrade")):
-        out["forced_label"] = "trim"
-        reasons.append(f"Tier-2: {count} corroborators -> trim ({', '.join(signals)})")
+    else:
+        staleflow_trim = bool(d.get("staleflow_downgrade"))
+        if staleflow_trim and _is_momentum_sector(audit) and _momentum_positive_tape(audit):
+            staleflow_trim = count >= trim_count
+        if effective_count >= trim_count or staleflow_trim:
+            out["forced_label"] = "trim"
+            reasons.append(f"Tier-2: {count} corroborators -> trim ({', '.join(signals)})")
     out["reasons"] = reasons
     return out
 
@@ -1413,16 +1592,25 @@ def _buy_gate(audit: dict[str, Any], a: dict[str, Any], c: dict[str, Any]) -> di
         and not math.isnan(eff)
         and eff >= buy_intent_min
     )
-    chase_block = _post_rally_chase_block(audit)
-    stretch_ok = _stretch_constructive_ok(audit, c)
-    accum_cmf_floor = _env_float("TITAN_SIGV2_ACCUM_CMF_FLOOR", -0.05)
-    cmf_accum_ok = math.isnan(cmf) or cmf >= accum_cmf_floor
+    momentum_ok = _momentum_continuation_ok(audit)
+    chase_block = _post_rally_chase_block(audit) and not momentum_ok
+    stretch_ok = _stretch_constructive_ok(audit, c) or _momentum_stretch_relaxed(audit, c)
+    cmf_accum_ok = not _cmf_sector_weak(audit)
+    if _cmf_trajectory_deteriorating_2plus(audit):
+        accum_cmf_floor = _env_float("TITAN_SIGV2_ACCUM_CMF_FLOOR", -0.05)
+        cmf_accum_ok = cmf_accum_ok and (math.isnan(cmf) or cmf >= accum_cmf_floor)
+    momentum_scores = (
+        momentum_ok
+        and not math.isnan(eff)
+        and eff >= _env_float("TITAN_SIGV2_MOMENTUM_INTENT_MIN", 52.0)
+        and not math.isnan(_effective_next_week_for_accumulate(audit))
+    )
     core = (
         bool(a.get("buy_allowed"))
         and not bool(audit.get("trap_exit_proxy"))
         and not bool(audit.get("liquidity_thin_proxy"))
         and not extreme_move
-        and constructive_scores
+        and (constructive_scores or momentum_scores)
         and not chase_block
         and stretch_ok
         and cmf_accum_ok
@@ -1430,7 +1618,11 @@ def _buy_gate(audit: dict[str, Any], a: dict[str, Any], c: dict[str, Any]) -> di
         and not (not math.isnan(rel5) and rel5 <= -3.0)
     )
     cmf_min = _profile_float(audit, "cmf_constructive_min", -0.05)
-    flow_ok = math.isnan(cmf) or cmf >= cmf_min
+    flow_ok = True
+    if _cmf_sector_weak(audit):
+        flow_ok = False
+    elif _cmf_trajectory_deteriorating_2plus(audit):
+        flow_ok = math.isnan(cmf) or cmf >= cmf_min
     divergence_block = (
         not math.isnan(cmf) and cmf < -0.05 and _divergence_bear_proxy(audit)
     )
@@ -1443,19 +1635,40 @@ def _buy_gate(audit: dict[str, Any], a: dict[str, Any], c: dict[str, Any]) -> di
     }
 
 
+def _accumulate_intent_floor(audit: dict[str, Any], base_intent_min: float) -> float:
+    """Sector daily-winner top quartile + positive CMF + ADX lowers accumulate intent floor."""
+    sector_pctile = _sf(audit.get("sector_pctile_effective_intent"))
+    cmf = _sf(audit.get("cmf_20"))
+    adx = _sf(audit.get("adx_14"))
+    winner_floor = _env_float("TITAN_SIGV2_SECTOR_WINNER_INTENT_MIN", 52.0)
+    winner_pctile = _env_float("TITAN_SIGV2_SECTOR_WINNER_PCTILE_MIN", 75.0)
+    adx_min = _env_float("TITAN_SIGV2_SECTOR_WINNER_ADX_MIN", 25.0)
+    if (
+        not math.isnan(sector_pctile)
+        and sector_pctile >= winner_pctile
+        and not math.isnan(cmf)
+        and cmf > 0.0
+        and not math.isnan(adx)
+        and adx >= adx_min
+    ):
+        return min(base_intent_min, winner_floor)
+    return base_intent_min
+
+
 def _accumulate_band(audit: dict[str, Any], risk_net: float, *, buy_allowed: bool) -> bool:
     """Lower-bar accumulate when scores are decent and risk is low."""
-    if not buy_allowed or risk_net >= _buy_risk_ceiling():
+    if not buy_allowed or not _accumulate_risk_ok(audit, risk_net):
         return False
     nw_min = _profile_float(audit, "accum_nw_min", _env_float("TITAN_SIGV2_ACCUM_NEXT_WEEK_MIN", _ACCUM_NEXT_WEEK_MIN))
     intent_min = _profile_float(audit, "accum_intent_min", _env_float("TITAN_SIGV2_ACCUM_INTENT_MIN", _ACCUM_INTENT_MIN))
+    intent_min = _accumulate_intent_floor(audit, intent_min)
     cmf = _sf(audit.get("cmf_20"))
     if risk_net > 2.0 and not math.isnan(cmf) and cmf < 0.0:
         nw_min = max(
             nw_min,
             _env_float("TITAN_SIGV2_ACCUM_NW_MIN_RISK_CMF", _ACCUM_NW_MIN_RISK_NEG_CMF),
         )
-    next_week = _sf(audit.get("next_week_score"))
+    next_week = _effective_next_week_for_accumulate(audit)
     eff = _sf(audit.get("effective_intent_score", audit.get("intent_score")))
     return (
         not math.isnan(next_week)
@@ -1463,6 +1676,17 @@ def _accumulate_band(audit: dict[str, Any], risk_net: float, *, buy_allowed: boo
         and not math.isnan(eff)
         and eff >= intent_min
     )
+
+
+def _momentum_continuation_accumulate_ok(
+    audit: dict[str, Any], risk_net: float, *, buy_allowed: bool
+) -> bool:
+    """Momentum participation path: strong flow/momentum tape with relaxed stretch/pullback."""
+    if not buy_allowed or not _accumulate_risk_ok(audit, risk_net):
+        return False
+    if not _momentum_continuation_ok(audit):
+        return False
+    return _accumulate_band(audit, risk_net, buy_allowed=True)
 
 
 def _leader_participation_floor(audit: dict[str, Any], risk_net: float, *, buy_allowed: bool) -> bool:
@@ -1617,6 +1841,10 @@ def _map_label(
             label = "accumulate"
         elif _mid_band_accumulate_ok(audit, risk_net, buy_allowed=constructive_ok):
             label = "accumulate"
+        elif _momentum_continuation_accumulate_ok(
+            audit, risk_net, buy_allowed=constructive_ok
+        ):
+            label = "accumulate"
         elif (
             bool(audit.get("history_lt_200_sessions"))
             and _short_history_accumulate_ok(audit, risk_net)
@@ -1700,7 +1928,28 @@ def _resolve_overext_applied_ceiling(
     return None
 
 
-def _overextension_ceiling(audit: dict[str, Any]) -> dict[str, Any]:
+def _stretch_momentum_accumulate_only(audit: dict[str, Any]) -> bool:
+    """Stretch 4-6 ATR with improving CMF/ADX slopes → accumulate cap, not hold."""
+    stretch = _sf(audit.get("ema200_stretch_atr"))
+    s_hold = _env_float("TITAN_SIGV2_CEIL_STRETCH_HOLD", _SIGV2_CEIL_STRETCH_HOLD)
+    if math.isnan(stretch) or stretch < 4.0 or stretch >= s_hold:
+        return False
+    traj = audit.get("indicator_trajectory")
+    if not isinstance(traj, dict):
+        return False
+    cmf_slope = _sf(traj.get("cmf_slope"))
+    adx_slope = _sf(traj.get("adx_slope"))
+    return (
+        not math.isnan(cmf_slope)
+        and cmf_slope > 0.0
+        and not math.isnan(adx_slope)
+        and adx_slope > 0.0
+    )
+
+
+def _overextension_ceiling(
+    audit: dict[str, Any], risk_net: float | None = None
+) -> dict[str, Any]:
     """Return {ceiling, hot, reasons, components} for the over-extension label cap."""
     stretch = _sf(audit.get("ema200_stretch_atr"))
     z = _sf(audit.get("z_score"))
@@ -1723,9 +1972,21 @@ def _overextension_ceiling(audit: dict[str, Any]) -> dict[str, Any]:
     if not math.isnan(to_high) and to_high >= -abs(near_high_pct):
         hot.append("pinned to 20d-high")
 
+    traj = audit.get("indicator_trajectory")
+    traj_bearish = isinstance(traj, dict) and bool(traj.get("cmf_deteriorating"))
+    leader_carve = _sector_leader_carveout(audit, risk_net)
+    stretch_momentum_accum = _stretch_momentum_accumulate_only(audit)
+
     ceiling: str | None = None
     extreme_stretch = (not math.isnan(stretch)) and stretch >= s_hold
-    if extreme_stretch or len(hot) >= 3:
+    if extreme_stretch or (traj_bearish and not leader_carve):
+        if extreme_stretch or len(hot) >= 3:
+            ceiling = "hold"
+        elif (not math.isnan(stretch) and stretch >= s_accum) or len(hot) >= 2:
+            ceiling = "accumulate"
+    elif stretch_momentum_accum:
+        ceiling = "accumulate"
+    elif len(hot) >= 3:
         ceiling = "hold"
     elif (not math.isnan(stretch) and stretch >= s_accum) or len(hot) >= 2:
         ceiling = "accumulate"
@@ -2361,7 +2622,7 @@ def evaluate_signal_v2(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
     # STEP 2b: over-extension ceiling (shadow-first). Compute the would-be cap always;
     # apply it only when enforced (damp applies the milder accumulate cap, never hold).
     oe_mode = _overextension_ceiling_mode()
-    oe = _overextension_ceiling(audit)
+    oe = _overextension_ceiling(audit, risk_net)
     oe_ceiling = oe.get("ceiling")
     applied_oe_ceiling = _resolve_overext_applied_ceiling(audit, oe_ceiling, oe_mode)
     stretch_atr = _sf(audit.get("ema200_stretch_atr"))
@@ -2369,8 +2630,15 @@ def evaluate_signal_v2(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
     if not math.isnan(stretch_atr) and stretch_atr >= s_hold_extreme:
         applied_oe_ceiling = _combine_ceilings(applied_oe_ceiling, "hold")
     elif _stretch_is_hot(audit, c) and not _pullback_quality_proxy(audit):
-        if not _sector_leader_carveout(audit):
-            applied_oe_ceiling = _combine_ceilings(applied_oe_ceiling, "hold")
+        if not _sector_leader_carveout(audit, risk_net=risk_net):
+            traj = audit.get("indicator_trajectory")
+            traj_bearish = isinstance(traj, dict) and bool(traj.get("cmf_deteriorating"))
+            if traj_bearish:
+                applied_oe_ceiling = _combine_ceilings(applied_oe_ceiling, "hold")
+            elif _momentum_stretch_relaxed(audit, c) or _stretch_momentum_accumulate_only(audit):
+                applied_oe_ceiling = _combine_ceilings(applied_oe_ceiling, "accumulate")
+            else:
+                applied_oe_ceiling = _combine_ceilings(applied_oe_ceiling, "hold")
     label_before_oe = label
     label = _apply_ceiling(
         label,
