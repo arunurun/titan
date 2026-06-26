@@ -15,11 +15,18 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from breakout_evidence import (
-    composite_rank_score,
-    compute_evidence_metrics,
-    persistence_pass_min,
-)
+try:
+    from .breakout_evidence import (
+        composite_rank_score,
+        compute_evidence_metrics,
+        persistence_pass_min,
+    )
+except ImportError:
+    from breakout_evidence import (
+        composite_rank_score,
+        compute_evidence_metrics,
+        persistence_pass_min,
+    )
 
 IST = ZoneInfo("Asia/Kolkata")
 
