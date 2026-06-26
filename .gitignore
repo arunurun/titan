@@ -25,6 +25,13 @@ venv/
 logs/
 *.log
 
+# Local scratch, scripts, and generated reports (tracked files under temp/ remain in repo)
+temp/
+output/
+
+# Yahoo breakout backtest cache (regenerated locally)
+data/cache/breakout_yahoo/
+
 # Downloaded ICICI scrip master (regenerated; see breeze_scrip_master)
 data/cache/StockScriptNew.csv
 provider-universe-sync/data/nse_industry_cache.json
