@@ -10,6 +10,7 @@ import os
 import random
 import time
 import traceback
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -23,12 +24,22 @@ try:
         compute_evidence_metrics,
         persistence_pass_min,
     )
+    from .breakout_store import (
+        build_analysis_record,
+        persist_breakout_stock_analysis,
+    )
+    from .config_loader import load_config
 except ImportError:
     from breakout_evidence import (
         composite_rank_score,
         compute_evidence_metrics,
         persistence_pass_min,
     )
+    from breakout_store import (
+        build_analysis_record,
+        persist_breakout_stock_analysis,
+    )
+    from config_loader import load_config
 
 IST = ZoneInfo("Asia/Kolkata")
 logger = logging.getLogger(__name__)
@@ -1116,7 +1127,103 @@ def _emit_stock_diagnostic(emit, ticker, tier_name, latest_price=None, pct_chang
     if emit:
         emit(line)
 
-def evaluate_and_audit_stock(ticker, tier_name, emit=None):
+
+def _yahoo_as_of_date(df: dict[str, Any] | None) -> str | None:
+    if not df:
+        return None
+    timestamps = df.get("timestamp") or []
+    if not timestamps:
+        return None
+    try:
+        return datetime.datetime.fromtimestamp(int(timestamps[-1]), tz=IST).date().isoformat()
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+def _build_stock_analysis_record(
+    *,
+    run_id: str,
+    scan_date: str,
+    ticker: str,
+    tier_name: str,
+    df: dict[str, Any] | None,
+    fetch_err: str | None,
+    fail_reason: str | None,
+    passed: bool,
+    eval_result: dict[str, Any] | None = None,
+    latest_price: float | None = None,
+    prev_price: float | None = None,
+    pct_change: float | None = None,
+    vol_mult: float | None = None,
+    rsi_val: float | None = None,
+    adx_val: float | None = None,
+    sma50_last: float | None = None,
+    sma_200_last: float | None = None,
+    poc: float | None = None,
+    vol_20_avg_last: float | None = None,
+    latest_volume: float | None = None,
+    sl_price: float | None = None,
+    target_price: float | None = None,
+    target_gain: float | None = None,
+) -> dict[str, Any]:
+    filt = FILTERS[tier_name]
+    bar_count = len(df["close"]) if df and df.get("close") else None
+    pass_paths = (eval_result or {}).get("pass_paths") or []
+    pass_paths_s = ", ".join(pass_paths) if pass_paths else None
+    signal_tier = (eval_result or {}).get("signal_tier")
+    return build_analysis_record(
+        run_id=run_id,
+        scan_date=scan_date,
+        ticker=ticker,
+        tier=filt["type"],
+        symbol_yahoo=ticker,
+        fetch_error=fetch_err,
+        bar_count=bar_count,
+        latest_close=round(latest_price, 2) if latest_price is not None else None,
+        prev_close=round(prev_price, 2) if prev_price is not None else None,
+        pct_change=round(pct_change, 4) if pct_change is not None else None,
+        latest_volume=latest_volume,
+        vol_20_avg=round(vol_20_avg_last, 2) if vol_20_avg_last is not None else None,
+        vol_mult=round(vol_mult, 4) if vol_mult is not None else None,
+        rsi_14=round(rsi_val, 2) if rsi_val is not None else None,
+        adx_14=round(adx_val, 2) if adx_val is not None else None,
+        sma_50=round(sma50_last, 2) if sma50_last is not None else None,
+        sma_200=round(sma_200_last, 2) if sma_200_last is not None else None,
+        poc_30d=poc,
+        min_price_threshold=filt["min_price"],
+        vol_mult_threshold=filt["vol_mult"],
+        price_above_sma50=(
+            latest_price >= sma50_last
+            if latest_price is not None and sma50_last is not None and sma50_last > 0
+            else None
+        ),
+        yahoo_as_of_date=_yahoo_as_of_date(df),
+        passed=passed,
+        fail_reason=fail_reason,
+        entry_low=round(latest_price * 0.985, 2) if passed and latest_price is not None else None,
+        entry_high=round(latest_price * 1.01, 2) if passed and latest_price is not None else None,
+        stop_loss=round(sl_price, 2) if sl_price is not None else None,
+        target_price=round(target_price, 2) if target_price is not None else None,
+        target_gain_pct=round(target_gain, 4) if target_gain is not None else None,
+        signal_tier=signal_tier,
+        persistence_score=(eval_result or {}).get("persistence_score"),
+        composite_rank=(eval_result or {}).get("composite_rank"),
+        liquidity_quality=(eval_result or {}).get("liquidity_quality"),
+        breakout_stage=(eval_result or {}).get("breakout_stage"),
+        base_score=(eval_result or {}).get("base_score"),
+        pass_paths=pass_paths_s,
+        risk_flags=(eval_result or {}).get("risk_flags") or None,
+    )
+
+
+def evaluate_and_audit_stock(
+    ticker,
+    tier_name,
+    emit=None,
+    *,
+    run_id: str = "",
+    scan_date: str = "",
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     filt = FILTERS[tier_name]
     vol_thresh = filt["vol_mult"]
     df, fetch_err = fetch_yahoo_data(ticker)
@@ -1128,19 +1235,51 @@ def evaluate_and_audit_stock(ticker, tier_name, emit=None):
         else:
             fail_reason = "insufficient_data"
         _emit_stock_diagnostic(emit, ticker, tier_name, fail_reason=fail_reason)
-        return None
+        analysis_record = _build_stock_analysis_record(
+            run_id=run_id,
+            scan_date=scan_date,
+            ticker=ticker,
+            tier_name=tier_name,
+            df=df,
+            fetch_err=fetch_err,
+            fail_reason=fail_reason,
+            passed=False,
+        )
+        return None, analysis_record
 
     eval_result = evaluate_bars_as_of(df, len(df["close"]) - 1, tier_name)
     latest_price = eval_result["latest_price"]
+    prev_price = eval_result["prev_price"]
     pct_change = eval_result["pct_change"]
     vol_mult = eval_result["vol_mult"]
     rsi_val = eval_result["rsi_val"]
     adx_val = eval_result["adx_val"]
     sma50_last = eval_result["sma50_last"]
+    vol_20_avg_last = eval_result["vol_20_avg_last"]
+    latest_volume = eval_result["latest_volume"]
     sl_price = eval_result["sl_price"]
     target_price = eval_result["target_price"]
     target_gain = eval_result["target_gain"]
     risk_flags = eval_result["risk_flags"]
+    sma_200_last = eval_result.get("sma_200_last")
+    poc = eval_result["poc"]
+
+    common_metrics = {
+        "latest_price": latest_price,
+        "prev_price": prev_price,
+        "pct_change": pct_change,
+        "vol_mult": vol_mult,
+        "rsi_val": rsi_val,
+        "adx_val": adx_val,
+        "sma50_last": sma50_last,
+        "sma_200_last": sma_200_last,
+        "poc": poc,
+        "vol_20_avg_last": vol_20_avg_last,
+        "latest_volume": latest_volume,
+        "sl_price": sl_price,
+        "target_price": target_price,
+        "target_gain": target_gain,
+    }
 
     fail_reason = eval_result.get("fail_reason")
     signal_tier = eval_result.get("signal_tier")
@@ -1150,7 +1289,19 @@ def evaluate_and_audit_stock(ticker, tier_name, emit=None):
             vol_mult, vol_thresh, rsi_val, adx_val, sma50_last,
             status="FAIL", fail_reason=fail_reason,
         )
-        return None
+        analysis_record = _build_stock_analysis_record(
+            run_id=run_id,
+            scan_date=scan_date,
+            ticker=ticker,
+            tier_name=tier_name,
+            df=df,
+            fetch_err=fetch_err,
+            fail_reason=fail_reason,
+            passed=False,
+            eval_result=eval_result,
+            **common_metrics,
+        )
+        return None, analysis_record
 
     status = signal_tier or "PASS"
     _emit_stock_diagnostic(
@@ -1160,7 +1311,6 @@ def evaluate_and_audit_stock(ticker, tier_name, emit=None):
     )
 
     sma_200_last = eval_result.get("sma_200_last") or 0.0
-    poc = eval_result["poc"]
 
     payload = f"""**TECHNICAL GROUNDING DATA: {ticker.replace(".NS", "")}**
 Data Retrieval Timestamp: {datetime.datetime.now(IST).strftime('%Y-%m-%d %H:%M:%S')} (IST)
@@ -1180,7 +1330,7 @@ Volume Profile (30-day Visible Range):
     pass_paths = eval_result.get("pass_paths") or []
     watch_reason = _derive_watch_reason(eval_result)
 
-    return {
+    candidate = {
         "Ticker": ticker.replace(".NS", ""),
         "Tier": filt["type"],
         "Price": round(latest_price, 2),
@@ -1201,8 +1351,22 @@ Volume Profile (30-day Visible Range):
         "Composite Rank": eval_result.get("composite_rank"),
         "Pass Paths": ", ".join(pass_paths) if pass_paths else "",
         "Watch Reason": watch_reason or "",
-        "Payload": payload
+        "Payload": payload,
     }
+    passed = bool(eval_result.get("passed"))
+    analysis_record = _build_stock_analysis_record(
+        run_id=run_id,
+        scan_date=scan_date,
+        ticker=ticker,
+        tier_name=tier_name,
+        df=df,
+        fetch_err=fetch_err,
+        fail_reason=None,
+        passed=passed,
+        eval_result=eval_result,
+        **common_metrics,
+    )
+    return candidate, analysis_record
 
 
 _BREAKOUT_STAGE_LABELS: dict[int, str] = {
@@ -1675,8 +1839,11 @@ def run_breakout_scan(
         print("=========================================================================\n")
 
     all_results: list[dict[str, Any]] = []
+    analysis_records: list[dict[str, Any]] = []
     tier_ticker_counts: dict[str, int] = {}
     scan_ticker_count = 0
+    run_id = str(uuid.uuid4())
+    scan_date_iso = scan_date.isoformat()
 
     try:
         with log_path.open("w", encoding="utf-8") as log_file:
@@ -1686,7 +1853,7 @@ def run_breakout_scan(
                 log_file.write(line + "\n")
                 log_file.flush()
 
-            emit_and_log(f"=== Breakout scanner run {started_at.isoformat()} ===")
+            emit_and_log(f"=== Breakout scanner run {started_at.isoformat()} run_id={run_id} ===")
             warm_yahoo_session()
             emit_and_log("Yahoo session warm-up complete.")
 
@@ -1706,9 +1873,16 @@ def run_breakout_scan(
                     print(f" Found {total} tickers. Scanning & Auditing technicals...")
 
                 for ticker in tickers:
-                    res = evaluate_and_audit_stock(ticker, tier_key, emit=emit_and_log)
-                    if res:
-                        all_results.append(res)
+                    candidate, analysis_record = evaluate_and_audit_stock(
+                        ticker,
+                        tier_key,
+                        emit=emit_and_log,
+                        run_id=run_id,
+                        scan_date=scan_date_iso,
+                    )
+                    analysis_records.append(analysis_record)
+                    if candidate:
+                        all_results.append(candidate)
                     scan_ticker_count += 1
                     if scan_ticker_count % 50 == 0:
                         msg = f"Chunk cool-down: {scan_ticker_count} tickers scanned, sleeping 120s..."
@@ -1716,6 +1890,27 @@ def run_breakout_scan(
                         time.sleep(120)
                 if emit_to_stdout:
                     print("\n Scan & Audit complete for this tier.\n")
+
+        persist_meta: dict[str, Any] = {"configured": False, "persisted": False, "rows": 0}
+        try:
+            cfg = load_config(require_breeze=False, require_gemini=False)
+            persist_meta = persist_breakout_stock_analysis(cfg, analysis_records)
+        except ValueError as e:
+            logger.warning("Breakout Supabase persist skipped: %s", e)
+            persist_meta = {
+                "configured": False,
+                "persisted": False,
+                "reason": "config_error",
+                "message": str(e),
+            }
+        except Exception as e:  # pragma: no cover
+            logger.warning("Breakout Supabase persist failed: %s", e)
+            persist_meta = {
+                "configured": True,
+                "persisted": False,
+                "reason": "unexpected",
+                "message": str(e),
+            }
 
         report_markdown = _build_report_markdown(all_results, scan_date)
         if write_report:
@@ -1749,7 +1944,8 @@ def run_breakout_scan(
 
         return {
             "ok": True,
-            "scan_date": scan_date.isoformat(),
+            "run_id": run_id,
+            "scan_date": scan_date_iso,
             "started_at": started_at.isoformat(),
             "finished_at": finished_at.isoformat(),
             "duration_sec": round((finished_at - started_at).total_seconds(), 2),
@@ -1757,6 +1953,8 @@ def run_breakout_scan(
             "tier_ticker_counts": tier_ticker_counts,
             "candidate_count": len(all_results),
             "tier_candidate_counts": tier_candidate_counts,
+            "analysis_row_count": len(analysis_records),
+            "persist_meta": persist_meta,
             "candidates": [serialize_candidate(row) for row in all_results],
             "report_path": str(report_path.relative_to(_repo_root())).replace("\\", "/"),
             "log_path": str(log_path.relative_to(_repo_root())).replace("\\", "/"),

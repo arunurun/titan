@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package titan.breakout.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// BreakoutStockAnalysisRecord maps 1:1 to Supabase public.breakout_stock_analysis
+// (one flattened row per ticker per scanner run).
+
+// Request to run a full breakout scan (Nifty Smallcap 100 + Microcap 250).
+message BreakoutScanRequest {
+  // ISO calendar date (YYYY-MM-DD). Empty means today in Asia/Kolkata.
+  string scan_date = 1;
+
+  // Optional client-supplied run id (UUID string). Generated if empty.
+  string run_id = 2;
+
+  // When true, write daily_breakout_report_v2.md to the output directory.
+  bool write_report = 3;
+
+  // When true, stream diagnostic lines to stdout during the scan.
+  bool emit_to_stdout = 4;
+}
+
+// Combined request/raw + outcome fields for one ticker in one scanner run.
+message BreakoutStockAnalysisRecord {
+  // --- Run identity ---
+  string run_id = 1;
+  string scan_date = 2; // YYYY-MM-DD
+  google.protobuf.Timestamp inserted_at = 3;
+
+  // --- Request / Yahoo raw ---
+  string ticker = 4;        // NSE symbol without .NS suffix
+  string tier = 5;          // e.g. "Small-Cap (Nifty Smallcap 100)"
+  string symbol_yahoo = 6;  // e.g. "EMBDL.NS"
+  string fetch_error = 7;   // empty when fetch succeeded
+  int32 bar_count = 8;
+  double latest_close = 9;
+  double prev_close = 10;
+  double pct_change = 11;
+  double latest_volume = 12;
+  double vol_20_avg = 13;
+  double vol_mult = 14;
+  double rsi_14 = 15;
+  double adx_14 = 16;
+  double sma_50 = 17;
+  double sma_200 = 18;
+  double poc_30d = 19;
+  double min_price_threshold = 20;
+  double vol_mult_threshold = 21;
+  bool price_above_sma50 = 22;
+  string yahoo_as_of_date = 23; // YYYY-MM-DD; empty when unknown
+
+  // --- Outcome ---
+  bool passed = 24;
+  // e.g. pct_change, vol, RSI, ADX, insufficient_data, target_gain, PASS
+  string fail_reason = 25;
+  double entry_low = 26;
+  double entry_high = 27;
+  double stop_loss = 28;
+  double target_price = 29;
+  double target_gain_pct = 30;
+
+  // --- v7 evidence / ranking ---
+  string signal_tier = 31;
+  int32 persistence_score = 32;
+  double composite_rank = 33;
+  double liquidity_quality = 34;
+  int32 breakout_stage = 35;
+  double base_score = 36;
+  string pass_paths = 37;
+  string risk_flags = 38;
+}
+
+// Response for a completed breakout scan.
+message BreakoutScanResponse {
+  bool ok = 1;
+  string run_id = 2;
+  string scan_date = 3;
+  google.protobuf.Timestamp started_at = 4;
+  google.protobuf.Timestamp finished_at = 5;
+  double duration_sec = 6;
+  int32 tickers_scanned = 7;
+  int32 candidate_count = 8;
+  int32 analysis_row_count = 9;
+  repeated BreakoutStockAnalysisRecord records = 10;
+}
