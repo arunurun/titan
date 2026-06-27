@@ -75,7 +75,7 @@ def main() -> None:
     watch_count = sum(1 for r in all_results if r.get("Signal Tier") == SIGNAL_TIER_WATCH)
 
     report_markdown = _build_report_markdown(all_results, scan_date)
-    email_sent = _send_breakout_success_email(
+    email_sent, status = _send_breakout_success_email(
         scan_date=scan_date,
         tickers_scanned=len(TICKERS),
         all_results=all_results,

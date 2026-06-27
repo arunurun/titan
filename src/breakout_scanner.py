@@ -1758,11 +1758,31 @@ def _send_breakout_success_email(
     tickers_scanned: int,
     all_results: list[dict[str, Any]],
     report_markdown: str | None,
-) -> bool:
+) -> tuple[bool, str]:
     try:
-        from .email_notify import send_success_post_email
+        from .email_notify import (
+            _smtp_config,
+            mask_email_recipients,
+            send_success_post_email,
+            smtp_not_configured_reason,
+        )
     except ImportError:
-        from email_notify import send_success_post_email
+        from email_notify import (
+            _smtp_config,
+            mask_email_recipients,
+            send_success_post_email,
+            smtp_not_configured_reason,
+        )
+
+    skip_reason = smtp_not_configured_reason()
+    if skip_reason:
+        status = f"Breakout email: NOT SENT — {skip_reason}"
+        print(status, flush=True)
+        return False, status
+
+    cfg = _smtp_config()
+    assert cfg is not None
+    masked_to = mask_email_recipients(cfg["to"])  # type: ignore[arg-type]
 
     body = _build_breakout_email_body(
         scan_date=scan_date,
@@ -1782,10 +1802,11 @@ def _send_breakout_success_email(
         html_body=html_body,
     )
     if emailed_ok:
-        logger.info("Breakout scan success email sent.")
+        status = f"Breakout email: SENT to {masked_to}"
     else:
-        logger.info("Breakout scan success email skipped (SMTP not configured).")
-    return emailed_ok
+        status = "Breakout email: NOT SENT — SMTP send failed (see stderr for details)"
+    print(status, flush=True)
+    return emailed_ok, status
 
 
 def _send_breakout_failure_email(exc: BaseException) -> bool:
@@ -1935,12 +1956,13 @@ def run_breakout_scan(
             tier_candidate_counts[row["Tier"]] = tier_candidate_counts.get(row["Tier"], 0) + 1
 
         email_report_markdown = report_markdown if write_report else None
-        emailed_ok = _send_breakout_success_email(
+        emailed_ok, email_status = _send_breakout_success_email(
             scan_date=scan_date,
             tickers_scanned=scan_ticker_count,
             all_results=all_results,
             report_markdown=email_report_markdown,
         )
+        emit_line(email_status)
 
         return {
             "ok": True,

@@ -193,10 +193,15 @@ def test_format_change_arrow_direction_cues():
     assert "▲ +3.20%" == _format_change_arrow(3.2)
 
 
+@patch("email_notify._smtp_config")
+@patch("email_notify.smtp_not_configured_reason", return_value=None)
 @patch("email_notify.send_success_post_email")
-def test_run_breakout_scan_email_passes_html_body(mock_email, monkeypatch, tmp_path):
+def test_run_breakout_scan_email_passes_html_body(
+    mock_email, _mock_reason, mock_cfg, monkeypatch, tmp_path
+):
     from breakout_scanner import FILTERS, run_breakout_scan
 
+    mock_cfg.return_value = {"to": ["alice@example.com"]}
     mock_email.return_value = True
     monkeypatch.setattr("breakout_scanner.warm_yahoo_session", lambda: None)
     monkeypatch.setattr(
@@ -221,16 +226,21 @@ def test_run_breakout_scan_email_passes_html_body(mock_email, monkeypatch, tmp_p
     assert "#34a853" in kwargs["html_body"]
 
 
+@patch("email_notify._smtp_config")
+@patch("email_notify.smtp_not_configured_reason", return_value=None)
 @patch("email_notify.send_success_post_email")
-def test_run_breakout_scan_sends_success_email_zero_candidates(mock_email, monkeypatch, tmp_path):
+def test_run_breakout_scan_sends_success_email_zero_candidates(
+    mock_email, _mock_reason, mock_cfg, monkeypatch, tmp_path, capsys
+):
     from breakout_scanner import run_breakout_scan
 
+    mock_cfg.return_value = {"to": ["alice@example.com"]}
     mock_email.return_value = True
     monkeypatch.setattr("breakout_scanner.warm_yahoo_session", lambda: None)
     monkeypatch.setattr("breakout_scanner.download_nse_tickers", lambda url: [])
     output_dir = ROOT / "output" / "breakouts" / ".pytest_email"
 
-    result = run_breakout_scan(output_dir=output_dir, emit_to_stdout=False)
+    result = run_breakout_scan(output_dir=output_dir, emit_to_stdout=True)
 
     mock_email.assert_called_once()
     body = mock_email.call_args[0][0]
@@ -240,12 +250,56 @@ def test_run_breakout_scan_sends_success_email_zero_candidates(mock_email, monke
     assert "No breakouts today" in body
     assert result["email_sent"] is True
     assert result["candidate_count"] == 0
+    out = capsys.readouterr().out
+    assert "Breakout email: SENT to" in out
 
 
+@patch("email_notify.smtp_not_configured_reason", return_value="SMTP not configured (missing SMTP_HOST)")
 @patch("email_notify.send_success_post_email")
-def test_run_breakout_scan_email_includes_pass_watch_counts(mock_email, monkeypatch, tmp_path):
+def test_run_breakout_scan_email_not_sent_no_config(mock_email, _mock_reason, monkeypatch, tmp_path, capsys):
+    from breakout_scanner import run_breakout_scan
+
+    monkeypatch.setattr("breakout_scanner.warm_yahoo_session", lambda: None)
+    monkeypatch.setattr("breakout_scanner.download_nse_tickers", lambda url: [])
+    output_dir = ROOT / "output" / "breakouts" / ".pytest_email_no_smtp"
+
+    result = run_breakout_scan(output_dir=output_dir, emit_to_stdout=True)
+
+    mock_email.assert_not_called()
+    assert result["email_sent"] is False
+    out = capsys.readouterr().out
+    assert "Breakout email: NOT SENT — SMTP not configured (missing SMTP_HOST)" in out
+
+
+@patch("email_notify.send_success_post_email", return_value=False)
+@patch("email_notify.smtp_not_configured_reason", return_value=None)
+@patch("email_notify._smtp_config")
+def test_run_breakout_scan_email_smtp_send_failed(
+    mock_cfg, _mock_reason, _mock_send, monkeypatch, tmp_path, capsys
+):
+    from breakout_scanner import run_breakout_scan
+
+    mock_cfg.return_value = {"to": ["alice@example.com"]}
+    monkeypatch.setattr("breakout_scanner.warm_yahoo_session", lambda: None)
+    monkeypatch.setattr("breakout_scanner.download_nse_tickers", lambda url: [])
+    output_dir = ROOT / "output" / "breakouts" / ".pytest_email_smtp_fail"
+
+    result = run_breakout_scan(output_dir=output_dir, emit_to_stdout=True)
+
+    assert result["email_sent"] is False
+    out = capsys.readouterr().out
+    assert "Breakout email: NOT SENT — SMTP send failed (see stderr for details)" in out
+
+
+@patch("email_notify._smtp_config")
+@patch("email_notify.smtp_not_configured_reason", return_value=None)
+@patch("email_notify.send_success_post_email")
+def test_run_breakout_scan_email_includes_pass_watch_counts(
+    mock_email, _mock_reason, mock_cfg, monkeypatch, tmp_path
+):
     from breakout_scanner import FILTERS, run_breakout_scan
 
+    mock_cfg.return_value = {"to": ["alice@example.com"]}
     mock_email.return_value = True
     monkeypatch.setattr("breakout_scanner.warm_yahoo_session", lambda: None)
     monkeypatch.setattr(

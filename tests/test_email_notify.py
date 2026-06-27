@@ -1,8 +1,16 @@
 """email_notify optional SMTP."""
 
+import smtplib
 from unittest.mock import MagicMock, patch
 
-from email_notify import _render_success_html, send_action_required_email, send_failure_email, send_success_post_email
+from email_notify import (
+    _render_success_html,
+    mask_email_address,
+    send_action_required_email,
+    send_failure_email,
+    send_success_post_email,
+    smtp_not_configured_reason,
+)
 
 
 def test_send_skipped_when_not_configured(monkeypatch):
@@ -10,6 +18,56 @@ def test_send_skipped_when_not_configured(monkeypatch):
     monkeypatch.delenv("EMAIL_TO", raising=False)
     assert send_success_post_email("hello") is False
     assert send_failure_email("[Supabase] test") is False
+    assert smtp_not_configured_reason() is not None
+
+
+def test_smtp_not_configured_reason_missing_password(monkeypatch):
+    monkeypatch.setenv("SMTP_HOST", "smtp.example.com")
+    monkeypatch.setenv("EMAIL_FROM", "from@example.com")
+    monkeypatch.setenv("EMAIL_TO", "to@example.com")
+    monkeypatch.setenv("SMTP_USER", "user")
+    monkeypatch.delenv("SMTP_PASSWORD", raising=False)
+    reason = smtp_not_configured_reason()
+    assert reason is not None
+    assert "SMTP_PASSWORD empty" in reason
+
+
+def test_mask_email_address():
+    assert mask_email_address("alice@example.com") == "a***e@example.com"
+    assert mask_email_address("ab@example.com") == "a***@example.com"
+
+
+def test_send_message_failure_prints_stderr(monkeypatch, capsys):
+    monkeypatch.setenv("SMTP_HOST", "smtp.example.com")
+    monkeypatch.setenv("EMAIL_FROM", "from@example.com")
+    monkeypatch.setenv("EMAIL_TO", "to@example.com")
+
+    with patch("email_notify._send_message", return_value=False):
+        assert send_success_post_email("Post body") is False
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+
+
+def test_send_message_smtp_exception_prints_stderr(monkeypatch, capsys):
+    monkeypatch.setenv("SMTP_HOST", "smtp.example.com")
+    monkeypatch.setenv("SMTP_PORT", "587")
+    monkeypatch.setenv("SMTP_USER", "u")
+    monkeypatch.setenv("SMTP_PASSWORD", "p")
+    monkeypatch.setenv("EMAIL_FROM", "from@example.com")
+    monkeypatch.setenv("EMAIL_TO", "a@example.com")
+
+    mock_smtp = MagicMock()
+    mock_smtp.login.side_effect = smtplib.SMTPAuthenticationError(535, b"bad credentials")
+    mock_ctx = MagicMock()
+    mock_ctx.__enter__ = MagicMock(return_value=mock_smtp)
+    mock_ctx.__exit__ = MagicMock(return_value=False)
+
+    with patch("email_notify.smtplib.SMTP", return_value=mock_ctx):
+        assert send_success_post_email("Post body") is False
+
+    captured = capsys.readouterr()
+    assert "SMTP" in captured.err and "535" in captured.err
 
 
 def test_send_calls_smtp(monkeypatch):

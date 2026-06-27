@@ -7,6 +7,7 @@ import os
 import re
 import smtplib
 import ssl
+import sys
 from urllib.parse import quote
 from datetime import datetime
 from html import escape
@@ -191,7 +192,8 @@ def _html_per_symbol_sector_cards(other_lines: list[str]) -> str:
     return "".join(parts)
 
 
-def _smtp_config() -> dict[str, object] | None:
+def smtp_not_configured_reason() -> str | None:
+    """Human-readable skip reason when SMTP env is incomplete; None when configured."""
     host = os.environ.get("SMTP_HOST", "").strip()
     raw_to = os.environ.get("EMAIL_TO", "").strip()
     from_addr = os.environ.get("EMAIL_FROM", "").strip()
@@ -203,21 +205,54 @@ def _smtp_config() -> dict[str, object] | None:
     if not raw_to:
         missing.append("EMAIL_TO")
     if missing:
-        logger.info(
-            "Email notify skipped: set repository/env secrets %s (and SMTP_USER/SMTP_PASSWORD if required).",
-            ", ".join(missing),
-        )
-        return None
+        return f"SMTP not configured (missing {', '.join(missing)})"
     to_addrs = [x.strip() for x in raw_to.split(",") if x.strip()]
     if not to_addrs:
-        logger.info("Email notify skipped: EMAIL_TO has no addresses.")
+        return "SMTP not configured (EMAIL_TO has no addresses)"
+    user = os.environ.get("SMTP_USER", "").strip()
+    password = os.environ.get("SMTP_PASSWORD", "").strip().replace(" ", "")
+    if user and not password:
+        return "SMTP not configured (SMTP_USER set but SMTP_PASSWORD empty)"
+    return None
+
+
+def mask_email_address(addr: str) -> str:
+    """Mask local part for logs; keep domain visible."""
+    local, sep, domain = addr.strip().partition("@")
+    if not sep:
+        return "***"
+    if len(local) <= 2:
+        masked_local = (local[0] + "***") if local else "***"
+    else:
+        masked_local = f"{local[0]}***{local[-1]}"
+    return f"{masked_local}@{domain}"
+
+
+def mask_email_recipients(recipients: list[str]) -> str:
+    return ", ".join(mask_email_address(r) for r in recipients)
+
+
+def _smtp_config() -> dict[str, object] | None:
+    skip_reason = smtp_not_configured_reason()
+    if skip_reason:
+        if "missing" in skip_reason:
+            missing_part = skip_reason.split("(", 1)[-1].rstrip(")")
+            logger.info(
+                "Email notify skipped: set repository/env secrets %s (and SMTP_USER/SMTP_PASSWORD if required).",
+                missing_part.replace("missing ", ""),
+            )
+        elif "EMAIL_TO has no addresses" in skip_reason:
+            logger.info("Email notify skipped: EMAIL_TO has no addresses.")
+        elif "SMTP_PASSWORD empty" in skip_reason:
+            logger.warning("SMTP_USER is set but SMTP_PASSWORD is empty; skipping email.")
         return None
+    host = os.environ.get("SMTP_HOST", "").strip()
+    raw_to = os.environ.get("EMAIL_TO", "").strip()
+    from_addr = os.environ.get("EMAIL_FROM", "").strip()
+    to_addrs = [x.strip() for x in raw_to.split(",") if x.strip()]
     user = os.environ.get("SMTP_USER", "").strip()
     # Gmail app passwords are often pasted as "xxxx xxxx xxxx xxxx"; SMTP expects no spaces.
     password = os.environ.get("SMTP_PASSWORD", "").strip().replace(" ", "")
-    if user and not password:
-        logger.warning("SMTP_USER is set but SMTP_PASSWORD is empty; skipping email.")
-        return None
     raw_port = os.environ.get("SMTP_PORT", "").strip()
     port = int(raw_port) if raw_port else 587
     use_tls_raw = (os.environ.get("SMTP_USE_TLS") or "true").strip()
@@ -444,10 +479,14 @@ def _send_message(msg: EmailMessage, cfg: dict[str, object]) -> bool:
                     smtp.login(user, password)
                 smtp.send_message(msg)
     except OSError as e:
-        logger.warning("SMTP connection failed (network or host): %s", e)
+        msg = f"SMTP connection failed (network or host): {e}"
+        logger.warning(msg)
+        print(msg, file=sys.stderr, flush=True)
         return False
     except smtplib.SMTPException as e:
-        logger.warning("SMTP send failed: %s", e)
+        msg = f"SMTP send failed: {e}"
+        logger.warning(msg)
+        print(msg, file=sys.stderr, flush=True)
         return False
     return True
 
@@ -524,6 +563,7 @@ def send_success_post_email(
     msg.add_alternative(html, subtype="html")
 
     if not _send_message(msg, cfg):
+        logger.warning("Success post email not sent (SMTP send failed).")
         return False
 
     logger.info("Sent audit email to %s", to_list)
