@@ -1595,7 +1595,10 @@ def _send_breakout_success_email(
     all_results: list[dict[str, Any]],
     report_markdown: str | None,
 ) -> bool:
-    from email_notify import send_success_post_email
+    try:
+        from .email_notify import send_success_post_email
+    except ImportError:
+        from email_notify import send_success_post_email
 
     body = _build_breakout_email_body(
         scan_date=scan_date,
@@ -1622,7 +1625,10 @@ def _send_breakout_success_email(
 
 
 def _send_breakout_failure_email(exc: BaseException) -> bool:
-    from email_notify import send_failure_email
+    try:
+        from .email_notify import send_failure_email
+    except ImportError:
+        from email_notify import send_failure_email
 
     summary = str(exc).strip().split("\n", 1)[0].strip()
     if len(summary) > 180:
