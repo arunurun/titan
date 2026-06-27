@@ -140,7 +140,7 @@ def load_config(
     Set ``require_gemini=False`` for paths that should still run when no Gemini
     keys are configured.
     """
-    _load_dotenv_file(env_path, override=False)
+    _load_dotenv_file(env_path, override=env_path is not None)
 
     def req(name: str) -> str:
         v = os.environ.get(name, "").strip()
