@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from protocol_runtime import IST, should_run_window_now
+from protocol_runtime import IST, should_run_window_now, to_ist
 
 
 def due_windows(
@@ -14,7 +14,7 @@ def due_windows(
     windows: tuple[str, ...] = ("open", "mid", "cluster0"),
     open_mid_tolerance_minutes: int = 0,
 ) -> list[str]:
-    now = now_ist.astimezone(IST) if now_ist is not None else datetime.now(IST)
+    now = to_ist(now_ist) if now_ist is not None else datetime.now(IST)
     out: list[str] = []
     for w in windows:
         tol = open_mid_tolerance_minutes if w in ("open", "mid") else 0
@@ -24,7 +24,7 @@ def due_windows(
 
 
 def window_slot_key(window: str, now_ist: datetime) -> str:
-    now = now_ist.astimezone(IST)
+    now = to_ist(now_ist)
     day = now.strftime("%Y-%m-%d")
     if window in ("open", "mid"):
         return f"{day}:{window}"
