@@ -20,7 +20,10 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from config_loader import load_config  # noqa: E402
 
-MIGRATION = ROOT / "sql" / "create_breakout_stock_analysis.sql"
+MIGRATIONS = [
+    ROOT / "sql" / "create_breakout_stock_analysis.sql",
+    ROOT / "sql" / "add_breakout_v7_columns.sql",
+]
 
 VERIFY_TABLES_SQL = """
 select table_name
@@ -80,13 +83,15 @@ def main() -> int:
         return 1
     project_ref = match.group(1)
 
-    if not MIGRATION.is_file():
-        print(f"Migration not found: {MIGRATION}", file=sys.stderr)
-        return 1
+    for migration in MIGRATIONS:
+        if not migration.is_file():
+            print(f"Migration not found: {migration}", file=sys.stderr)
+            return 1
 
     try:
-        _run_management_query(project_ref, access_token, MIGRATION.read_text(encoding="utf-8"))
-        print(f"Applied migration: {MIGRATION.name}")
+        for migration in MIGRATIONS:
+            _run_management_query(project_ref, access_token, migration.read_text(encoding="utf-8"))
+            print(f"Applied migration: {migration.name}")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")
         print(f"Migration failed: HTTP {exc.code} {detail}", file=sys.stderr)
