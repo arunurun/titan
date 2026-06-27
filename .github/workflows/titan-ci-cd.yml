@@ -61,7 +61,7 @@ jobs:
       - name: Deploy to staging
         run: |
           echo "Deploying branch '${{ github.head_ref }}' to staging..."
-          # TODO: replace with staging deployment scripts (SSH, rsync, container rollout, etc.)
+          # TODO: replace with staging deployment scripts
 
   # -------------------------------------------------------------------------
   # Job 3: Deploy production (push to main only)
