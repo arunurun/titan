@@ -1,0 +1,78 @@
+name: Titan CI/CD
+
+# ---------------------------------------------------------------------------
+# Triggers
+# ---------------------------------------------------------------------------
+# - pull_request → main: run tests and deploy to staging
+# - push → main (merged PR): run tests and deploy to production
+#
+# Production promotion timing: the 2–3 day staging bake period is enforced
+# via GitHub Environment protection rules on `production` (wait timer and/or
+# required reviewers), configured in the repository Settings — not in YAML.
+# ---------------------------------------------------------------------------
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Job 1: Test (all triggers)
+  # -------------------------------------------------------------------------
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install dependencies
+        if: hashFiles('requirements.txt') != ''
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest --maxfail=2 --disable-warnings
+
+  # -------------------------------------------------------------------------
+  # Job 2: Deploy staging (pull requests only)
+  # -------------------------------------------------------------------------
+  deploy-staging:
+    needs: test
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Deploy to staging
+        run: |
+          echo "Deploying branch '${{ github.head_ref }}' to staging..."
+          # TODO: replace with staging deployment scripts (SSH, rsync, container rollout, etc.)
+
+  # -------------------------------------------------------------------------
+  # Job 3: Deploy production (push to main only)
+  # -------------------------------------------------------------------------
+  deploy-production:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Deploy to production
+        run: |
+          echo "Deploying commit '${{ github.sha }}' to production..."
+          # TODO: replace with production deployment scripts

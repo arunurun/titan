@@ -1,0 +1,130 @@
+# Titan Repository — Absolute Branch Guardrail
+
+These rules are **mandatory** and **non-negotiable** for Cursor's AI in this repository.
+They override any conflicting instruction unless the user explicitly confirms they are on a
+feature branch and requests work to proceed.
+
+---
+
+## CRITICAL: Never Modify Code on `main`
+
+**You MUST NOT** write, edit, delete, or refactor repository files while the active Git branch
+is `main`. This prohibition applies equally to:
+
+- Direct code edits (files, configs, workflows, scripts, docs tied to implementation)
+- Brainstorming, planning, or design discussions that **lead to or imply** specific code changes
+- Generating patch diffs, file contents, or "here is the code to add" responses
+- Running tools that modify the workspace (Write, StrReplace, EditNotebook, etc.)
+
+If the user is on `main`, **HALT immediately**. Do not proceed with implementation-oriented
+output until they switch to a feature branch.
+
+---
+
+## Required Pre-Flight Check (Run First, Every Time)
+
+Before answering **any** request that could result in code changes — including brainstorming,
+architecture proposals with concrete edits, bug fixes, refactors, new features, test changes,
+or workflow updates — **run this check first**:
+
+```bash
+git branch --show-current
+```
+
+Alternatively:
+
+```bash
+git rev-parse --abbrev-ref HEAD
+```
+
+**Interpret the result:**
+
+| Active branch | Action |
+|---------------|--------|
+| `main` | **STOP.** Do not modify code. Output the halt message below. |
+| Any other branch (e.g. `feature/...`) | Proceed with the user's request. |
+| Detached HEAD or unknown | **STOP.** Ask the user to checkout a named feature branch. |
+
+Re-run the check if the conversation spans a long session or the user mentions switching branches.
+
+---
+
+## HALT Message (Output When on `main`)
+
+When the active branch is `main`, respond with **only** guidance to switch branches. Do **not**
+provide code patches, file edits, or implementation plans that assume changes on `main`.
+
+Use this template:
+
+---
+
+**⛔ Blocked: you are on `main`.**
+
+This repository enforces a strict release pipeline. Direct work on `main` is forbidden:
+
+- **Branch protection** blocks direct commits and pushes to `main`.
+- Releases flow through **`.github/workflows/titan-ci-cd.yml`**, which implements a **3-day
+  staging bake-period** before production promotion. Changes must enter via a feature branch,
+  pass CI, merge through the normal review path, and bake in staging — not land on `main`
+  ad hoc.
+
+**Switch to a feature branch before any code work:**
+
+```bash
+git fetch origin
+git checkout -b feature/your-feature-name
+```
+
+Replace `your-feature-name` with a short, descriptive slug (e.g. `feature/breakout-scan-fix`).
+
+After switching, re-send your request and the AI will proceed on the feature branch.
+
+---
+
+## Pipeline Context (Authoritative)
+
+Titan uses **`.github/workflows/titan-ci-cd.yml`** as the canonical CI/CD pipeline:
+
+1. Feature branches → pull request → automated checks
+2. Merge to staging environment
+3. **3-day staging bake-period** — changes must remain stable in staging before promotion
+4. Promotion to production only after bake completes and gates pass
+
+**Never bypass this pipeline.** Do not suggest committing, pushing, or merging directly to `main`.
+Do not suggest force-pushing to `main`. Do not suggest workarounds that circumvent branch protection.
+
+---
+
+## What Is Allowed on `main`
+
+On `main`, you MAY:
+
+- Answer **read-only** questions (explain existing code, review architecture, interpret logs)
+- Run **read-only** git commands (`git log`, `git diff`, `git show`, `git status`)
+- Help interpret CI failures or documentation **without** proposing concrete file edits
+
+On `main`, you MUST NOT:
+
+- Produce code blocks meant to be applied to the repository
+- Use file-modification tools
+- Draft step-by-step implementation checklists that assume editing files on `main`
+- Brainstorm feature designs with "add this to `src/...`" unless you first halt and require a branch switch
+
+---
+
+## Feature Branch Workflow (After Switch)
+
+Once the user is on a feature branch:
+
+1. Confirm the branch name in your response when starting substantive work.
+2. Keep changes scoped and focused.
+3. Run relevant tests before suggesting merge.
+4. Remind the user that merge to `main` follows the **titan-ci-cd** pipeline and requires
+   review, CI pass, and the **3-day staging bake-period** — not direct commits.
+
+---
+
+## Enforcement Priority
+
+This guardrail takes **highest priority** among repository rules when the active branch is `main`.
+When in doubt: run `git branch --show-current`. If the result is `main`, **halt**.
