@@ -11,6 +11,13 @@ from sector_registry import SectorInstrument
 IST = ZoneInfo("Asia/Kolkata")
 
 
+def to_ist(now_ist: datetime) -> datetime:
+    """Interpret naive datetimes as IST wall clock; convert aware datetimes to IST."""
+    if now_ist.tzinfo is None:
+        return now_ist.replace(tzinfo=IST)
+    return now_ist.astimezone(IST)
+
+
 @dataclass(frozen=True)
 class ProtocolRun:
     window: str
@@ -62,12 +69,7 @@ def should_run_window_now(
     now_ist: datetime | None = None,
     tolerance_minutes: int = 5,
 ) -> bool:
-    if now_ist is None:
-        now = datetime.now(IST)
-    elif now_ist.tzinfo is None:
-        now = now_ist.replace(tzinfo=IST)
-    else:
-        now = now_ist.astimezone(IST)
+    now = datetime.now(IST) if now_ist is None else to_ist(now_ist)
     if now.weekday() >= 5:
         return False
     hhmm = now.time()
