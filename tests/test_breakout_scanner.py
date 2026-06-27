@@ -204,11 +204,12 @@ def test_run_breakout_scan_email_passes_html_body(mock_email, monkeypatch, tmp_p
         lambda url: ["PASS.NS"],
     )
 
-    def _fake_evaluate(ticker, tier_name, emit=None):
-        return _sample_candidate_row(signal_tier="PASS") | {
+    def _fake_evaluate(ticker, tier_name, emit=None, **kwargs):
+        row = _sample_candidate_row(signal_tier="PASS") | {
             "Ticker": ticker.replace(".NS", ""),
             "Tier": FILTERS[tier_name]["type"],
         }
+        return row, {"ticker": ticker.replace(".NS", ""), "passed": True}
 
     monkeypatch.setattr("breakout_scanner.evaluate_and_audit_stock", _fake_evaluate)
     output_dir = ROOT / "output" / "breakouts" / ".pytest_email_html"
@@ -252,13 +253,14 @@ def test_run_breakout_scan_email_includes_pass_watch_counts(mock_email, monkeypa
         lambda url: ["PASS.NS"] if "smallcap" in url.lower() else ["WATCH.NS"],
     )
 
-    def _fake_evaluate(ticker, tier_name, emit=None):
+    def _fake_evaluate(ticker, tier_name, emit=None, **kwargs):
         tier = FILTERS[tier_name]["type"]
         signal_tier = "PASS" if ticker == "PASS.NS" else "WATCH"
-        return _sample_candidate_row(signal_tier=signal_tier) | {
+        row = _sample_candidate_row(signal_tier=signal_tier) | {
             "Ticker": ticker.replace(".NS", ""),
             "Tier": tier,
         }
+        return row, {"ticker": ticker.replace(".NS", ""), "passed": signal_tier == "PASS"}
 
     monkeypatch.setattr("breakout_scanner.evaluate_and_audit_stock", _fake_evaluate)
     output_dir = ROOT / "output" / "breakouts" / ".pytest_email_tiers"
