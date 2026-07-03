@@ -108,6 +108,46 @@ def test_serialize_candidate_maps_api_fields():
     assert out["payload"] == "payload text"
 
 
+def test_serialize_candidate_setup_em_dash_trade_levels():
+    """PRE_BREAKOUT rows use em dash for missing trade levels; must not crash."""
+    row = {
+        "Ticker": "SETUP1",
+        "Breeze Code": "SETUP1",
+        "Tier": "Small-Cap (Nifty Smallcap 100)",
+        "Price": 250.0,
+        "Change": "▲ +1.50%",
+        "Volume Mult": "2.1x",
+        "RSI": 58.0,
+        "ADX": 22.0,
+        "Entry Range": "—",
+        "Est. Stop-Loss": "—",
+        "Est. Target (1:2)": "—",
+        "Est. Gain": "—",
+        "Risk Flags": "",
+        "Signal Tier": "PRE_BREAKOUT",
+        "Setup Rank": 71.2,
+        "Setup Trigger": ">255.0",
+        "Pivot Proximity": 0.92,
+        "Liquidity Quality": 68.0,
+        "Persistence Score": 2,
+        "Breakout Stage": 0,
+        "Base Score": 60.0,
+        "Composite Rank": 71.2,
+        "Pass Paths": "",
+        "Watch Reason": "",
+        "Payload": "setup payload",
+    }
+    out = serialize_candidate(row)
+    assert out["signal_tier"] == "PRE_BREAKOUT"
+    assert out["est_gain_pct"] is None
+    assert out["est_gain_display"] == "—"
+    assert out["entry_range"] == "—"
+    assert out["est_stop_loss"] == "—"
+    assert out["est_target"] == "—"
+    assert out["change_pct"] == 1.5
+    assert out["volume_mult"] == 2.1
+
+
 def test_build_report_markdown_empty():
     import datetime
 

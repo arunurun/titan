@@ -1779,6 +1779,26 @@ def _display_num(value: Any, *, decimals: int = 1) -> str:
     return str(value)
 
 
+_NA_FLOAT_DISPLAY = frozenset({"—", "-", "", "n/a", "na", "none"})
+
+
+def _optional_float_from_display(raw: Any) -> float | None:
+    """Parse a display string to float; treat em dash and placeholders as None."""
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        val = float(raw)
+        return None if val != val else val
+    s = str(raw).strip()
+    if s.casefold() in _NA_FLOAT_DISPLAY:
+        return None
+    try:
+        val = float(s)
+    except ValueError:
+        return None
+    return None if val != val else val
+
+
 def _sort_report_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """PASS first, then WATCH, then PRE_BREAKOUT; each group by rank descending."""
 
@@ -1806,23 +1826,23 @@ def _sort_report_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def serialize_candidate(row: dict[str, Any]) -> dict[str, Any]:
     """Normalize a scanner row for JSON API responses."""
     change_raw = str(row.get("Change", "")).lstrip("▲▼● ").lstrip("+").rstrip("%").strip()
-    vol_raw = str(row.get("Volume Mult", "")).rstrip("x")
-    gain_raw = str(row.get("Est. Gain", "")).rstrip("%")
+    vol_raw = str(row.get("Volume Mult", "")).rstrip("x").strip()
+    gain_raw = str(row.get("Est. Gain", "")).rstrip("%").strip()
     return {
         "ticker": row["Ticker"],
         "breeze_stock_code": row.get("Breeze Code"),
         "tier": row["Tier"],
         "price": row["Price"],
-        "change_pct": float(change_raw) if change_raw else None,
+        "change_pct": _optional_float_from_display(change_raw),
         "change_display": row["Change"],
-        "volume_mult": float(vol_raw) if vol_raw else None,
+        "volume_mult": _optional_float_from_display(vol_raw),
         "volume_mult_display": row["Volume Mult"],
         "rsi": row["RSI"],
         "adx": row["ADX"],
         "entry_range": row["Entry Range"],
         "est_stop_loss": row["Est. Stop-Loss"],
         "est_target": row["Est. Target (1:2)"],
-        "est_gain_pct": float(gain_raw) if gain_raw else None,
+        "est_gain_pct": _optional_float_from_display(gain_raw),
         "est_gain_display": row["Est. Gain"],
         "risk_flags": row["Risk Flags"],
         "signal_tier": row.get("Signal Tier"),
