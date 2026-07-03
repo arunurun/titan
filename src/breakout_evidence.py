@@ -600,3 +600,36 @@ def composite_rank_score(
         + risk * RANK_WEIGHTS["risk_penalty"],
         2,
     )
+
+
+SETUP_RANK_WEIGHTS: dict[str, float] = {
+    "base": 0.30,
+    "vol_persistence": 0.20,
+    "sector_lead": 0.15,
+    "pivot": 0.15,
+    "liquidity": 0.10,
+    "rs": 0.10,
+}
+
+
+def setup_rank_score(metrics: dict[str, Any]) -> float:
+    """Weighted rank for PRE_BREAKOUT setups (0-100); de-emphasizes breakout pct/vol."""
+    base = float(metrics.get("base_score") or _NEUTRAL_SUBSCORE)
+    persist_raw = int(metrics.get("persistence_score") or 0)
+    persist = persist_raw / 4.0 * 100.0
+    sector = float(metrics.get("sector_lead")) if _is_finite(metrics.get("sector_lead")) else 50.0
+    pivot = float(metrics.get("pivot_proximity") or _NEUTRAL_SUBSCORE)
+    liq = float(metrics.get("liquidity_quality") or _NEUTRAL_SUBSCORE)
+    rsi_val = float(metrics.get("rsi_val") or 50.0)
+    rs = _clamp((rsi_val - 30.0) / 40.0 * 100.0, 0.0, 100.0)
+    penalty = float(metrics.get("participation_penalty") or 0.0)
+
+    raw = (
+        base * SETUP_RANK_WEIGHTS["base"]
+        + persist * SETUP_RANK_WEIGHTS["vol_persistence"]
+        + sector * SETUP_RANK_WEIGHTS["sector_lead"]
+        + pivot * SETUP_RANK_WEIGHTS["pivot"]
+        + liq * SETUP_RANK_WEIGHTS["liquidity"]
+        + rs * SETUP_RANK_WEIGHTS["rs"]
+    )
+    return round(_clamp(raw - penalty, 0.0, 100.0), 2)
