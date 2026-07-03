@@ -14,6 +14,8 @@ from typing import Any
 from breakout_scanner import (
     FILTERS,
     INDEX_URLS,
+    PCT_CHANGE_MIN,
+    SIGNAL_TIER_PASS,
     SIGNAL_TIER_WATCH,
     bar_dates_from_df,
     collect_filter_failures,
@@ -22,6 +24,7 @@ from breakout_scanner import (
     fetch_yahoo_history,
     warm_yahoo_session,
 )
+from breakout_setup import SIGNAL_TIER_PRE_BREAKOUT, evaluate_setup_as_of
 
 FORWARD_HORIZONS: tuple[int, ...] = (5, 10, 15)
 CLOSE_RETURN_THRESHOLDS: tuple[float, ...] = (8.0, 15.0)
@@ -1071,3 +1074,228 @@ def build_report_markdown(report: dict[str, Any]) -> str:
         "*Educational backtest only; not investment advice.*",
     ])
     return "\n".join(lines)
+
+
+def _setup_breakout_hit(
+    df: dict[str, Any],
+    setup_idx: int,
+    forward_end: int,
+    tier_key: str,
+    *,
+    trigger_price: float | None,
+) -> dict[str, Any]:
+    """Return whether a PRE_BREAKOUT day converts to PASS within forward window."""
+    n = len(df["close"])
+    filt = FILTERS[tier_key]
+    vol_thresh = filt["vol_mult"]
+    first_pass_idx: int | None = None
+    for j in range(setup_idx + 1, min(forward_end + 1, n)):
+        ev = evaluate_bars_as_of(df, j, tier_key)
+        if ev.get("passed") or ev.get("signal_tier") == SIGNAL_TIER_PASS:
+            first_pass_idx = j
+            break
+        close_j = float(df["close"][j])
+        prev = float(df["close"][j - 1]) if j > 0 else close_j
+        pct = ((close_j - prev) / prev * 100.0) if prev > 0 else 0.0
+        vol_20 = sum(float(v) for v in df["volume"][max(0, j - 19) : j + 1]) / min(20, j + 1)
+        vol_mult = float(df["volume"][j]) / vol_20 if vol_20 > 0 else 0.0
+        pivot_ok = trigger_price is None or close_j > float(trigger_price)
+        if pct >= PCT_CHANGE_MIN and vol_mult >= vol_thresh and pivot_ok:
+            first_pass_idx = j
+            break
+
+    lead_sessions = (first_pass_idx - setup_idx) if first_pass_idx is not None else None
+    return {
+        "breakout_hit": first_pass_idx is not None,
+        "forward_breakout_session": lead_sessions,
+        "false_setup": first_pass_idx is None,
+    }
+
+
+def replay_setup_signals(sym: str, stock_data: dict[str, Any]) -> dict[str, Any]:
+    """Replay PRE_BREAKOUT setup evaluation across history."""
+    df = stock_data["df"]
+    dates = stock_data["dates"]
+    tier_key = stock_data["tier_key"]
+    n = len(df["close"])
+    filt = FILTERS[tier_key]
+    setups: list[dict[str, Any]] = []
+
+    for idx in range(MIN_HISTORY_BARS - 1, n):
+        breakout = evaluate_bars_as_of(df, idx, tier_key)
+        if breakout.get("signal_tier") in (SIGNAL_TIER_PASS, "WATCH"):
+            continue
+        if breakout.get("fail_reason") is None:
+            continue
+        setup = evaluate_setup_as_of(
+            df,
+            idx,
+            tier_key,
+            min_price=filt["min_price"],
+            vol_mult_threshold=filt["vol_mult"],
+            bhav_turnover_lacs=stock_data.get("liquidity_turnover_lacs_avg"),
+            rsi_val=breakout.get("rsi_val"),
+            adx_val=breakout.get("adx_val"),
+            pct_change=breakout.get("pct_change"),
+            vol_mult=breakout.get("vol_mult"),
+            sma20_last=breakout.get("sma20_last"),
+            sma50_last=breakout.get("sma50_last"),
+        )
+        if setup is None:
+            continue
+        row = {
+            "symbol": sym,
+            "signal_date": dates[idx] if idx < len(dates) else "",
+            "bar_idx": idx,
+            "setup_rank": setup.get("setup_rank"),
+            "setup_trigger_price": setup.get("setup_trigger_price"),
+            "horizons": {},
+        }
+        trigger = setup.get("setup_trigger_price")
+        for h in FORWARD_HORIZONS:
+            hit = _setup_breakout_hit(df, idx, idx + h, tier_key, trigger_price=trigger)
+            row["horizons"][f"t{h}"] = hit
+        setups.append(row)
+
+    return {
+        "symbol": sym,
+        "tier_key": tier_key,
+        "setup_signal_count": len(setups),
+        "setups": setups,
+    }
+
+
+def setup_to_breakout_rate(all_setups: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate precision@N for PRE_BREAKOUT replay rows."""
+    total = len(all_setups)
+    summary: dict[str, Any] = {"total_setup_signals": total}
+    if not total:
+        for h in FORWARD_HORIZONS:
+            summary[f"precision_t{h}"] = None
+            summary[f"hits_t{h}"] = 0
+        return summary
+
+    for h in FORWARD_HORIZONS:
+        key = f"t{h}"
+        hits = sum(
+            1 for row in all_setups
+            if ((row.get("horizons") or {}).get(key) or {}).get("breakout_hit")
+        )
+        summary[f"hits_t{h}"] = hits
+        summary[f"precision_t{h}"] = round(100.0 * hits / total, 2)
+
+    lead_times = [
+        ((row.get("horizons") or {}).get("t15") or {}).get("forward_breakout_session")
+        for row in all_setups
+        if ((row.get("horizons") or {}).get("t15") or {}).get("breakout_hit")
+    ]
+    lead_clean = [int(x) for x in lead_times if x is not None]
+    summary["median_lead_sessions_t15"] = (
+        sorted(lead_clean)[len(lead_clean) // 2] if lead_clean else None
+    )
+    return summary
+
+
+def build_setup_backtest_markdown(report: dict[str, Any]) -> str:
+    meta = report.get("meta") or {}
+    summary = report.get("summary") or {}
+    lines = [
+        "# PRE_BREAKOUT Setup Backtest",
+        "",
+        f"- **Range:** {meta.get('range', '6m')}",
+        f"- **Universe stocks:** {meta.get('stocks_replayed', 0)}",
+        f"- **Setup signals:** {summary.get('total_setup_signals', 0)}",
+        "",
+        "## Setup → Breakout precision",
+        "",
+        "| Horizon | Hits | Precision % |",
+        "| --- | ---: | ---: |",
+    ]
+    for h in FORWARD_HORIZONS:
+        lines.append(
+            f"| T+{h} | {summary.get(f'hits_t{h}', 0)} | "
+            f"{summary.get(f'precision_t{h}', 'n/a')}% |"
+        )
+    med = summary.get("median_lead_sessions_t15")
+    lines.extend([
+        "",
+        f"**Median lead time (T+15 hits):** {med if med is not None else 'n/a'} sessions",
+        "",
+        "## Methodology",
+        "",
+        "Replay applies `evaluate_setup_as_of` on days where breakout filters fail. "
+        "A setup converts within N sessions if production `evaluate_bars_as_of` yields PASS, "
+        "or close clears pivot with ≥3% day and tier volume threshold.",
+        "",
+        "*Educational backtest only; not investment advice.*",
+    ])
+    return "\n".join(lines)
+
+
+def run_setup_backtest(
+    *,
+    universe: list[dict[str, Any]] | None = None,
+    nse_cache_dir: Path | None = None,
+    top_n: int = 20,
+    range_str: str = "6m",
+    output_dir: Path | None = None,
+    warm_session: bool = True,
+    stock_filter: list[str] | None = None,
+) -> dict[str, Any]:
+    """Replay PRE_BREAKOUT setups and measure forward breakout conversion."""
+    started = dt.now()
+    out_dir = output_dir or default_output_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if universe is None:
+        universe = build_backtest_universe(nse_cache_dir=nse_cache_dir, top_n=top_n)["stocks"]
+    if stock_filter:
+        wanted = {s.strip().upper() for s in stock_filter}
+        universe = [u for u in universe if u["symbol"] in wanted]
+
+    if len(universe) > FETCH_CHUNK_SIZE:
+        data_by_symbol, fetch_manifest = fetch_universe_history_throttled(
+            universe, range_str=range_str, warm_session=warm_session,
+        )
+    else:
+        data_by_symbol, fetch_manifest = fetch_universe_history(
+            universe, range_str=range_str, warm_session=warm_session,
+        )
+
+    per_stock: dict[str, Any] = {}
+    all_setups: list[dict[str, Any]] = []
+    for entry in universe:
+        sym = entry["symbol"]
+        if sym not in data_by_symbol:
+            per_stock[sym] = {"symbol": sym, "error": "fetch_failed", "setup_signal_count": 0}
+            continue
+        stock_report = replay_setup_signals(sym, data_by_symbol[sym])
+        per_stock[sym] = stock_report
+        all_setups.extend(stock_report.get("setups") or [])
+
+    finished = dt.now()
+    summary = setup_to_breakout_rate(all_setups)
+    summary["stocks_fetched"] = len(fetch_manifest.get("success") or [])
+    summary["stocks_failed"] = len(fetch_manifest.get("failed") or [])
+    summary["stocks_replayed"] = len([s for s in per_stock.values() if not s.get("error")])
+
+    report = {
+        "meta": {
+            "started_at": started.isoformat(timespec="seconds"),
+            "finished_at": finished.isoformat(timespec="seconds"),
+            "duration_sec": round((finished - started).total_seconds(), 2),
+            "range": range_str,
+            "forward_horizons": list(FORWARD_HORIZONS),
+            "stocks_replayed": summary["stocks_replayed"],
+        },
+        "summary": summary,
+        "per_stock": per_stock,
+        "setups": all_setups,
+    }
+
+    json_path = out_dir / "setup_backtest.json"
+    md_path = out_dir / "setup_backtest.md"
+    json_path.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
+    md_path.write_text(build_setup_backtest_markdown(report), encoding="utf-8")
+    report["paths"] = {"json": str(json_path), "markdown": str(md_path)}
+    return report
