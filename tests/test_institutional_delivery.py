@@ -18,8 +18,9 @@ def test_load_delivery_pct_by_symbol_from_bhavcopy():
         }
     )
 
-    with patch("nse_eod.fetch_sec_bhavdata_full", return_value=frame):
-        out = load_delivery_pct_by_symbol(["RELIANCE", "TCS"], as_of_date="2026-06-30")
+    with patch("breakout_eod_context._supabase_client", return_value=None):
+        with patch("nse_eod.fetch_sec_bhavdata_full", return_value=frame):
+            out = load_delivery_pct_by_symbol(["RELIANCE", "TCS"], as_of_date="2026-06-30")
 
     assert out["RELIANCE"] == 45.5
     assert out["TCS"] == 38.2

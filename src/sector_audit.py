@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import math
 import os
@@ -1788,14 +1789,33 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     fallback_used = bool(audit.get("exchange_fallback_used", False))
     nf = audit.get("next_day_score")
 
+    preserved_shadow_gates = (
+        copy.deepcopy(audit["shadow_gates"])
+        if isinstance(audit.get("shadow_gates"), list)
+        else None
+    )
+    preserved_overext = (
+        copy.deepcopy(audit["signal_overext_ceiling"])
+        if isinstance(audit.get("signal_overext_ceiling"), dict)
+        else None
+    )
+
+    def _restore_persisted_gate_context() -> None:
+        if preserved_shadow_gates is not None:
+            audit["shadow_gates"] = preserved_shadow_gates
+        if preserved_overext is not None:
+            audit["signal_overext_ceiling"] = preserved_overext
+
     lines_out: list[str] = []
     try:
         from action_engine import derive_full_action, digest_headline_text
 
         action = derive_full_action(audit)
+        _restore_persisted_gate_context()
         audit["full_action"] = action
         lines_out.append(f"{symbol} ({exchange}) — {digest_headline_text(audit, action)}")
         rec_lines = _action_recommendation_digest_lines(audit)
+        _restore_persisted_gate_context()
         if rec_lines:
             lines_out.extend(rec_lines)
     except ImportError:
@@ -2008,6 +2028,7 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     for flag in flag_simple:
         context_tail.append(f"• {flag}")
 
+    _restore_persisted_gate_context()
     for shadow_note in _digest_shadow_gate_notes(audit):
         context_tail.append(f"• {shadow_note}")
 
