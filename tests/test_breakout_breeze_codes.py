@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
-from breakout_breeze_codes import build_breeze_code_map  # noqa: E402
+from breakout_breeze_codes import build_breeze_code_map, resolve_breeze_stock_code_for_fetch  # noqa: E402
 
 
 class _Cfg:
@@ -45,3 +45,18 @@ def test_build_breeze_code_map_supabase_overlay():
 
 def test_build_breeze_code_map_empty_symbols():
     assert build_breeze_code_map([]) == {}
+
+
+def test_resolve_breeze_stock_code_for_fetch_prefers_supabase_overlay():
+    mock_client = MagicMock()
+    mock_client.table.return_value.select.return_value.eq.return_value.in_.return_value.execute.return_value = MagicMock(
+        data=[{"symbol": "NAVINFLUOR", "breeze_stock_code": "NAVFLU"}]
+    )
+
+    with patch(
+        "breakout_breeze_codes.resolve_breeze_stock_code",
+        return_value="NAVINFLUOR",
+    ), patch("supabase.create_client", return_value=mock_client):
+        code = resolve_breeze_stock_code_for_fetch("NAVINFLUOR", "NSE", _Cfg())
+
+    assert code == "NAVFLU"

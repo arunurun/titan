@@ -169,6 +169,7 @@ def _upsert_market_instruments(client: Client, instruments: list[UniverseInstrum
             "symbol": inst.symbol,
             "instrument_name": inst.instrument_name or None,
             "isin": inst.isin or None,
+            "breeze_stock_code": inst.breeze_stock_code or None,
             "is_active": True,
         }
         for inst in instruments
@@ -280,6 +281,7 @@ def sync_universe(client: Client, instruments: Iterable[UniverseInstrument]) -> 
                     isin=inst.isin,
                     official_sector_key=inst.official_sector_key,
                     official_industry=inst.official_industry,
+                    breeze_stock_code=inst.breeze_stock_code,
                 ),
             )
 

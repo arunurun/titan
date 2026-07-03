@@ -36,6 +36,7 @@ def fetch_instruments_from_scrip_master() -> list[UniverseInstrument]:
                 symbol=symbol,
                 instrument_name=str(row.get("SN", "")).strip(),
                 isin=str(row.get("ISIN", "")).strip(),
+                breeze_stock_code=str(row.get("SC", "")).strip().upper(),
                 # Scrip source does not provide robust sector coverage.
                 # If any sector-like tag is present upstream, we keep it.
                 official_sector_key=normalize_sector_key(str(row.get("SECTOR", "")).strip()),
@@ -114,6 +115,7 @@ def _enrich_nse_industry(instruments: list[UniverseInstrument]) -> list[Universe
                 isin=inst.isin,
                 official_sector_key=inst.official_sector_key,
                 official_industry=industry,
+                breeze_stock_code=inst.breeze_stock_code,
             )
         )
     return enriched

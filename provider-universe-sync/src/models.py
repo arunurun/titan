@@ -11,6 +11,7 @@ class UniverseInstrument:
     isin: str
     official_sector_key: str
     official_industry: str = ""
+    breeze_stock_code: str = ""
 
 
 def normalize_sector_key(value: str) -> str:

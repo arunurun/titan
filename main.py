@@ -650,7 +650,7 @@ def main() -> None:
             from custom_equity_resolution import resolve_custom_equity_field_to_sector_instruments
 
             cfg = load_config()
-            instruments, hint_map = resolve_custom_equity_field_to_sector_instruments(
+            instruments, hint_map, resolution_skipped = resolve_custom_equity_field_to_sector_instruments(
                 custom_symbols_raw,
                 preferred_exchange=args.custom_exchange,
                 cfg=cfg,
@@ -663,7 +663,24 @@ def main() -> None:
                     row["exchange"],
                     row["via"],
                 )
+            for row in resolution_skipped:
+                logger.warning(
+                    "Custom equity skipped: hint=%r reason=%s",
+                    row.get("hint"),
+                    row.get("reason"),
+                )
             run_kwargs["instruments_override"] = instruments
+            run_kwargs["resolution_skipped"] = resolution_skipped
+            if not instruments:
+                raise ValueError(
+                    "No custom symbols could be resolved. "
+                    + "; ".join(
+                        f"{row.get('hint')!r}:{row.get('reason')}"
+                        for row in resolution_skipped[:8]
+                    )
+                    if resolution_skipped
+                    else "check ticker spelling"
+                )
             logger.info(
                 "Running custom equity analysis for %d resolved instrument(s) on %s (sector label=%s)",
                 len(instruments),
