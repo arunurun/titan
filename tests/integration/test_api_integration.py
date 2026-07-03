@@ -3,6 +3,8 @@ import requests
 import time
 import db.session_config as sc
 
+pytestmark = pytest.mark.integration
+
 
 def test_persist_token_creates_api_call(server):
     """Test that /api/token/persist accepts a token, calls Supabase, and updates session_config."""
