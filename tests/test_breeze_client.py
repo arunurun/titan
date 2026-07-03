@@ -87,10 +87,10 @@ def test_fetch_nifty_data_success(mock_breeze_cls):
 
 @patch("breeze_client.BreezeConnect")
 def test_fetch_equity_data_passes_symbol_exchange(mock_breeze_cls, monkeypatch):
-    # Avoid live ICICI scrip download in unit test; RELIANCE maps to RELIND on real master.
+    # Avoid live ICICI scrip download; mock fetch resolver so input symbol passes through.
     monkeypatch.setattr(
-        "breeze_client.resolve_breeze_stock_code",
-        lambda sym, ex: sym.strip().upper(),
+        "breeze_client.resolve_breeze_stock_code_for_fetch",
+        lambda sym, ex, cfg=None: sym.strip().upper(),
     )
     api = MagicMock()
     api.get_historical_data.return_value = {
@@ -116,8 +116,8 @@ def test_fetch_raises_after_retries(mock_breeze_cls):
 @patch("breeze_client.BreezeConnect")
 def test_fetch_equity_data_no_data_found_returns_empty_and_does_not_retry(mock_breeze_cls, monkeypatch):
     monkeypatch.setattr(
-        "breeze_client.resolve_breeze_stock_code",
-        lambda sym, ex: sym.strip().upper(),
+        "breeze_client.resolve_breeze_stock_code_for_fetch",
+        lambda sym, ex, cfg=None: sym.strip().upper(),
     )
     api = MagicMock()
     api.get_historical_data.return_value = {
@@ -143,8 +143,8 @@ def test_fetch_equity_data_no_data_found_returns_empty_and_does_not_retry(mock_b
 @patch("breeze_client.BreezeConnect")
 def test_fetch_equity_data_historical_data_fail_treated_as_soft_no_data(mock_breeze_cls, monkeypatch):
     monkeypatch.setattr(
-        "breeze_client.resolve_breeze_stock_code",
-        lambda sym, ex: sym.strip().upper(),
+        "breeze_client.resolve_breeze_stock_code_for_fetch",
+        lambda sym, ex, cfg=None: sym.strip().upper(),
     )
     api = MagicMock()
     api.get_historical_data.return_value = {
@@ -170,8 +170,8 @@ def test_fetch_equity_data_historical_data_fail_treated_as_soft_no_data(mock_bre
 @patch("breeze_client.BreezeConnect")
 def test_fetch_equity_data_fallback_to_bse_when_nse_has_no_data(mock_breeze_cls, monkeypatch):
     monkeypatch.setattr(
-        "breeze_client.resolve_breeze_stock_code",
-        lambda sym, ex: sym.strip().upper(),
+        "breeze_client.resolve_breeze_stock_code_for_fetch",
+        lambda sym, ex, cfg=None: sym.strip().upper(),
     )
     api = MagicMock()
     api.get_historical_data.side_effect = [
@@ -195,8 +195,8 @@ def test_fetch_equity_data_fallback_to_bse_when_nse_has_no_data(mock_breeze_cls,
 @patch("breeze_client.BreezeConnect")
 def test_fetch_equity_data_primary_exchange_metadata(mock_breeze_cls, monkeypatch):
     monkeypatch.setattr(
-        "breeze_client.resolve_breeze_stock_code",
-        lambda sym, ex: sym.strip().upper(),
+        "breeze_client.resolve_breeze_stock_code_for_fetch",
+        lambda sym, ex, cfg=None: sym.strip().upper(),
     )
     api = MagicMock()
     api.get_historical_data.return_value = {
@@ -215,8 +215,8 @@ def test_fetch_equity_data_primary_exchange_metadata(mock_breeze_cls, monkeypatc
 @patch("breeze_client.BreezeConnect")
 def test_fetch_equity_data_rate_limited_then_success_retries(mock_breeze_cls, monkeypatch):
     monkeypatch.setattr(
-        "breeze_client.resolve_breeze_stock_code",
-        lambda sym, ex: sym.strip().upper(),
+        "breeze_client.resolve_breeze_stock_code_for_fetch",
+        lambda sym, ex, cfg=None: sym.strip().upper(),
     )
     monkeypatch.setattr("breeze_client.time.sleep", lambda _s: None)
     api = MagicMock()
@@ -269,8 +269,8 @@ def test_rate_limited_call_does_not_hold_lock_during_network(monkeypatch):
 @patch("breeze_client.BreezeConnect")
 def test_fetch_equity_data_timeout_marks_hard_failure(mock_breeze_cls, monkeypatch):
     monkeypatch.setattr(
-        "breeze_client.resolve_breeze_stock_code",
-        lambda sym, ex: sym.strip().upper(),
+        "breeze_client.resolve_breeze_stock_code_for_fetch",
+        lambda sym, ex, cfg=None: sym.strip().upper(),
     )
     monkeypatch.setattr("breeze_client._min_hist_call_interval_seconds", lambda: 0.0)
     monkeypatch.setattr("breeze_client._historical_call_timeout_seconds", lambda: 0.05)
@@ -437,8 +437,8 @@ def test_classify_breeze_option_chain_response():
 @patch("breeze_client.BreezeConnect")
 def test_fetch_equity_quote_normalizes_fields(mock_breeze_cls, monkeypatch):
     monkeypatch.setattr(
-        "breeze_client.resolve_breeze_stock_code",
-        lambda sym, ex: sym.strip().upper(),
+        "breeze_client.resolve_breeze_stock_code_for_fetch",
+        lambda sym, ex, cfg=None: sym.strip().upper(),
     )
     api = MagicMock()
     api.get_quotes.return_value = {
@@ -473,8 +473,8 @@ def test_fetch_equity_quote_normalizes_fields(mock_breeze_cls, monkeypatch):
 @patch("breeze_client.BreezeConnect")
 def test_fetch_equity_quote_no_data_returns_empty(mock_breeze_cls, monkeypatch):
     monkeypatch.setattr(
-        "breeze_client.resolve_breeze_stock_code",
-        lambda sym, ex: sym.strip().upper(),
+        "breeze_client.resolve_breeze_stock_code_for_fetch",
+        lambda sym, ex, cfg=None: sym.strip().upper(),
     )
     api = MagicMock()
     api.get_quotes.return_value = {
@@ -492,8 +492,8 @@ def test_fetch_equity_quote_no_data_returns_empty(mock_breeze_cls, monkeypatch):
 @patch("breeze_client.BreezeConnect")
 def test_fetch_equity_quote_rate_limited_then_success(mock_breeze_cls, monkeypatch):
     monkeypatch.setattr(
-        "breeze_client.resolve_breeze_stock_code",
-        lambda sym, ex: sym.strip().upper(),
+        "breeze_client.resolve_breeze_stock_code_for_fetch",
+        lambda sym, ex, cfg=None: sym.strip().upper(),
     )
     monkeypatch.setattr("breeze_client.time.sleep", lambda _s: None)
     api = MagicMock()
