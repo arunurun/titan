@@ -6,7 +6,7 @@ import csv
 import logging
 import os
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -93,6 +93,54 @@ def _avg_delivery_from_bhav_cache(nse_cache_dir: Path, symbols: set[str]) -> dic
     return {sym: sum(vals) / len(vals) for sym, vals in totals.items() if vals}
 
 
+def _delivery_from_bhavcopy_fetch(
+    symbols: set[str],
+    as_of_date: str,
+    *,
+    lookback_sessions: int = 5,
+) -> dict[str, float]:
+    """Fetch DELIV_PER from live bhavcopy for symbols still missing after Supabase/cache."""
+    if not symbols:
+        return {}
+    try:
+        from nse_eod import fetch_sec_bhavdata_full
+    except ImportError:
+        return {}
+
+    try:
+        anchor = date.fromisoformat(str(as_of_date).strip()[:10])
+    except ValueError:
+        anchor = datetime.now(IST).date()
+
+    out: dict[str, float] = {}
+    remaining = set(symbols)
+    checked = 0
+    d = anchor
+    while remaining and checked < max(1, int(lookback_sessions)):
+        if d.weekday() < 5:
+            checked += 1
+            try:
+                frame = fetch_sec_bhavdata_full(d)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("delivery bhavcopy %s failed: %s", d.isoformat(), exc)
+                frame = None
+            if frame is not None and not frame.empty and "symbol" in frame.columns:
+                sub = frame[frame["symbol"].astype(str).str.upper().isin(remaining)]
+                for rec in sub.to_dict("records"):
+                    sym = str(rec.get("symbol") or "").strip().upper()
+                    deliv = rec.get("deliv_per")
+                    if sym and deliv is not None:
+                        try:
+                            val = float(deliv)
+                        except (TypeError, ValueError):
+                            continue
+                        if val >= 0:
+                            out[sym] = val
+                            remaining.discard(sym)
+        d -= timedelta(days=1)
+    return out
+
+
 def load_delivery_pct_by_symbol(
     symbols: list[str],
     as_of_date: str | date | None = None,
@@ -156,6 +204,11 @@ def load_delivery_pct_by_symbol(
     if missing and nse_cache_dir is not None:
         bhav_avg = _avg_delivery_from_bhav_cache(nse_cache_dir, missing)
         for sym, val in bhav_avg.items():
+            out[sym] = round(val, 4)
+        missing = {sym for sym, val in out.items() if val is None}
+
+    if missing:
+        for sym, val in _delivery_from_bhavcopy_fetch(missing, as_of).items():
             out[sym] = round(val, 4)
 
     return out

@@ -161,7 +161,12 @@ def _normalize_weights(raw: dict[str, float]) -> dict[str, float]:
     total = sum(raw.get(p, 0.0) for p in FUSION_PILLARS)
     if total <= 0:
         return dict(DEFAULT_FUSION_WEIGHTS)
-    return {p: round(raw.get(p, 0.0) / total, 6) for p in FUSION_PILLARS}
+    weights = {p: round(raw.get(p, 0.0) / total, 6) for p in FUSION_PILLARS}
+    drift = 1.0 - sum(weights.values())
+    if abs(drift) > 1e-12:
+        anchor = max(FUSION_PILLARS, key=lambda p: weights[p])
+        weights[anchor] = round(weights[anchor] + drift, 6)
+    return weights
 
 
 def _correlation_weights(X: np.ndarray, y: np.ndarray, feature_names: list[str]) -> dict[str, float]:
