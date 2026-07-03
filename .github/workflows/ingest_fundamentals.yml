@@ -1,0 +1,79 @@
+# Fundamentals ingest (yfinance) into Supabase market_instruments.
+
+name: Ingest fundamentals
+
+on:
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: "Ingest scope"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - sector
+          - symbol
+      sector:
+        description: "Sector key (required when scope=sector, e.g. pharma_healthcare)"
+        required: false
+        default: ""
+      symbol:
+        description: "NSE symbol (required when scope=symbol, e.g. RELIANCE)"
+        required: false
+        default: ""
+      dry_run:
+        description: "Fetch only; do not write to Supabase"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Ingest fundamentals into Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          PYTHONUNBUFFERED: "1"
+          TITAN_FUNDAMENTALS_INGEST_THROTTLE_SEC: "0.5"
+        run: |
+          ARGS=()
+          SCOPE="${{ github.event.inputs.scope }}"
+          if [ "$SCOPE" = "all" ]; then
+            ARGS+=(--all)
+          elif [ "$SCOPE" = "sector" ]; then
+            if [ -z "${{ github.event.inputs.sector }}" ]; then
+              echo "scope=sector requires sector input" >&2
+              exit 1
+            fi
+            ARGS+=(--sector "${{ github.event.inputs.sector }}")
+          elif [ "$SCOPE" = "symbol" ]; then
+            if [ -z "${{ github.event.inputs.symbol }}" ]; then
+              echo "scope=symbol requires symbol input" >&2
+              exit 1
+            fi
+            ARGS+=(--all --symbol "${{ github.event.inputs.symbol }}")
+          else
+            echo "Unknown scope: $SCOPE" >&2
+            exit 1
+          fi
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS+=(--dry-run)
+          fi
+          echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Starting fundamentals ingest with args: ${ARGS[*]}"
+          python -u scripts/ingest_fundamentals.py "${ARGS[@]}"
