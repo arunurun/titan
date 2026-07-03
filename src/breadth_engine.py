@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import os
-from typing import Any
+from typing import Any, Sequence
 
 import pandas as pd
 
@@ -261,7 +261,12 @@ def prefetch_breadth_panel(
     lookback_calendar_days: int = 280,
     max_symbols: int | None = None,
 ) -> dict[str, pd.DataFrame]:
-    """Prefetch OHLC panel for breadth computation (best-effort per symbol)."""
+    """Prefetch OHLC panel for breadth computation (best-effort per symbol).
+
+    ``max_symbols`` caps panel size for latency control. In sector runs this is
+    typically set from ``TITAN_BREADTH_PANEL_MAX_SYMBOLS`` (unset = full universe).
+    Breadth is diagnostic only in fusion — it does not enter ``titan_score`` weights.
+    """
     from breeze_client import fetch_equity_data
 
     panel: dict[str, pd.DataFrame] = {}

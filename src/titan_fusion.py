@@ -668,8 +668,15 @@ def fuse_batch(
     return [fuse_titan_score(row, weights=resolved) for row in rows]
 
 
-def apply_fusion_to_audit(audit: dict[str, Any]) -> dict[str, Any]:
-    """Orchestrator hook — always fuses and stamps audit fusion fields."""
+def fusion_enabled() -> bool:
+    """When false, fusion is skipped (walk-forward baseline arm)."""
+    return _env_flag("TITAN_FUSION_ENABLED", default=True)
+
+
+def apply_fusion_to_audit(audit: dict[str, Any]) -> dict[str, Any] | None:
+    """Orchestrator hook — fuses and stamps audit fusion fields when enabled."""
+    if not fusion_enabled():
+        return None
     result = fuse_from_audit(audit)
     audit["titan_fusion"] = result
     if result.get("titan_score") is not None:

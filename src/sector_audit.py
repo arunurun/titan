@@ -654,6 +654,107 @@ def _digest_reconcile_mode_enabled() -> bool:
     )
 
 
+def _digest_show_factor_scores_enabled() -> bool:
+    """Render titan_fusion pillar breakdown in digest/email per-symbol blocks."""
+    return (os.environ.get("TITAN_DIGEST_SHOW_FACTOR_SCORES") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _digest_investment_report_enabled() -> bool:
+    return (os.environ.get("TITAN_INVESTMENT_REPORT") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _format_fusion_factor_digest_lines(audit: dict[str, Any]) -> list[str]:
+    """Optional fusion pillar section; empty when titan_fusion missing."""
+    fusion = audit.get("titan_fusion")
+    if not isinstance(fusion, dict):
+        return []
+    lines: list[str] = ["▸ Titan fusion"]
+    titan = fusion.get("titan_score")
+    conf = fusion.get("overall_confidence")
+    if titan is not None:
+        conf_txt = f" · conf {_fmt_metric(conf, 3)}" if conf is not None else ""
+        lines.append(f"   Titan score {_fmt_metric(titan, 1)}/100{conf_txt}")
+    contributions = fusion.get("contributions") if isinstance(fusion.get("contributions"), dict) else {}
+    if contributions:
+        try:
+            from titan_fusion import DISPLAY_LABELS, FUSION_PILLARS
+        except ImportError:
+            DISPLAY_LABELS = {}
+            FUSION_PILLARS = tuple(contributions.keys())
+        for pillar in FUSION_PILLARS:
+            row = contributions.get(pillar)
+            if not isinstance(row, dict):
+                continue
+            label = DISPLAY_LABELS.get(pillar, pillar)
+            w_pct = int(round(float(row.get("weight_effective", 0)) * 100))
+            lines.append(
+                f"   {label}: {_fmt_metric(row.get('score'), 0)} × {w_pct}% "
+                f"= {_fmt_metric(row.get('weighted'), 1)}"
+            )
+    else:
+        for key, label in (
+            ("technical_score", "Technical"),
+            ("relative_strength_score", "Relative strength"),
+            ("flow_score", "Flow"),
+            ("fundamental_score", "Fundamentals"),
+            ("regime_score", "Regime"),
+            ("sector_score", "Sector"),
+            ("risk_score", "Risk"),
+        ):
+            val = fusion.get(key)
+            if val is not None:
+                lines.append(f"   {label}: {_fmt_metric(val, 0)}")
+    expl = fusion.get("overall_explanation")
+    if expl and not contributions:
+        compact = " | ".join(str(expl).splitlines())
+        lines.append(f"   {compact}")
+    breadth = fusion.get("breadth_score")
+    if breadth is not None:
+        lines.append(f"   Breadth (diagnostic): {_fmt_metric(breadth, 0)}")
+    return lines
+
+
+def _append_investment_report_digest_lines(
+    lines: list[str],
+    ok_results: list[dict[str, Any]],
+    *,
+    top_n: int = 3,
+) -> None:
+    if not _digest_investment_report_enabled() or not ok_results:
+        return
+    try:
+        from titan_investment_report import generate_investment_report
+    except ImportError:
+        return
+    ranked = sorted(
+        ok_results,
+        key=lambda x: (
+            float("-inf")
+            if math.isnan(_safe_float((x.get("audit") or {}).get("next_week_score", float("nan"))))
+            else _safe_float((x.get("audit") or {}).get("next_week_score", float("nan")))
+        ),
+        reverse=True,
+    )
+    lines.extend(["", "--- Investment reports (top ranked) ---"])
+    for r in ranked[:top_n]:
+        audit = r.get("audit")
+        if not isinstance(audit, dict):
+            continue
+        report = generate_investment_report(audit)
+        lines.append("")
+        lines.append(report.get("markdown") or "")
+
+
 def _sell_signal_plain_english(signal: str) -> str:
     from action_signals import action_signal_plain_english
 
@@ -1895,6 +1996,11 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     if context_tail:
         lines_out.append("▸ Context")
         lines_out.extend(context_tail)
+
+    if _digest_show_factor_scores_enabled():
+        fusion_lines = _format_fusion_factor_digest_lines(audit)
+        if fusion_lines:
+            lines_out.extend(fusion_lines)
 
     head = lines_out[0]
     tail = ["  " + ln for ln in lines_out[1:]]
@@ -4416,6 +4522,7 @@ def run_sector_live(
                 lines.append(_format_symbol_metrics_line(r))
                 if i < len(ranked) - 1:
                     lines.append("")
+        _append_investment_report_digest_lines(lines, ok_results)
         for r in sorted(
             (x for x in results if (not x.get("ok")) and not _is_skipped_no_data_error(x.get("error"))),
             key=lambda x: (x["symbol"], x["exchange"]),
