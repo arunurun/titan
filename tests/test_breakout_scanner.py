@@ -177,7 +177,7 @@ def test_build_breakout_email_body_pass_watch_sections():
         all_results=rows,
         report_markdown=None,
     )
-    assert "Candidates: 2 total (1 PASS, 1 WATCH)" in body
+    assert "Candidates: 2 total (1 PASS, 1 WATCH, 0 SETUP)" in body
     assert "## PASS candidates (1)" in body
     assert "## WATCH candidates (1)" in body
     assert "## Top candidates (all tiers)" in body
@@ -323,7 +323,7 @@ def test_run_breakout_scan_email_includes_pass_watch_counts(
 
     mock_email.assert_called_once()
     body = mock_email.call_args[0][0]
-    assert "Candidates: 2 total (1 PASS, 1 WATCH)" in body
+    assert "Candidates: 2 total (1 PASS, 1 WATCH, 0 SETUP)" in body
     assert "## PASS candidates (1)" in body
     assert "## WATCH candidates (1)" in body
     assert "Consolidated Daily Breakout" in body

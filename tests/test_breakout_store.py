@@ -96,6 +96,24 @@ def test_build_analysis_record_pass_mapping():
     assert row["risk_flags"] == ""
 
 
+def test_build_analysis_record_breeze_and_setup_fields():
+    row = build_analysis_record(
+        run_id="run-1",
+        scan_date="2026-06-26",
+        ticker="BEL",
+        tier="Small-Cap (Nifty Smallcap 100)",
+        symbol_yahoo="BEL.NS",
+        signal_tier="PRE_BREAKOUT",
+        breeze_stock_code="BHAELE",
+        setup_trigger_price=105.5,
+        setup_rank=72.3,
+    )
+    assert row["breeze_stock_code"] == "BHAELE"
+    assert row["setup_trigger_price"] == 105.5
+    assert row["setup_rank"] == 72.3
+    assert row["signal_tier"] == "PRE_BREAKOUT"
+
+
 def test_build_analysis_record_fail_mapping_strips_ns_suffix():
     row = build_analysis_record(
         run_id="run-1",

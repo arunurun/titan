@@ -26,6 +26,7 @@ from breakout_backtest import (  # noqa: E402
     default_output_dir,
     run_backtest,
     run_missed_breakout_analysis,
+    run_setup_backtest,
 )
 
 
@@ -86,6 +87,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Missed-breakout report on cached Yahoo history (uses output-dir cache; "
             "no refetch unless cache missing)"
         ),
+    )
+    ap.add_argument(
+        "--setup-backtest",
+        action="store_true",
+        help="Run PRE_BREAKOUT setup→breakout precision backtest (writes setup_backtest.md)",
     )
     ap.add_argument("--json", action="store_true", help="Print summary JSON to stdout")
     return ap.parse_args(argv)
@@ -161,6 +167,32 @@ def main(argv: list[str] | None = None) -> int:
                 "cohort_primary_fail_counts": analysis.get("cohort_primary_fail_counts"),
                 "paths": paths,
             }, indent=2))
+        return 0
+
+    if args.setup_backtest:
+        stock_filter: list[str] | None = None
+        if args.dry_run:
+            stock_filter = [s["symbol"] for s in universe_payload["stocks"][:5]]
+        elif args.symbols.strip():
+            stock_filter = [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+        setup_report = run_setup_backtest(
+            universe=universe_payload["stocks"],
+            nse_cache_dir=args.nse_cache,
+            top_n=args.top_n,
+            range_str=args.range_str,
+            output_dir=out_dir,
+            stock_filter=stock_filter,
+        )
+        paths = setup_report.get("paths") or {}
+        summary = setup_report.get("summary") or {}
+        print("=== Setup backtest complete ===", flush=True)
+        print(f"Setup signals: {summary.get('total_setup_signals', 0)}", flush=True)
+        for h in (5, 10, 15):
+            prec = summary.get(f"precision_t{h}")
+            print(f"Precision T+{h}: {prec}%" if prec is not None else f"Precision T+{h}: n/a", flush=True)
+        print(f"Report: {paths.get('markdown')}", flush=True)
+        if args.json:
+            print(json.dumps({"summary": summary, "paths": paths}, indent=2))
         return 0
 
     stock_filter: list[str] | None = None

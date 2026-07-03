@@ -24,6 +24,12 @@ try:
         compute_evidence_metrics,
         persistence_pass_min,
     )
+    from .breakout_breeze_codes import build_breeze_code_map
+    from .breakout_setup import (
+        SETUP_CAP_PER_TIER,
+        SIGNAL_TIER_PRE_BREAKOUT,
+        evaluate_setup_as_of,
+    )
     from .breakout_store import (
         build_analysis_record,
         persist_breakout_stock_analysis,
@@ -34,6 +40,12 @@ except ImportError:
         composite_rank_score,
         compute_evidence_metrics,
         persistence_pass_min,
+    )
+    from breakout_breeze_codes import build_breeze_code_map
+    from breakout_setup import (
+        SETUP_CAP_PER_TIER,
+        SIGNAL_TIER_PRE_BREAKOUT,
+        evaluate_setup_as_of,
     )
     from breakout_store import (
         build_analysis_record,
@@ -76,6 +88,7 @@ STANDARD_ADX_TRAJECTORY_VOL_EXCEPTION = 7.0
 POWER_GAP_VOL_RECOVERY_THRESHOLD = 5.5
 SIGNAL_TIER_PASS = "PASS"
 SIGNAL_TIER_WATCH = "WATCH"
+SIGNAL_TIER_SETUP = SIGNAL_TIER_PRE_BREAKOUT
 
 _BREAKOUT_STAGE_LABELS: dict[int, str] = {
     1: "Stage 1 Fresh",
@@ -1287,12 +1300,14 @@ def _build_stock_analysis_record(
     sl_price: float | None = None,
     target_price: float | None = None,
     target_gain: float | None = None,
+    breeze_stock_code: str | None = None,
 ) -> dict[str, Any]:
     filt = FILTERS[tier_name]
     bar_count = len(df["close"]) if df and df.get("close") else None
     pass_paths = (eval_result or {}).get("pass_paths") or []
     pass_paths_s = ", ".join(pass_paths) if pass_paths else None
     signal_tier = (eval_result or {}).get("signal_tier")
+    sym = ticker.replace(".NS", "").strip()
     return build_analysis_record(
         run_id=run_id,
         scan_date=scan_date,
@@ -1335,7 +1350,100 @@ def _build_stock_analysis_record(
         base_score=(eval_result or {}).get("base_score"),
         pass_paths=pass_paths_s,
         risk_flags=(eval_result or {}).get("risk_flags") or None,
+        breeze_stock_code=breeze_stock_code or sym,
+        setup_trigger_price=(eval_result or {}).get("setup_trigger_price"),
+        setup_rank=(eval_result or {}).get("setup_rank"),
     )
+
+
+def _build_setup_payload(
+    *,
+    ticker: str,
+    setup_result: dict[str, Any],
+    tier_label: str,
+) -> str:
+    sym = ticker.replace(".NS", "")
+    trigger = setup_result.get("setup_trigger_price")
+    vol_thresh = setup_result.get("setup_trigger_vol_mult")
+    pct_min = setup_result.get("setup_trigger_pct_min", 3.0)
+    return f"""**SETUP WATCHLIST DATA: {sym}**
+Universe: {tier_label}
+Latest Market Price: {setup_result.get('latest_price')}
+Daily Change: {setup_result.get('pct_change')}%
+Relative Volume: {setup_result.get('vol_mult')}x
+Base Score: {setup_result.get('base_score')}
+Pivot Proximity: {setup_result.get('pivot_proximity')}
+Persistence: {setup_result.get('persistence_score')}/4
+Setup Rank: {setup_result.get('setup_rank')}
+
+Trigger (no trade until confirmed):
+* Close > {trigger} with volume >= {vol_thresh}x and day >= +{pct_min}%
+* After trigger, re-run breakout scan for PASS confirmation before sizing.
+"""
+
+
+def _build_setup_candidate(
+    *,
+    ticker: str,
+    tier_name: str,
+    setup_result: dict[str, Any],
+    breeze_stock_code: str | None,
+) -> dict[str, Any]:
+    filt = FILTERS[tier_name]
+    sym = ticker.replace(".NS", "")
+    trigger = setup_result.get("setup_trigger_price")
+    trigger_s = f">{trigger}" if trigger is not None else "—"
+    return {
+        "Ticker": sym,
+        "Breeze Code": breeze_stock_code or sym,
+        "Tier": filt["type"],
+        "Price": setup_result.get("latest_price"),
+        "Change": _format_change_arrow(float(setup_result.get("pct_change") or 0.0)),
+        "Volume Mult": f"{round(float(setup_result.get('vol_mult') or 0.0), 2)}x",
+        "RSI": setup_result.get("rsi_val"),
+        "ADX": setup_result.get("adx_val"),
+        "Entry Range": "—",
+        "Est. Stop-Loss": "—",
+        "Est. Target (1:2)": "—",
+        "Est. Gain": "—",
+        "Risk Flags": setup_result.get("risk_flags") or "",
+        "Signal Tier": SIGNAL_TIER_PRE_BREAKOUT,
+        "Liquidity Quality": setup_result.get("liquidity_quality"),
+        "Persistence Score": setup_result.get("persistence_score"),
+        "Breakout Stage": setup_result.get("breakout_stage"),
+        "Base Score": setup_result.get("base_score"),
+        "Composite Rank": setup_result.get("setup_rank"),
+        "Setup Rank": setup_result.get("setup_rank"),
+        "Pivot Proximity": setup_result.get("pivot_proximity"),
+        "Setup Trigger": trigger_s,
+        "Pass Paths": "",
+        "Watch Reason": "",
+        "Payload": _build_setup_payload(
+            ticker=ticker,
+            setup_result=setup_result,
+            tier_label=filt["type"],
+        ),
+    }
+
+
+def _cap_setup_candidates_per_tier(
+    rows: list[dict[str, Any]],
+    *,
+    cap: int = SETUP_CAP_PER_TIER,
+) -> list[dict[str, Any]]:
+    """Keep top ``cap`` PRE_BREAKOUT rows per universe tier by setup rank."""
+    non_setup = [r for r in rows if r.get("Signal Tier") != SIGNAL_TIER_PRE_BREAKOUT]
+    setup_rows = [r for r in rows if r.get("Signal Tier") == SIGNAL_TIER_PRE_BREAKOUT]
+    by_tier: dict[str, list[dict[str, Any]]] = {}
+    for row in setup_rows:
+        by_tier.setdefault(row.get("Tier") or "", []).append(row)
+    capped_setup: list[dict[str, Any]] = []
+    for tier_rows in by_tier.values():
+        tier_rows.sort(
+            key=lambda r: (r.get("Setup Rank") is None, -(float(r.get("Setup Rank") or 0.0))),
+        )
+        capped_setup.extend(tier_rows[:cap])
+    return non_setup + capped_setup
 
 
 def evaluate_and_audit_stock(
@@ -1345,6 +1453,7 @@ def evaluate_and_audit_stock(
     *,
     run_id: str = "",
     scan_date: str = "",
+    breeze_stock_code: str | None = None,
     bhav_turnover_lacs: float | None = None,
     delivery_pct: float | None = None,
     free_float_pct: float | None = None,
@@ -1352,6 +1461,8 @@ def evaluate_and_audit_stock(
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     filt = FILTERS[tier_name]
     vol_thresh = filt["vol_mult"]
+    sym = ticker.replace(".NS", "").strip()
+    breeze_code = breeze_stock_code or sym
     df, fetch_err = fetch_yahoo_data(ticker)
     if not df or len(df["close"]) < 50:
         if fetch_err:
@@ -1370,12 +1481,14 @@ def evaluate_and_audit_stock(
             fetch_err=fetch_err,
             fail_reason=fail_reason,
             passed=False,
+            breeze_stock_code=breeze_code,
         )
         return None, analysis_record
 
+    as_of_idx = len(df["close"]) - 1
     eval_result = evaluate_bars_as_of(
         df,
-        len(df["close"]) - 1,
+        as_of_idx,
         tier_name,
         bhav_turnover_lacs=bhav_turnover_lacs,
         delivery_pct=delivery_pct,
@@ -1417,7 +1530,29 @@ def evaluate_and_audit_stock(
 
     fail_reason = eval_result.get("fail_reason")
     signal_tier = eval_result.get("signal_tier")
-    if fail_reason:
+    setup_result: dict[str, Any] | None = None
+    if fail_reason and signal_tier not in (SIGNAL_TIER_PASS, SIGNAL_TIER_WATCH):
+        setup_result = evaluate_setup_as_of(
+            df,
+            as_of_idx,
+            tier_name,
+            min_price=filt["min_price"],
+            vol_mult_threshold=vol_thresh,
+            bhav_turnover_lacs=bhav_turnover_lacs,
+            delivery_pct=delivery_pct,
+            free_float_pct=free_float_pct,
+            sector_lead=sector_lead,
+            rsi_val=eval_result.get("rsi_val"),
+            adx_val=eval_result.get("adx_val"),
+            pct_change=eval_result.get("pct_change"),
+            vol_mult=eval_result.get("vol_mult"),
+            sma20_last=eval_result.get("sma20_last"),
+            sma50_last=eval_result.get("sma50_last"),
+        )
+
+    record_eval = eval_result if setup_result is None else {**eval_result, **setup_result}
+
+    if fail_reason and setup_result is None:
         _emit_stock_diagnostic(
             emit, ticker, tier_name, latest_price, pct_change,
             vol_mult, vol_thresh, rsi_val, adx_val, sma50_last,
@@ -1432,10 +1567,38 @@ def evaluate_and_audit_stock(
             fetch_err=fetch_err,
             fail_reason=fail_reason,
             passed=False,
-            eval_result=eval_result,
+            eval_result=record_eval,
+            breeze_stock_code=breeze_code,
             **common_metrics,
         )
         return None, analysis_record
+
+    if setup_result is not None:
+        _emit_stock_diagnostic(
+            emit, ticker, tier_name, latest_price, pct_change,
+            vol_mult, vol_thresh, rsi_val, adx_val, sma50_last,
+            status=SIGNAL_TIER_PRE_BREAKOUT, fail_reason="",
+        )
+        candidate = _build_setup_candidate(
+            ticker=ticker,
+            tier_name=tier_name,
+            setup_result=setup_result,
+            breeze_stock_code=breeze_code,
+        )
+        analysis_record = _build_stock_analysis_record(
+            run_id=run_id,
+            scan_date=scan_date,
+            ticker=ticker,
+            tier_name=tier_name,
+            df=df,
+            fetch_err=fetch_err,
+            fail_reason=None,
+            passed=False,
+            eval_result=record_eval,
+            breeze_stock_code=breeze_code,
+            **common_metrics,
+        )
+        return candidate, analysis_record
 
     status = signal_tier or "PASS"
     _emit_stock_diagnostic(
@@ -1465,7 +1628,8 @@ Volume Profile (30-day Visible Range):
     watch_reason = _derive_watch_reason(eval_result)
 
     candidate = {
-        "Ticker": ticker.replace(".NS", ""),
+        "Ticker": sym,
+        "Breeze Code": breeze_code,
         "Tier": filt["type"],
         "Price": round(latest_price, 2),
         "Change": _format_change_arrow(pct_change),
@@ -1502,6 +1666,7 @@ Volume Profile (30-day Visible Range):
         fail_reason=None,
         passed=passed,
         eval_result=eval_result,
+        breeze_stock_code=breeze_code,
         **common_metrics,
     )
     return candidate, analysis_record
@@ -1541,6 +1706,8 @@ def _format_signal_tier_badge(tier: str | None) -> str:
         return "🟢 PASS"
     if tier == SIGNAL_TIER_WATCH:
         return "🟡 WATCH"
+    if tier == SIGNAL_TIER_PRE_BREAKOUT:
+        return "🟠 SETUP"
     return tier or "—"
 
 
@@ -1591,12 +1758,24 @@ def _display_num(value: Any, *, decimals: int = 1) -> str:
 
 
 def _sort_report_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """PASS first, then WATCH, each group by composite rank descending."""
+    """PASS first, then WATCH, then PRE_BREAKOUT; each group by rank descending."""
+
+    def _tier_rank(tier: str | None) -> int:
+        if tier == SIGNAL_TIER_PASS:
+            return 0
+        if tier == SIGNAL_TIER_WATCH:
+            return 1
+        if tier == SIGNAL_TIER_PRE_BREAKOUT:
+            return 2
+        return 3
 
     def _key(row: dict[str, Any]) -> tuple[int, float]:
-        tier_rank = 0 if row.get("Signal Tier") == SIGNAL_TIER_PASS else 1
-        composite = row.get("Composite Rank")
-        rank_val = float(composite) if isinstance(composite, (int, float)) else 0.0
+        tier_rank = _tier_rank(row.get("Signal Tier"))
+        if row.get("Signal Tier") == SIGNAL_TIER_PRE_BREAKOUT:
+            rank_val = float(row.get("Setup Rank") or row.get("Composite Rank") or 0.0)
+        else:
+            composite = row.get("Composite Rank")
+            rank_val = float(composite) if isinstance(composite, (int, float)) else 0.0
         return (tier_rank, -rank_val)
 
     return sorted(rows, key=_key)
@@ -1609,6 +1788,7 @@ def serialize_candidate(row: dict[str, Any]) -> dict[str, Any]:
     gain_raw = str(row.get("Est. Gain", "")).rstrip("%")
     return {
         "ticker": row["Ticker"],
+        "breeze_stock_code": row.get("Breeze Code"),
         "tier": row["Tier"],
         "price": row["Price"],
         "change_pct": float(change_raw) if change_raw else None,
@@ -1624,6 +1804,9 @@ def serialize_candidate(row: dict[str, Any]) -> dict[str, Any]:
         "est_gain_display": row["Est. Gain"],
         "risk_flags": row["Risk Flags"],
         "signal_tier": row.get("Signal Tier"),
+        "setup_rank": row.get("Setup Rank"),
+        "setup_trigger": row.get("Setup Trigger"),
+        "pivot_proximity": row.get("Pivot Proximity"),
         "liquidity_quality": row.get("Liquidity Quality"),
         "persistence_score": row.get("Persistence Score"),
         "breakout_stage": row.get("Breakout Stage"),
@@ -1657,34 +1840,57 @@ This is typical during consolidative, bearish, or highly volatile market days.
     )
 
     for tier_name, rows in tiers_data.items():
+        breakout_rows = [r for r in rows if r.get("Signal Tier") != SIGNAL_TIER_PRE_BREAKOUT]
+        setup_rows = [r for r in rows if r.get("Signal Tier") == SIGNAL_TIER_PRE_BREAKOUT]
+
         tables_md += f"\n### {tier_name} Breakouts\n"
-        if not rows:
-            tables_md += "No stocks met the criteria in this tier today.\n"
-            continue
-
-        sorted_rows = _sort_report_candidates(rows)
-        tables_md += (
-            "| Ticker | Signal Tier | Breakout Stage | Persistence | LQ | Base | Rank | "
-            "Price | Change | Vol | RSI | ADX | Entry | Stop | Target | Gain | Pass Paths | Risk Flags |\n"
-        )
-        tables_md += (
-            "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | "
-            ":--- | :--- | :--- | :--- | :--- | :--- |\n"
-        )
-
-        for r in sorted_rows:
+        if not breakout_rows:
+            tables_md += "No breakout PASS/WATCH stocks in this tier today.\n"
+        else:
+            sorted_rows = _sort_report_candidates(breakout_rows)
             tables_md += (
-                f"| {r['Ticker']} | {_format_signal_tier_badge(r.get('Signal Tier'))} | "
-                f"{_format_breakout_stage(r.get('Breakout Stage'))} | "
-                f"{r.get('Persistence Score', '—')}/4 | "
-                f"{_display_num(r.get('Liquidity Quality'))} | "
-                f"{_display_num(r.get('Base Score'))} | "
-                f"{_display_num(r.get('Composite Rank'))} | "
-                f"{r['Price']} | {r['Change']} | {r['Volume Mult']} | "
-                f"{r['RSI']} | {r['ADX']} | {r['Entry Range']} | {r['Est. Stop-Loss']} | "
-                f"{r['Est. Target (1:2)']} | {r['Est. Gain']} | "
-                f"{r.get('Pass Paths') or '—'} | {r['Risk Flags']} |\n"
+                "| Ticker | Breeze | Signal Tier | Breakout Stage | Persistence | LQ | Base | Rank | "
+                "Price | Change | Vol | RSI | ADX | Entry | Stop | Target | Gain | Pass Paths | Risk Flags |\n"
             )
+            tables_md += (
+                "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | "
+                ":--- | :--- | :--- | :--- | :--- | :--- |\n"
+            )
+            for r in sorted_rows:
+                tables_md += (
+                    f"| {r['Ticker']} | {r.get('Breeze Code') or '—'} | "
+                    f"{_format_signal_tier_badge(r.get('Signal Tier'))} | "
+                    f"{_format_breakout_stage(r.get('Breakout Stage'))} | "
+                    f"{r.get('Persistence Score', '—')}/4 | "
+                    f"{_display_num(r.get('Liquidity Quality'))} | "
+                    f"{_display_num(r.get('Base Score'))} | "
+                    f"{_display_num(r.get('Composite Rank'))} | "
+                    f"{r['Price']} | {r['Change']} | {r['Volume Mult']} | "
+                    f"{r['RSI']} | {r['ADX']} | {r['Entry Range']} | {r['Est. Stop-Loss']} | "
+                    f"{r['Est. Target (1:2)']} | {r['Est. Gain']} | "
+                    f"{r.get('Pass Paths') or '—'} | {r['Risk Flags']} |\n"
+                )
+
+        tables_md += f"\n### {tier_name} — Setup Watchlist (PRE_BREAKOUT)\n"
+        if not setup_rows:
+            tables_md += "No coiling setups in this tier today.\n"
+        else:
+            sorted_setup = _sort_report_candidates(setup_rows)
+            tables_md += (
+                "| Ticker | Breeze | Base | Pivot Prox | Vol | Persistence | Setup Rank | Trigger | Risk |\n"
+            )
+            tables_md += "| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n"
+            for r in sorted_setup:
+                tables_md += (
+                    f"| {r['Ticker']} | {r.get('Breeze Code') or '—'} | "
+                    f"{_display_num(r.get('Base Score'))} | "
+                    f"{_display_num(r.get('Pivot Proximity'))} | {r['Volume Mult']} | "
+                    f"{r.get('Persistence Score', '—')}/4 | "
+                    f"{_display_num(r.get('Setup Rank'))} | {r.get('Setup Trigger') or '—'} | "
+                    f"{r['Risk Flags']} |\n"
+                )
+
+        for r in _sort_report_candidates(rows):
             detailed_payloads_md += f"### {r['Ticker']}\n"
             detailed_payloads_md += f"**v7:** {_format_v7_summary_line(r)}\n"
             if r.get("Watch Reason"):
@@ -1746,6 +1952,7 @@ def _build_breakout_email_html(
 
     pass_rows = [r for r in all_results if r.get("Signal Tier") == SIGNAL_TIER_PASS]
     watch_rows = [r for r in all_results if r.get("Signal Tier") == SIGNAL_TIER_WATCH]
+    setup_rows = [r for r in all_results if r.get("Signal Tier") == SIGNAL_TIER_PRE_BREAKOUT]
     sorted_all = _sort_report_candidates(all_results)
 
     def _tier_badge(tier: str | None) -> str:
@@ -1758,6 +1965,11 @@ def _build_breakout_email_html(
             return (
                 '<span style="display:inline-block;padding:2px 8px;border-radius:999px;'
                 'background:#f9ab00;color:#fff;font-weight:700;font-size:11px;">WATCH</span>'
+            )
+        if tier == SIGNAL_TIER_PRE_BREAKOUT:
+            return (
+                '<span style="display:inline-block;padding:2px 8px;border-radius:999px;'
+                'background:#e8710a;color:#fff;font-weight:700;font-size:11px;">SETUP</span>'
             )
         return escape(tier or "—")
 
@@ -1816,7 +2028,7 @@ def _build_breakout_email_html(
     summary = (
         f"<p style=\"margin:0 0 8px;\"><strong>Tickers scanned:</strong> {tickers_scanned}</p>"
         f"<p style=\"margin:0 0 12px;\"><strong>Candidates:</strong> {len(all_results)} total "
-        f"({len(pass_rows)} PASS, {len(watch_rows)} WATCH)</p>"
+        f"({len(pass_rows)} PASS, {len(watch_rows)} WATCH, {len(setup_rows)} SETUP)</p>"
     )
     pass_section = (
         '<div style="margin:0 0 16px;">'
@@ -1827,6 +2039,11 @@ def _build_breakout_email_html(
         '<div style="margin:0 0 16px;">'
         f'<h3 style="margin:0 0 8px;color:#f9ab00;font-size:14px;">WATCH ({len(watch_rows)})</h3>'
         f"{_candidate_table(watch_rows)}</div>"
+    )
+    setup_section = (
+        '<div style="margin:0 0 16px;">'
+        f'<h3 style="margin:0 0 8px;color:#e8710a;font-size:14px;">SETUP ({len(setup_rows)})</h3>'
+        f"{_candidate_table(setup_rows)}</div>"
     )
     top_section = ""
     if sorted_all:
@@ -1840,7 +2057,7 @@ def _build_breakout_email_html(
         "<html><body style=\"margin:0;padding:16px;background:#f8f9fa;color:#202124;"
         "font-family:Arial,sans-serif;\">"
         f'<h2 style="margin:0 0 6px;">Titan breakout scan — {escape(scan_date.isoformat())}</h2>'
-        f"{summary}{pass_section}{watch_section}{top_section}"
+        f"{summary}{pass_section}{watch_section}{setup_section}{top_section}"
         '<p style="color:#5f6368;font-size:12px;margin-top:12px;">Full report in plain-text part. '
         "Generated by Titan V12.0</p>"
         "</body></html>"
@@ -1856,6 +2073,7 @@ def _build_breakout_email_body(
 ) -> str:
     pass_count = sum(1 for row in all_results if row.get("Signal Tier") == SIGNAL_TIER_PASS)
     watch_count = sum(1 for row in all_results if row.get("Signal Tier") == SIGNAL_TIER_WATCH)
+    setup_count = sum(1 for row in all_results if row.get("Signal Tier") == SIGNAL_TIER_PRE_BREAKOUT)
     candidate_count = len(all_results)
     has_signal_tier = any("Signal Tier" in row for row in all_results)
 
@@ -1866,7 +2084,8 @@ def _build_breakout_email_body(
     ]
     if has_signal_tier:
         lines.append(
-            f"Candidates: {candidate_count} total ({pass_count} PASS, {watch_count} WATCH)"
+            f"Candidates: {candidate_count} total "
+            f"({pass_count} PASS, {watch_count} WATCH, {setup_count} SETUP)"
         )
     else:
         lines.append(f"Candidates: {candidate_count}")
@@ -1882,6 +2101,10 @@ def _build_breakout_email_body(
         if watch_rows:
             lines.extend(["", f"## WATCH candidates ({len(watch_rows)})", ""])
             lines.append(_format_tier_summary_table(watch_rows))
+        setup_rows = [r for r in all_results if r.get("Signal Tier") == SIGNAL_TIER_PRE_BREAKOUT]
+        if setup_rows:
+            lines.extend(["", f"## SETUP candidates ({len(setup_rows)})", ""])
+            lines.append(_format_tier_summary_table(setup_rows))
         lines.extend(["", "## Top candidates (all tiers)", ""])
         lines.append(_format_top_candidates_table(all_results))
         if report_markdown:
@@ -2067,6 +2290,15 @@ def run_breakout_scan(
             except Exception as exc:  # noqa: BLE001
                 emit_and_log(f"EOD context bulk load skipped: {exc}")
 
+            breeze_code_by_sym: dict[str, str] = {}
+            try:
+                cfg = load_config(require_breeze=False, require_gemini=False)
+                breeze_code_by_sym = build_breeze_code_map(all_syms, cfg)
+                emit_and_log(f"Breeze stock codes resolved: {len(breeze_code_by_sym)} symbols.")
+            except ValueError as exc:
+                breeze_code_by_sym = build_breeze_code_map(all_syms)
+                emit_and_log(f"Breeze codes (scrip master only): {exc}")
+
             for tier_key, tickers in tier_ticker_lists.items():
                 tier_label = FILTERS[tier_key]["type"]
                 tier_ticker_counts[tier_label] = len(tickers)
@@ -2089,6 +2321,7 @@ def run_breakout_scan(
                         emit=emit_and_log,
                         run_id=run_id,
                         scan_date=scan_date_iso,
+                        breeze_stock_code=breeze_code_by_sym.get(sym),
                         bhav_turnover_lacs=turnover_by_sym.get(sym),
                         delivery_pct=delivery_by_sym.get(sym),
                         free_float_pct=free_float_by_sym.get(sym),
@@ -2104,6 +2337,8 @@ def run_breakout_scan(
                         time.sleep(120)
                 if emit_to_stdout:
                     print("\n Scan & Audit complete for this tier.\n")
+
+            all_results = _cap_setup_candidates_per_tier(all_results)
 
         persist_meta: dict[str, Any] = {"configured": False, "persisted": False, "rows": 0}
         try:
