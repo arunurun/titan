@@ -183,6 +183,36 @@ def _dedupe_primary_exchange(instruments: list[SectorInstrument]) -> list[Sector
     return out
 
 
+def _load_all_active_instruments(client) -> list[SectorInstrument]:
+    raw: list[dict] = []
+    offset = 0
+    page = 1000
+    while True:
+        batch = (
+            client.table("market_instruments")
+            .select("symbol,exchange")
+            .eq("is_active", True)
+            .in_("exchange", ["NSE", "BSE"])
+            .order("id")
+            .range(offset, offset + page - 1)
+            .execute()
+            .data
+            or []
+        )
+        raw.extend(batch)
+        if len(batch) < page:
+            break
+        offset += page
+    return [
+        SectorInstrument(
+            symbol=str(r.get("symbol", "")).strip().upper(),
+            exchange=str(r.get("exchange", "")).strip().upper(),
+        )
+        for r in raw
+        if str(r.get("symbol", "")).strip() and str(r.get("exchange", "")).strip().upper() in {"NSE", "BSE"}
+    ]
+
+
 def load_instruments(
     client,
     *,
@@ -193,22 +223,7 @@ def load_instruments(
     if sector:
         rows = load_sector_instruments(sector)
     elif all_active:
-        res = (
-            client.table("market_instruments")
-            .select("symbol,exchange")
-            .eq("is_active", True)
-            .in_("exchange", ["NSE", "BSE"])
-            .execute()
-        )
-        raw = list(getattr(res, "data", None) or [])
-        rows = [
-            SectorInstrument(
-                symbol=str(r.get("symbol", "")).strip().upper(),
-                exchange=str(r.get("exchange", "")).strip().upper(),
-            )
-            for r in raw
-            if str(r.get("symbol", "")).strip() and str(r.get("exchange", "")).strip().upper() in {"NSE", "BSE"}
-        ]
+        rows = _load_all_active_instruments(client)
     else:
         raise ValueError("Specify --sector, --all, or --symbol")
 
