@@ -131,6 +131,17 @@ def _gather_scored_candidates(
     return [(s, e, scored[(s, e)]) for s, e in trimmed]
 
 
+_STRICT_EXCHANGE_TICKER_RE = re.compile(r"^[A-Z][A-Z0-9\-&.]{0,19}$")
+
+
+def is_strict_exchange_ticker(hint: str) -> bool:
+    """True when ``hint`` looks like an NSE/BSE symbol (not free-form company text)."""
+    compact = re.sub(r"\s+", "", str(hint or "").strip())
+    if len(compact) < 2 or compact != compact.upper():
+        return False
+    return bool(_STRICT_EXCHANGE_TICKER_RE.match(compact))
+
+
 def resolve_equity_hint(
     hint: str,
     *,
@@ -145,6 +156,14 @@ def resolve_equity_hint(
     from portfolio_analysis import _resolve_symbol
 
     pref = preferred_exchange.upper() if preferred_exchange.upper() in {"NSE", "BSE"} else "NSE"
+    compact = re.sub(r"\s+", "", hint.strip().upper())
+
+    if is_strict_exchange_ticker(hint):
+        sym, exch, reason, conf = _resolve_symbol(compact, pref, by_exchange=uni)
+        if reason != "unresolved" and conf >= 0.76:
+            return sym, exch, reason
+        logger.info("Custom hint exact ticker passthrough: %r → %s (%s)", hint, compact, pref)
+        return compact, pref, "exact_ticker_passthrough"
 
     blobs = _build_blob_candidates(hint)
     best_pick: tuple[str, str, str, float] | None = None
@@ -221,9 +240,12 @@ def resolve_custom_equity_field_to_sector_instruments(
     *,
     preferred_exchange: str,
     cfg: Any | None = None,
-) -> tuple[list[SectorInstrument], list[dict[str, Any]]]:
+) -> tuple[list[SectorInstrument], list[dict[str, Any]], list[dict[str, Any]]]:
     """
     Produce ``SectorInstrument`` rows from raw user-entered hints (comma/semicolon/newline separated).
+
+    Returns ``(instruments, mapping_log, skipped)`` where ``skipped`` lists hints that could not
+    be resolved (reason ``unresolved``).
     """
     from portfolio_analysis import _load_active_symbol_universe
     from sector_registry import SectorInstrument
@@ -233,13 +255,18 @@ def resolve_custom_equity_field_to_sector_instruments(
     hints = split_custom_equity_hints(raw)
     out: list[SectorInstrument] = []
     mapping_log: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
     seen_pairs: set[tuple[str, str]] = set()
     for h in hints:
-        sym, ex, meth = resolve_equity_hint(h, preferred_exchange=preferred_exchange, uni=uni, cfg=cfg)
+        try:
+            sym, ex, meth = resolve_equity_hint(h, preferred_exchange=preferred_exchange, uni=uni, cfg=cfg)
+        except ValueError as exc:
+            skipped.append({"hint": h, "symbol": None, "exchange": None, "reason": "unresolved", "error": str(exc)})
+            continue
         key_pair = (sym.upper(), ex.upper())
         mapping_log.append({"hint": h, "symbol": sym, "exchange": ex, "via": meth})
         if key_pair not in seen_pairs:
             seen_pairs.add(key_pair)
             out.append(SectorInstrument(symbol=sym, exchange=ex))
-    return out, mapping_log
+    return out, mapping_log, skipped
 

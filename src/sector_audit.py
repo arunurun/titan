@@ -2273,6 +2273,35 @@ def _classify_error_code(error: Any) -> str:
     return "runtime_error"
 
 
+def _format_skipped_symbols_digest_lines(
+    failed_rows: list[dict[str, Any]],
+    *,
+    resolution_skipped: list[dict[str, Any]] | None = None,
+    max_items: int = 24,
+) -> list[str]:
+    """List skipped/failed symbols with reasons for the default sector digest."""
+    lines: list[str] = []
+    for row in resolution_skipped or []:
+        hint = str(row.get("hint") or row.get("symbol") or "?").strip()
+        reason = str(row.get("reason") or "unresolved").strip()
+        lines.append(f"{hint}: {reason}")
+
+    for row in failed_rows:
+        sym = str(row.get("symbol") or "?").strip()
+        ex = str(row.get("exchange") or "").strip()
+        label = f"{sym} ({ex})" if ex else sym
+        code = str(row.get("error_code") or _classify_error_code(row.get("error"))).strip()
+        lines.append(f"{label}: {code}")
+
+    if not lines:
+        return ["Skipped symbols: none"]
+    if len(lines) > max_items:
+        extra = len(lines) - max_items
+        lines = lines[:max_items]
+        lines.append(f"... and {extra} more")
+    return ["Skipped symbols:"] + [f"  - {line}" for line in lines]
+
+
 def _sector_heartbeat_seconds() -> float:
     raw = (os.environ.get("TITAN_SECTOR_HEARTBEAT_SECONDS") or "").strip()
     if not raw:
@@ -3598,8 +3627,31 @@ def build_equity_live_audit(
         breeze=breeze,
         lookback_calendar_days=lookback_calendar_days,
     )
+    ohlc_data_source = "breeze"
     exchange_used = str(df.attrs.get("exchange_used", inst.exchange)).strip().upper()
     fallback_used = bool(df.attrs.get("exchange_fallback_used", False))
+    if df.empty and not strict_data:
+        try:
+            from breakout_ohlcv_store import load_ohlcv_from_supabase, ohlcv_dict_to_audit_dataframe
+
+            parsed, cache_err = load_ohlcv_from_supabase(
+                inst.symbol,
+                min_bars=30,
+                max_stale_trading_days=10,
+            )
+            if parsed and not cache_err:
+                cache_df = ohlcv_dict_to_audit_dataframe(parsed)
+                if cache_df is not None and not getattr(cache_df, "empty", True):
+                    df = cache_df
+                    ohlc_data_source = "equity_ohlcv_daily"
+                    logger.info(
+                        "Breeze empty for %s (%s); using equity_ohlcv_daily (%d bars)",
+                        inst.symbol,
+                        inst.exchange,
+                        len(df),
+                    )
+        except ImportError:
+            pass
     if df.empty:
         if strict_data:
             raise RuntimeError(
@@ -3614,6 +3666,7 @@ def build_equity_live_audit(
             "exchange_used": exchange_used or inst.exchange,
             "exchange_fallback_used": fallback_used,
             "skipped_no_data": True,
+            "ohlc_data_source": ohlc_data_source,
             "z_score": float("nan"),
             "volume_participation_ratio": float("nan"),
             "absorption_ratio": float("nan"),
@@ -3828,6 +3881,7 @@ def build_equity_live_audit(
         "exchange": inst.exchange,
         "exchange_used": exchange_used or inst.exchange,
         "exchange_fallback_used": fallback_used,
+        "ohlc_data_source": ohlc_data_source,
         "ohlc_bar_as_of_date": ohlc_meta.get("ohlc_bar_as_of_date"),
         "ohlc_bar_incomplete": bool(ohlc_meta.get("ohlc_bar_incomplete")),
         "session_move_vs_prev_close_pct": session_move_pct,
@@ -4091,6 +4145,7 @@ def run_sector_live(
     macro_snapshot: dict[str, Any] | None = None,
     event_snapshot: dict[str, Any] | None = None,
     instruments_override: list[SectorInstrument] | None = None,
+    resolution_skipped: list[dict[str, Any]] | None = None,
     priority_only: bool = False,
     priority_top_n: int | None = None,
 ) -> str:
@@ -4437,6 +4492,11 @@ def run_sector_live(
             (
                 f"Data reconciliation: requested {len(results)} | success {ok_count} | "
                 f"skipped(no data) {len(skipped_rows)} | hard failures {len(hard_failed_rows)}"
+            ),
+            "",
+            *_format_skipped_symbols_digest_lines(
+                failed_rows,
+                resolution_skipped=resolution_skipped,
             ),
             "",
         ]

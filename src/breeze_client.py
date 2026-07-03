@@ -18,6 +18,11 @@ from zoneinfo import ZoneInfo
 
 from breeze_scrip_master import resolve_breeze_stock_code
 
+try:
+    from breakout_breeze_codes import resolve_breeze_stock_code_for_fetch
+except ImportError:
+    from .breakout_breeze_codes import resolve_breeze_stock_code_for_fetch
+
 IST = ZoneInfo("Asia/Kolkata")
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _FNO_BREEZE_MAPPING_YAML = _REPO_ROOT / "config" / "fno_breeze_mapping.yaml"
@@ -672,7 +677,7 @@ def fetch_equity_data(
         raise ValueError(f"exchange_code must be NSE or BSE, got {exchange_code!r}")
 
     # Breeze expects ICICI scrip codes (e.g. BHAELE), not always NSE tickers (e.g. BEL).
-    sc = resolve_breeze_stock_code(sc_raw, ex)
+    sc = resolve_breeze_stock_code_for_fetch(sc_raw, ex, config)
     if sc != sc_raw:
         logger.info("Breeze stock_code resolved %s (%s) -> %s", sc_raw, ex, sc)
 
@@ -682,7 +687,7 @@ def fetch_equity_data(
     to_date = end.strftime("%Y-%m-%dT23:59:59.999Z")
 
     def _fetch_one_exchange(exchange: str) -> pd.DataFrame:
-        stock_code = resolve_breeze_stock_code(sc_raw, exchange)
+        stock_code = resolve_breeze_stock_code_for_fetch(sc_raw, exchange, config)
         label = f"{sc_raw}->{stock_code} ({exchange})" if stock_code != sc_raw else f"{stock_code} ({exchange})"
         last_err: Exception | None = None
         for attempt in range(max_retries + 1):
@@ -800,7 +805,7 @@ def fetch_equity_quote(
     if ex not in ("NSE", "BSE"):
         raise ValueError(f"exchange_code must be NSE or BSE, got {exchange_code!r}")
 
-    sc = resolve_breeze_stock_code(sc_raw, ex)
+    sc = resolve_breeze_stock_code_for_fetch(sc_raw, ex, config)
     if sc != sc_raw:
         logger.info("Breeze quote stock_code resolved %s (%s) -> %s", sc_raw, ex, sc)
 

@@ -129,6 +129,32 @@ def rows_to_ohlcv_dict(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def ohlcv_dict_to_audit_dataframe(parsed: dict[str, Any]) -> Any:
+    """Convert Supabase OHLCV dict to a Breeze-like DataFrame for sector audits."""
+    import pandas as pd
+
+    timestamps = list(parsed.get("timestamp") or [])
+    if not timestamps:
+        return pd.DataFrame()
+    rows: list[dict[str, Any]] = []
+    for i, ts in enumerate(timestamps):
+        try:
+            dt = datetime.fromtimestamp(int(ts), tz=IST)
+            rows.append(
+                {
+                    "datetime": dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    "open": float(parsed["open"][i]),
+                    "high": float(parsed["high"][i]),
+                    "low": float(parsed["low"][i]),
+                    "close": float(parsed["close"][i]),
+                    "volume": int(float(parsed["volume"][i])),
+                }
+            )
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue
+    return pd.DataFrame(rows)
+
+
 def ohlcv_dict_to_rows(symbol: str, parsed: dict[str, Any], *, source: str = "yahoo") -> list[dict[str, Any]]:
     """Convert Yahoo chart dict to Supabase upsert rows."""
     sym = str(symbol).strip().upper()

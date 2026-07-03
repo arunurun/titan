@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 try:
@@ -11,6 +12,18 @@ except ImportError:
     from .breeze_scrip_master import resolve_breeze_stock_code
 
 logger = logging.getLogger(__name__)
+
+
+def _cfg_supabase_credentials(cfg: Any | None) -> tuple[str, str]:
+    if cfg is not None:
+        url = str(getattr(cfg, "supabase_url", "") or "").strip()
+        key = str(getattr(cfg, "supabase_key", "") or "").strip()
+        if url and key:
+            return url, key
+    return (
+        os.environ.get("SUPABASE_URL", "").strip(),
+        os.environ.get("SUPABASE_KEY", "").strip(),
+    )
 
 
 def _supabase_overlay(
@@ -82,3 +95,26 @@ def build_breeze_code_map(
         return base_map
 
     return _supabase_overlay(normalized, base_map, supabase_url=url, supabase_key=key)
+
+
+def resolve_breeze_stock_code_for_fetch(
+    symbol: str,
+    exchange_code: str,
+    cfg: Any | None = None,
+) -> str:
+    """
+    Resolve Breeze ``stock_code`` for live/historical fetch.
+
+    Primary: scrip master via ``resolve_breeze_stock_code``.
+    Overlay: ``market_instruments.breeze_stock_code`` when non-null (Supabase).
+    """
+    sym = str(symbol).strip().upper()
+    ex = str(exchange_code).strip().upper()
+    base = resolve_breeze_stock_code(sym, ex)
+    if ex != "NSE":
+        return base
+    url, key = _cfg_supabase_credentials(cfg)
+    if not url or not key or not sym:
+        return base
+    overlay = _supabase_overlay([sym], {sym: base}, supabase_url=url, supabase_key=key)
+    return overlay.get(sym, base)

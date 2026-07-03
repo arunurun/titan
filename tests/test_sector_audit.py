@@ -1302,6 +1302,64 @@ def test_run_sector_live_digest_one_gemini_call(mock_load, mock_metrics, mock_em
 @patch("email_notify.send_success_post_email")
 @patch("sector_audit._process_one_metrics")
 @patch("sector_audit.load_sector_instruments")
+def test_run_sector_live_digest_lists_skipped_symbols(mock_load, mock_metrics, mock_email):
+    from sector_audit import run_sector_live
+
+    mock_load.return_value = [
+        SectorInstrument("RELIANCE", "NSE"),
+        SectorInstrument("NAVINFLUOR", "NSE"),
+    ]
+    mock_metrics.side_effect = [
+        {
+            "ok": True,
+            "symbol": "RELIANCE",
+            "exchange": "NSE",
+            "audit": {"symbol": "RELIANCE", "z_score": 1.0, "intent_score": 0.5, "absorption_ratio": 0.3, "rows": 30},
+            "error": None,
+        },
+        {
+            "ok": False,
+            "symbol": "NAVINFLUOR",
+            "exchange": "NSE",
+            "audit": None,
+            "error": "[Breeze] No rows returned for NAVINFLUOR (NSE); skipped",
+            "error_code": "no_data_skipped",
+        },
+    ]
+    with patch("breeze_client.create_breeze_session", return_value=MagicMock()):
+        with patch("brain.generate_sector_digest_narrative", return_value="Narrative"):
+            with patch("supabase_log.save_audit_log"):
+                with patch(
+                    "analysis_store.persist_sector_run_analytics",
+                    return_value={"persisted": True, "run_id": "test-skipped"},
+                ):
+                    with patch("analysis_store.update_sector_period_rollups"):
+                        with patch(
+                            "analysis_store.build_comparison_payload",
+                            return_value={"enabled": False},
+                        ):
+                            with patch(
+                                "analysis_store.persist_llm_digest_memory",
+                                return_value={"persisted": True},
+                            ):
+                                run_sector_live(
+                                    "custom_ui",
+                                    max_workers=1,
+                                    digest=True,
+                                    resolution_skipped=[
+                                        {"hint": "FOO BAR LTD", "reason": "unresolved"},
+                                    ],
+                                )
+
+    body = mock_email.call_args[0][0]
+    assert "Skipped symbols:" in body
+    assert "NAVINFLUOR (NSE): no_data_skipped" in body
+    assert "FOO BAR LTD: unresolved" in body
+
+
+@patch("email_notify.send_success_post_email")
+@patch("sector_audit._process_one_metrics")
+@patch("sector_audit.load_sector_instruments")
 def test_run_sector_live_metals_mining_includes_pm_macro(
     mock_load, mock_metrics, mock_email, monkeypatch
 ):
