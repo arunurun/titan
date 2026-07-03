@@ -63,6 +63,9 @@ def build_analysis_record(
     base_score: float | None = None,
     pass_paths: str | None = None,
     risk_flags: str | None = None,
+    breeze_stock_code: str | None = None,
+    setup_trigger_price: float | None = None,
+    setup_rank: float | None = None,
     inserted_at: str | None = None,
 ) -> dict[str, Any]:
     """Map scanner internals to a flat row for ``breakout_stock_analysis``."""
@@ -107,6 +110,9 @@ def build_analysis_record(
         "base_score": base_score,
         "pass_paths": pass_paths,
         "risk_flags": risk_flags,
+        "breeze_stock_code": breeze_stock_code,
+        "setup_trigger_price": setup_trigger_price,
+        "setup_rank": setup_rank,
     }
     return sanitize_for_json(row)
 

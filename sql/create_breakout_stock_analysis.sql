@@ -46,6 +46,9 @@ create table if not exists public.breakout_stock_analysis (
     base_score double precision,
     pass_paths text,
     risk_flags text,
+    breeze_stock_code text,
+    setup_trigger_price double precision,
+    setup_rank double precision,
 
     primary key (run_id, ticker)
 );

@@ -70,6 +70,9 @@ message BreakoutStockAnalysisRecord {
   double base_score = 36;
   string pass_paths = 37;
   string risk_flags = 38;
+  string breeze_stock_code = 39;
+  double setup_trigger_price = 40;
+  double setup_rank = 41;
 }
 
 // Response for a completed breakout scan.
