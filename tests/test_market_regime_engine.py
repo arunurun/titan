@@ -151,3 +151,25 @@ def test_apply_regime_uses_hysteresis_from_prior():
     assert audit["market_regime"]["raw_regime"] == "BULL"
     assert audit["market_regime"]["regime"] == "STRONG_BULL"
     assert audit["market_regime"]["hysteresis"]["applied"] is True
+
+
+def test_score_market_regime_context_rule_only():
+    from market_regime import score_market_regime_context
+
+    out = score_market_regime_context({"market_regime": {"regime": "BULL"}})
+    assert out["available"] is True
+    assert out["score"] == 75.0
+    assert out["metadata"]["regime_label"] == "BULL"
+
+
+def test_score_market_regime_context_breadth_blend(monkeypatch):
+    from market_regime import score_market_regime_context
+
+    monkeypatch.setenv("TITAN_REGIME_BREADTH_BLEND", "0.30")
+    out = score_market_regime_context(
+        {"market_breadth_pct": 60.0},
+        regime_label="BULL",
+    )
+    # 0.7 * 75 + 0.3 * 60 = 70.5
+    assert out["score"] == pytest.approx(70.5, abs=0.01)
+    assert "breadth blend" in out["reasons"][1]
