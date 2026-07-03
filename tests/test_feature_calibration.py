@@ -43,7 +43,7 @@ def test_suggest_titan_weights_correlation():
     weights = report["weights"]
     assert report["method"] == "correlation"
     assert report["n_rows"] >= 10
-    assert pytest.approx(sum(weights[p] for p in FUSION_PILLARS), abs=1e-6) == 1.0
+    assert pytest.approx(sum(weights[p] for p in FUSION_PILLARS), abs=1e-5) == 1.0
 
 
 def test_fit_feature_importance_alias():

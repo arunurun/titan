@@ -101,7 +101,8 @@ def test_symbol_digest_default_is_short_block(monkeypatch):
     text = _format_symbol_metrics_line(result)
     assert "techScore" not in text
     assert "WELCORP (NSE)" in text
-    assert "TRIM" in text or "trim" in text.lower()
+    assert "HOLD" in text
+    assert "intent cooling" in text.lower()
     assert "1W outlook:" in text
     assert "neutral band" in text.lower()
     assert "Regime: Buy trend" in text
