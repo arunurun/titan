@@ -1423,6 +1423,29 @@ def test_symbol_digest_explicit_news_unavailable_message(monkeypatch):
     assert "News: unavailable (global_news_snapshot_unavailable)" in text
 
 
+def test_symbol_digest_fundamentals_unavailable_hint(monkeypatch):
+    monkeypatch.delenv("TITAN_DIGEST_VERBOSE_SYMBOLS", raising=False)
+    from sector_audit import _format_symbol_metrics_line
+
+    audit = {
+        "effective_intent_score": 52.0,
+        "z_score": 0.6,
+        "volume_participation_ratio": 1.1,
+        "return_1d_pct": 0.2,
+        "atr_14_pct": 1.9,
+        "next_week_score": 54.3,
+        "sell_signal": "hold",
+        "sell_signal_reasons": ["monitor trend"],
+        "fundamental_status": "unavailable",
+        "fundamental_score": float("nan"),
+        "fundamental_reasons": [],
+        "hypothesis_support": "technical_only",
+        "prediction_breakdown": {"week": {}, "day": {}, "penalties": []},
+    }
+    text = _format_symbol_metrics_line({"symbol": "LAURUSLABS", "exchange": "NSE", "audit": audit})
+    assert "Fundamentals: unavailable (run ingest_fundamentals)" in text
+
+
 @patch("email_notify.send_success_post_email")
 @patch("sector_audit._process_one_metrics")
 @patch("sector_audit.load_sector_instruments")

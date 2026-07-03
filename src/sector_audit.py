@@ -2033,6 +2033,10 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
             f"• Fundamentals: {fundamental_status} ({_fmt_metric(fundamental_score)})"
             + (f" — {fr}" if fr else ""),
         )
+    elif fundamental_status.lower() in ("unavailable", "na", "n/a", "") or str(fundamental_status).startswith(
+        "unavailable",
+    ):
+        context_tail.append("• Fundamentals: unavailable (run ingest_fundamentals)")
 
     if fallback_used and exchange_used.upper() != str(exchange).upper():
         context_tail.append(f"• Price feed: {exchange_used} (alternate to {exchange})")

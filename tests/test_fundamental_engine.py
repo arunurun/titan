@@ -64,3 +64,57 @@ def test_score_fundamentals_missing_extended_metrics_skips():
     assert out["available"] is True
     assert "peg" not in out["metadata"]
     assert "fcf_yield_pct" not in out["metadata"]
+
+
+def test_assess_fundamental_strength_lauruslabs_mock(monkeypatch):
+    from config_loader import TitanConfig
+    from fundamental_engine import _FUNDAMENTAL_CACHE, assess_fundamental_strength
+    from sector_registry import SectorInstrument
+
+    _FUNDAMENTAL_CACHE.clear()
+
+    mock_row = {
+        "symbol": "LAURUSLABS",
+        "exchange": "NSE",
+        "roe": 16.5,
+        "roce": 14.2,
+        "debt_to_equity": 0.4,
+        "net_profit_margin": 11.0,
+    }
+
+    class _Result:
+        data = [mock_row]
+
+    class _Query:
+        def select(self, *_a, **_k):
+            return self
+
+        def eq(self, *_a, **_k):
+            return self
+
+        def limit(self, *_a, **_k):
+            return self
+
+        def execute(self):
+            return _Result()
+
+    class _Client:
+        def table(self, _name):
+            return _Query()
+
+    monkeypatch.setattr("fundamental_engine.create_client", lambda *_a, **_k: _Client())
+
+    cfg = TitanConfig(
+        breeze_api_key="",
+        breeze_secret="",
+        breeze_session_token="",
+        gemini_api_keys=(),
+        supabase_url="https://example.supabase.co",
+        supabase_key="test-key",
+    )
+    inst = SectorInstrument(symbol="LAURUSLABS", exchange="NSE")
+    out = assess_fundamental_strength(cfg, inst)
+    assert out["score"] is not None
+    assert out["score"] >= 60.0
+    assert out["status"] in ("strong", "balanced", "weak")
+    assert out.get("factor", {}).get("available") is True

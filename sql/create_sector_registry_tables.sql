@@ -28,6 +28,9 @@ create table if not exists public.market_instruments (
     unique (exchange, symbol)
 );
 
+-- Fundamental quality columns (roe, roce, margins, growth, valuation, FCF) are added by
+-- sql/migrations/add_market_instruments_fundamentals.sql and populated by scripts/ingest_fundamentals.py.
+
 create table if not exists public.instrument_sector_map (
     id uuid primary key default gen_random_uuid(),
     instrument_id uuid not null references public.market_instruments(id) on delete cascade,
