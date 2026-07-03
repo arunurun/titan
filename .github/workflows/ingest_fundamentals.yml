@@ -57,7 +57,9 @@ jobs:
           TITAN_FUNDAMENTALS_INGEST_THROTTLE_SEC: "0.5"
         run: |
           ARGS=()
-          SCOPE="${{ github.event.inputs.scope }}"
+          # Push and other non-dispatch events leave inputs empty; default to full ingest.
+          SCOPE="${{ github.event.inputs.scope || 'all' }}"
+          SCOPE="${SCOPE:-all}"
           if [ "$SCOPE" = "all" ]; then
             ARGS+=(--all)
           elif [ "$SCOPE" = "sector" ]; then
