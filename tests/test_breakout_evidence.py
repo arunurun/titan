@@ -13,8 +13,10 @@ from breakout_evidence import (  # noqa: E402
     base_quality_score,
     breakout_stage,
     composite_rank_score,
+    compute_evidence_metrics,
     liquidity_gate_pass,
     liquidity_quality_score,
+    micro_cap_participation_pass,
     micro_cap_stricter_rules,
     persistence_pass_min,
     volume_persistence_score,
@@ -73,3 +75,37 @@ def test_micro_cap_stricter_rules():
 def test_persistence_pass_min():
     assert persistence_pass_min("MICRO_CAP_250") == 2
     assert persistence_pass_min("SMALL_CAP_100") == 1
+
+
+def test_micro_cap_participation_pass_delivery_required():
+    assert micro_cap_participation_pass("MICRO_CAP_250", vpr=3.0, cmf=0.1, delivery_pct=50.0) is True
+    assert micro_cap_participation_pass("MICRO_CAP_250", vpr=3.0, cmf=0.1, delivery_pct=30.0) is False
+    assert micro_cap_participation_pass("SMALL_CAP_100", vpr=2.0, cmf=0.1) is True
+
+
+def test_compute_evidence_metrics_includes_flow_and_delivery():
+    n = 60
+    close = [50.0 + i * 0.1 for i in range(n)]
+    volume = [10000.0] * (n - 1) + [25000.0]
+    df = {
+        "open": close[:],
+        "high": [c + 0.5 for c in close],
+        "low": [c - 0.5 for c in close],
+        "close": close,
+        "volume": volume,
+    }
+    vol_20 = [10000.0] * n
+    out = compute_evidence_metrics(
+        df,
+        n - 1,
+        "MICRO_CAP_250",
+        vol_20,
+        delivery_pct=55.0,
+        free_float_pct=35.0,
+    )
+    assert out["delivery_pct"] == 55.0
+    assert out["free_float_pct"] == 35.0
+    assert out.get("vpr") is not None
+    assert out.get("cmf") is not None
+    assert out["micro_participation_pass"] is not None
+    assert out["liquidity_quality"] != 50.0

@@ -82,7 +82,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument(
         "--missed-analysis",
         action="store_true",
-        help="Run missed-breakout analysis on cached 40-stock data (no Yahoo refetch)",
+        help=(
+            "Missed-breakout report on cached Yahoo history (uses output-dir cache; "
+            "no refetch unless cache missing)"
+        ),
     )
     ap.add_argument("--json", action="store_true", help="Print summary JSON to stdout")
     return ap.parse_args(argv)

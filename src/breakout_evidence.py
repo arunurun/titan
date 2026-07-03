@@ -371,6 +371,31 @@ def _atr_simple(
     return atr
 
 
+def _flow_metrics_from_bars(df: dict[str, Any], as_of_idx: int) -> tuple[float | None, float | None]:
+    """VPR and CMF from OHLCV bars through signal day T (inclusive)."""
+    try:
+        import pandas as pd
+        from breeze_client import volume_participation_ratio
+        from titan_engine import calculate_cmf
+    except ImportError:
+        return None, None
+
+    n = as_of_idx + 1
+    if n < 2:
+        return None, None
+    ohlc = pd.DataFrame({
+        "high": [float(x) for x in df["high"][:n]],
+        "low": [float(x) for x in df["low"][:n]],
+        "close": [float(x) for x in df["close"][:n]],
+        "volume": [float(x) for x in df["volume"][:n]],
+    })
+    vpr_raw = volume_participation_ratio(ohlc)
+    cmf_raw = calculate_cmf(ohlc, window=min(20, n))
+    vpr = float(vpr_raw) if _is_finite(vpr_raw) else None
+    cmf = float(cmf_raw) if _is_finite(cmf_raw) else None
+    return vpr, cmf
+
+
 def compute_evidence_inputs(
     df: dict[str, Any],
     as_of_idx: int,
@@ -458,19 +483,25 @@ def compute_evidence_metrics(
     vol_20_avg: Sequence[float],
     *,
     bhav_turnover_lacs: float | None = None,
+    delivery_pct: float | None = None,
+    free_float_pct: float | None = None,
 ) -> dict[str, Any]:
     """Evidence bundle for scanner integration at bar T."""
     volumes = df["volume"]
     t = as_of_idx
     inputs = compute_evidence_inputs(df, as_of_idx, bhav_turnover_lacs=bhav_turnover_lacs)
+    vpr, cmf = _flow_metrics_from_bars(df, as_of_idx)
+    part_pass = micro_cap_participation_pass(
+        tier_name, vpr=vpr, cmf=cmf, delivery_pct=delivery_pct,
+    )
 
     median_inr = inputs["median_turnover_inr"]
     liq_ok = liquidity_gate_pass(tier_name, median_inr)
     liq_quality = liquidity_quality_score(
         median_inr,
-        None,
+        delivery_pct,
         inputs["vol_consistency"],
-        None,
+        free_float_pct,
     )
     vma = float(vol_20_avg[t - 1]) if t > 0 and t - 1 < len(vol_20_avg) else float(vol_20_avg[-1])
     persist = volume_persistence_score(
@@ -496,6 +527,11 @@ def compute_evidence_metrics(
         "liquidity_gate_fail": None if liq_ok else "pre_filter_liquidity",
         "liquidity_quality": liq_quality,
         "median_turnover_inr": round(float(median_inr), 2) if _is_finite(median_inr) else None,
+        "delivery_pct": round(float(delivery_pct), 4) if _is_finite(delivery_pct) else None,
+        "free_float_pct": round(float(free_float_pct), 4) if _is_finite(free_float_pct) else None,
+        "vpr": round(vpr, 4) if vpr is not None else None,
+        "cmf": round(cmf, 4) if cmf is not None else None,
+        "micro_participation_pass": part_pass,
         "persistence_score": persist,
         "persistence_pass_min": persistence_pass_min(tier_name),
         "breakout_stage": stage,

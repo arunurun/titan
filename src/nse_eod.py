@@ -424,3 +424,91 @@ def fetch_corporate_actions(
             }
         )
     return out
+
+
+# ---------------------------------------------------------------------------
+# Quarterly shareholding / free-float (corporate-share-holdings-master JSON)
+# ---------------------------------------------------------------------------
+
+_SHAREHOLDING_REF = (
+    _NSE_HOME + "/companies-listing/corporate-filings-shareholding-pattern"
+)
+
+
+def fetch_shareholding_master(
+    *,
+    index: str = "equities",
+    from_date: date | None = None,
+    to_date: date | None = None,
+    symbol: str | None = None,
+) -> list[dict[str, Any]]:
+    """NSE corporate shareholding master feed (quarterly filings).
+
+    Without ``from_date``/``to_date``, NSE returns only the most recent handful of
+    submissions. With a date window, returns all equity filings in range (bulk ingest).
+    """
+    path = f"/api/corporate-share-holdings-master?index={index}"
+    if from_date is not None and to_date is not None:
+        path += f"&from_date={from_date.strftime('%d-%m-%Y')}&to_date={to_date.strftime('%d-%m-%Y')}"
+    if symbol:
+        path += f"&symbol={str(symbol).strip().upper()}"
+    payload = _download_json(path, referer=_SHAREHOLDING_REF)
+    return payload if isinstance(payload, list) else []
+
+
+def _parse_submission_ts(value: Any) -> datetime | None:
+    s = str(value or "").strip()
+    if not s:
+        return None
+    for fmt in ("%d-%b-%Y %H:%M:%S", "%d-%b-%Y"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def normalize_shareholding_rows(
+    records: list[dict[str, Any]],
+    *,
+    source: str = "nse_corporate_share_holdings_master",
+) -> list[dict[str, Any]]:
+    """Map NSE master rows to ``shareholding_quarterly`` upsert dicts.
+
+    ``free_float_pct`` uses ``public_val`` (public shareholding %) as the liquidity
+    proxy; NSE's granular free-float methodology is not exposed on this feed.
+    """
+    best: dict[tuple[str, str], dict[str, Any]] = {}
+    for rec in records:
+        sym = str(rec.get("symbol") or "").strip().upper()
+        as_of = parse_trade_date(rec.get("date"))
+        if not sym or as_of is None:
+            continue
+        promoter = _num(rec.get("pr_and_prgrp"))
+        public = _num(rec.get("public_val"))
+        free_float = public
+        if free_float is None and promoter is not None and 0 <= promoter <= 100:
+            free_float = round(100.0 - promoter, 4)
+        if free_float is None or free_float < 0:
+            continue
+        key = (sym, as_of.isoformat())
+        row = {
+            "symbol": sym,
+            "as_of_date": as_of.isoformat(),
+            "free_float_pct": round(float(free_float), 4),
+            "promoter_holding_pct": round(float(promoter), 4) if promoter is not None else None,
+            "source": source,
+            "_submission_ts": rec.get("submissionDate") or rec.get("broadcastDate"),
+        }
+        prev = best.get(key)
+        if prev is None:
+            best[key] = row
+            continue
+        prev_ts = _parse_submission_ts(prev.get("_submission_ts"))
+        new_ts = _parse_submission_ts(row.get("_submission_ts"))
+        if new_ts is not None and (prev_ts is None or new_ts >= prev_ts):
+            best[key] = row
+    out = list(best.values())
+    for row in out:
+        row.pop("_submission_ts", None)
+    return out
