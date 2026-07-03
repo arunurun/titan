@@ -208,10 +208,11 @@ def test_apply_fusion_always_on():
     assert audit["titan_score"] == out["titan_score"]
 
 
-def test_load_calibrated_weights(monkeypatch, tmp_path):
+def test_load_recommended_weights_from_default_paths(monkeypatch, tmp_path):
     from titan_fusion import FUSION_PILLARS, load_fusion_weights
 
-    weights_path = tmp_path / "recommended_weights.json"
+    weights_path = tmp_path / "data" / "recommended_weights.json"
+    weights_path.parent.mkdir(parents=True)
     weights_path.write_text(
         json.dumps(
             {
@@ -220,8 +221,10 @@ def test_load_calibrated_weights(monkeypatch, tmp_path):
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("TITAN_FUSION_USE_CALIBRATED_WEIGHTS", "1")
-    monkeypatch.setenv("TITAN_FUSION_CALIBRATED_WEIGHTS_PATH", str(weights_path))
+    monkeypatch.setattr(
+        "titan_fusion._RECOMMENDED_WEIGHTS_SEARCH_PATHS",
+        (str(weights_path),),
+    )
     loaded = load_fusion_weights()
     assert loaded["technical"] == pytest.approx(0.2, abs=0.01)
 

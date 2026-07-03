@@ -1,4 +1,4 @@
-"""Tests for TITAN_FUSION_PRED_BLEND in prediction_engine."""
+"""Tests for FUSION_PRED_BLEND in prediction_engine."""
 
 from __future__ import annotations
 
@@ -21,24 +21,25 @@ def base_audit() -> dict:
     }
 
 
-def test_pred_blend_default_off(base_audit: dict):
-    from prediction_engine import predictive_scores
+def test_pred_blend_default_on(base_audit: dict):
+    from prediction_engine import FUSION_PRED_BLEND, predictive_scores
 
-    day, week, _ = predictive_scores(base_audit)
+    assert FUSION_PRED_BLEND == pytest.approx(0.15)
+    day, week, bd = predictive_scores(base_audit)
     audit_no_titan = dict(base_audit)
     audit_no_titan.pop("titan_score")
     day2, week2, _ = predictive_scores(audit_no_titan)
-    assert day == day2
-    assert week == week2
+    assert day != day2
+    assert week != week2
+    assert bd["titan_fusion_pred_blend"] == pytest.approx(0.15)
 
 
 def test_pred_blend_moves_toward_titan(base_audit: dict, monkeypatch):
-    from prediction_engine import predictive_scores
+    from prediction_engine import FUSION_PRED_BLEND, predictive_scores
 
-    monkeypatch.setenv("TITAN_FUSION_PRED_BLEND", "0.5")
     day_blend, week_blend, bd = predictive_scores(base_audit)
-    monkeypatch.delenv("TITAN_FUSION_PRED_BLEND", raising=False)
+    monkeypatch.setattr("prediction_engine.FUSION_PRED_BLEND", 0.0)
     day_base, week_base, _ = predictive_scores(base_audit)
     assert day_blend > day_base
     assert week_blend > week_base
-    assert bd["titan_fusion_pred_blend"] == pytest.approx(0.5)
+    assert bd["titan_fusion_pred_blend"] == pytest.approx(FUSION_PRED_BLEND)

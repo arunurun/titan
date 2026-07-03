@@ -45,6 +45,54 @@ def _fmt_metric(x: Any, digits: int = 2) -> str:
     return f"{v:.{digits}f}"
 
 
+def _series_from_row(row: dict[str, Any], keys: tuple[str, ...]) -> list[float]:
+    for key in keys:
+        raw = row.get(key)
+        if isinstance(raw, list):
+            vals = [_sf(v) for v in raw]
+            clean = [v for v in vals if not math.isnan(v)]
+            if len(clean) >= 2:
+                return clean
+        if isinstance(raw, str) and raw.strip():
+            try:
+                import json
+
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    vals = [_sf(v) for v in parsed]
+                    clean = [v for v in vals if not math.isnan(v)]
+                    if len(clean) >= 2:
+                        return clean
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+    return []
+
+
+def _cagr_pct(values: list[float], periods: int | None = None) -> float:
+    if len(values) < 2:
+        return float("nan")
+    start = values[0]
+    end = values[-1]
+    if start <= 0 or end <= 0:
+        return float("nan")
+    n = max(1, periods if periods is not None else len(values) - 1)
+    years = n / 4.0 if n <= 8 else n  # quarterly rows ≈ n/4 years else annual count
+    if years <= 0:
+        return float("nan")
+    return (pow(end / start, 1.0 / years) - 1.0) * 100.0
+
+
+def _fcf_yield_pct(row: dict[str, Any]) -> float:
+    fcf = _first_float_field(
+        row,
+        ("free_cash_flow", "fcf", "operating_cash_flow", "cash_from_operations"),
+    )
+    mcap = _first_float_field(row, ("market_cap", "market_cap_inr", "mcap", "market_capitalization"))
+    if math.isnan(fcf) or math.isnan(mcap) or mcap <= 0:
+        return float("nan")
+    return (fcf / mcap) * 100.0
+
+
 def score_fundamentals(row: dict[str, Any]) -> FactorResult:
     """
     Score fundamental quality from a market_instruments row.
@@ -58,6 +106,15 @@ def score_fundamentals(row: dict[str, Any]) -> FactorResult:
     eps_growth = _first_float_field(row, ("eps_growth_pct", "earnings_growth_pct"))
     pe = _first_float_field(row, ("pe", "pe_ratio", "trailing_pe"))
     pb = _first_float_field(row, ("pb", "pb_ratio", "price_to_book"))
+    fcf_yield = _fcf_yield_pct(row)
+    rev_hist = _series_from_row(row, ("revenue_history", "revenue_series", "sales_history"))
+    eps_hist = _series_from_row(row, ("eps_history", "eps_series", "earnings_history"))
+    revenue_cagr = _cagr_pct(rev_hist) if rev_hist else float("nan")
+    eps_cagr = _cagr_pct(eps_hist) if eps_hist else float("nan")
+    eps_growth_for_peg = eps_growth if not math.isnan(eps_growth) else eps_cagr
+    peg = float("nan")
+    if not math.isnan(pe) and not math.isnan(eps_growth_for_peg) and eps_growth_for_peg > 0:
+        peg = pe / eps_growth_for_peg
 
     score = 50.0
     reasons: list[str] = []
@@ -136,6 +193,38 @@ def score_fundamentals(row: dict[str, Any]) -> FactorResult:
         if eps_growth >= 10.0:
             score += 4.0
             growth_hits += 1
+    if not math.isnan(revenue_cagr):
+        used += 1
+        meta["revenue_cagr_pct"] = round(revenue_cagr, 2)
+        if revenue_cagr >= 12.0:
+            score += 5.0
+            growth_hits += 1
+            reasons.append(f"revenue CAGR strong {_fmt_metric(revenue_cagr)}")
+        elif revenue_cagr < 0.0:
+            score -= 3.0
+            reasons.append(f"revenue CAGR negative {_fmt_metric(revenue_cagr)}")
+    if not math.isnan(eps_cagr):
+        meta["eps_cagr_pct"] = round(eps_cagr, 2)
+    if not math.isnan(peg):
+        used += 1
+        meta["peg"] = round(peg, 2)
+        if peg <= 1.5:
+            score += 4.0
+            valuation_hits += 1
+            reasons.append(f"PEG attractive {_fmt_metric(peg)}")
+        elif peg > 3.0:
+            score -= 3.0
+            reasons.append(f"PEG rich {_fmt_metric(peg)}")
+    if not math.isnan(fcf_yield):
+        used += 1
+        meta["fcf_yield_pct"] = round(fcf_yield, 2)
+        if fcf_yield >= 4.0:
+            score += 5.0
+            quality_hits += 1
+            reasons.append(f"FCF yield strong {_fmt_metric(fcf_yield)}")
+        elif fcf_yield < 0.0:
+            score -= 4.0
+            reasons.append(f"FCF yield negative {_fmt_metric(fcf_yield)}")
     if not math.isnan(pe):
         used += 1
         meta["pe"] = round(pe, 2)

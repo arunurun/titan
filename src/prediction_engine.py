@@ -10,6 +10,9 @@ _CONTEMP_MOVE_THRESHOLD_PCT = 3.0
 _CONTEMP_DISCOUNT_SLOPE = 0.08
 _CONTEMP_MAX_DISCOUNT_FRAC = 0.5
 
+# Blend fused titan_score into predictive horizons (always on when titan_score valid).
+FUSION_PRED_BLEND = 0.15
+
 PREDICTIVE_WEIGHT_DEFAULTS: dict[str, float] = {
     "tech_day": 0.52,
     "tech_week": 0.62,
@@ -154,10 +157,9 @@ def predictive_scores(
         - (atr_penalty * 0.35)
     )
 
-    titan_blend = _contemp_env_float("TITAN_FUSION_PRED_BLEND", 0.0)
-    titan_blend = max(0.0, min(1.0, titan_blend))
+    titan_blend = FUSION_PRED_BLEND
     titan = _sf(audit.get("titan_score"))
-    if titan_blend > 0.0 and not math.isnan(titan):
+    if not math.isnan(titan):
         day_score = day_score * (1.0 - titan_blend) + titan * titan_blend
         week_score = week_score * (1.0 - titan_blend) + titan * titan_blend
 

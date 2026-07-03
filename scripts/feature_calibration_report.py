@@ -26,7 +26,7 @@ from feature_calibration import (  # noqa: E402
     write_recommended_weights,
 )
 
-DEFAULT_OUTPUT = ROOT / "data" / "calibration" / "recommended_weights.json"
+DEFAULT_OUTPUT = ROOT / "data" / "recommended_weights.json"
 
 
 def _parse_args(argv=None) -> argparse.Namespace:

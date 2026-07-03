@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import time
+from types import SimpleNamespace
+
 import pandas as pd
 import pytest
 
@@ -42,3 +45,29 @@ def test_stamp_macro_context_nifty():
     assert ctx["nifty_above_ema200"] is True
     assert ctx["india_vix"] == 14.5
     assert "nifty_ema200" in ctx
+
+
+def test_prefetch_breadth_panel_batch_uses_concurrency(monkeypatch):
+    from breadth_engine import prefetch_breadth_panel_batch
+
+    calls: list[str] = []
+
+    def _fake_fetch(cfg, symbol, exchange, *, breeze=None, lookback_calendar_days=280):
+        calls.append(symbol)
+        time.sleep(0.02)
+        return pd.DataFrame({"close": [1.0, 2.0, 3.0]})
+
+    monkeypatch.setattr("breeze_client.fetch_equity_data", _fake_fetch)
+    instruments = [SimpleNamespace(symbol=f"S{i}", exchange="NSE") for i in range(8)]
+    t0 = time.perf_counter()
+    panel = prefetch_breadth_panel_batch(
+        object(),
+        object(),
+        instruments,
+        max_symbols=8,
+        max_workers=4,
+    )
+    elapsed = time.perf_counter() - t0
+    assert len(panel) == 8
+    assert len(calls) == 8
+    assert elapsed < 0.12

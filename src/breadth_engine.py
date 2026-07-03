@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import math
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Sequence
 
 import pandas as pd
 
 from score_types import FactorResult
+
+# Cap breadth OHLC prefetch size for sector runs (latency control; diagnostic only).
+BREADTH_PANEL_MAX_SYMBOLS = 500
+BREADTH_PREFETCH_MAX_WORKERS = 4
 
 
 def _sf(v: Any) -> float:
@@ -253,6 +258,57 @@ def stamp_macro_context(
     return ctx
 
 
+def prefetch_breadth_panel_batch(
+    cfg: Any,
+    breeze: Any,
+    instruments: Sequence[Any],
+    *,
+    lookback_calendar_days: int = 280,
+    max_symbols: int = BREADTH_PANEL_MAX_SYMBOLS,
+    max_workers: int = BREADTH_PREFETCH_MAX_WORKERS,
+) -> dict[str, pd.DataFrame]:
+    """Concurrent OHLC prefetch for breadth panel (ThreadPoolExecutor)."""
+    from breeze_client import fetch_equity_data
+
+    subset = list(instruments)[: max(0, int(max_symbols))]
+    panel: dict[str, pd.DataFrame] = {}
+
+    def _fetch_one(inst: Any) -> tuple[str, pd.DataFrame | None]:
+        symbol = str(getattr(inst, "symbol", inst) or "").strip().upper()
+        exchange = str(getattr(inst, "exchange", "NSE") or "NSE").strip().upper()
+        if not symbol:
+            return "", None
+        try:
+            df = fetch_equity_data(
+                cfg,
+                symbol,
+                exchange,
+                breeze=breeze,
+                lookback_calendar_days=lookback_calendar_days,
+            )
+            if df is not None and not df.empty:
+                return symbol, df
+        except Exception:
+            return symbol, None
+        return symbol, None
+
+    workers = max(1, min(int(max_workers), 16))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_fetch_one, inst): inst for inst in subset}
+        for fut in as_completed(futures):
+            symbol, df = fut.result()
+            if symbol and df is not None:
+                panel[symbol] = df
+    return panel
+
+
+def compute_factor_scores_panel(
+    panel: dict[str, pd.DataFrame],
+) -> dict[str, dict[str, Any]]:
+    """Stub: reserved for vectorized per-symbol factor scoring over a breadth panel."""
+    return {sym: {"available": False, "reason": "not_implemented"} for sym in panel}
+
+
 def prefetch_breadth_panel(
     cfg: Any,
     breeze: Any,
@@ -263,34 +319,19 @@ def prefetch_breadth_panel(
 ) -> dict[str, pd.DataFrame]:
     """Prefetch OHLC panel for breadth computation (best-effort per symbol).
 
-    ``max_symbols`` caps panel size for latency control. In sector runs this is
-    typically set from ``TITAN_BREADTH_PANEL_MAX_SYMBOLS`` (unset = full universe).
-    Breadth is diagnostic only in fusion — it does not enter ``titan_score`` weights.
+    ``max_symbols`` caps panel size for latency control (sector runs default to
+    ``BREADTH_PANEL_MAX_SYMBOLS``). Breadth is diagnostic only in fusion — it does
+    not enter ``titan_score`` weights.
     """
-    from breeze_client import fetch_equity_data
-
-    panel: dict[str, pd.DataFrame] = {}
-    subset = list(instruments)
-    if max_symbols is not None:
-        subset = subset[: max(0, int(max_symbols))]
-    for inst in subset:
-        symbol = str(getattr(inst, "symbol", inst) or "").strip().upper()
-        exchange = str(getattr(inst, "exchange", "NSE") or "NSE").strip().upper()
-        if not symbol:
-            continue
-        try:
-            df = fetch_equity_data(
-                cfg,
-                symbol,
-                exchange,
-                breeze=breeze,
-                lookback_calendar_days=lookback_calendar_days,
-            )
-            if df is not None and not df.empty:
-                panel[symbol] = df
-        except Exception:
-            continue
-    return panel
+    cap = BREADTH_PANEL_MAX_SYMBOLS if max_symbols is None else max(0, int(max_symbols))
+    return prefetch_breadth_panel_batch(
+        cfg,
+        breeze,
+        instruments,
+        lookback_calendar_days=lookback_calendar_days,
+        max_symbols=cap,
+        max_workers=BREADTH_PREFETCH_MAX_WORKERS,
+    )
 
 
 def apply_macro_context_to_audit(audit: dict[str, Any], ctx: dict[str, Any]) -> None:

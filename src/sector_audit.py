@@ -655,22 +655,13 @@ def _digest_reconcile_mode_enabled() -> bool:
 
 
 def _digest_show_factor_scores_enabled() -> bool:
-    """Render titan_fusion pillar breakdown in digest/email per-symbol blocks."""
-    return (os.environ.get("TITAN_DIGEST_SHOW_FACTOR_SCORES") or "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
+    """Render titan_fusion pillar breakdown in digest/email per-symbol blocks (always on)."""
+    return True
 
 
 def _digest_investment_report_enabled() -> bool:
-    return (os.environ.get("TITAN_INVESTMENT_REPORT") or "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
+    """Investment report appendix in sector digest (always on)."""
+    return True
 
 
 def _format_fusion_factor_digest_lines(audit: dict[str, Any]) -> list[str]:
@@ -759,6 +750,34 @@ def _sell_signal_plain_english(signal: str) -> str:
     from action_signals import action_signal_plain_english
 
     return action_signal_plain_english(signal)
+
+
+def _action_recommendation_digest_lines(audit: dict[str, Any]) -> list[str]:
+    """Recommendation block: display label, sizing, expected return/drawdown."""
+    try:
+        from action_engine import derive_full_action
+    except ImportError:
+        return []
+    action = derive_full_action(audit)
+    audit["full_action"] = action
+    label = str(action.get("label") or "hold").upper()
+    internal = str(action.get("label_internal") or "hold")
+    lines = [f"▸ Recommendation: {label}"]
+    if label in ("REDUCE", "EXIT"):
+        lines[0] = f"▸ Recommendation: {label} — review exposure"
+    plain = _sell_signal_plain_english(internal)
+    if plain:
+        lines.append(f"   {plain}")
+    pos = action.get("position_size_pct")
+    if pos is not None:
+        lines.append(f"   Position size: {pos:.0f}% of mandate")
+    exp_ret = action.get("expected_return_5d_pct")
+    exp_dd = action.get("expected_drawdown_5d_pct")
+    if exp_ret is not None or exp_dd is not None:
+        ret_txt = f"{exp_ret:+.1f}%" if exp_ret is not None else "n/a"
+        dd_txt = f"{exp_dd:.1f}%" if exp_dd is not None else "n/a"
+        lines.append(f"   5D outlook: return {ret_txt} · drawdown risk {dd_txt}")
+    return lines
 
 
 def _digest_eod_as_of_date(results: list[dict[str, Any]]) -> str | None:
@@ -1774,7 +1793,18 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     nf = audit.get("next_day_score")
 
     lines_out: list[str] = []
-    lines_out.append(f"{symbol} ({exchange}) — {_sell_signal_plain_english(str(sell_signal))}")
+    try:
+        from action_engine import derive_full_action, digest_headline_text
+
+        action = derive_full_action(audit)
+        audit["full_action"] = action
+        lines_out.append(f"{symbol} ({exchange}) — {digest_headline_text(audit, action)}")
+        rec_lines = _action_recommendation_digest_lines(audit)
+        if len(rec_lines) > 1:
+            lines_out.extend(rec_lines[1:])
+    except ImportError:
+        sell_signal = audit.get("sell_signal", "unknown")
+        lines_out.append(f"{symbol} ({exchange}) — {_sell_signal_plain_english(str(sell_signal))}")
     risk_net = _safe_float(audit.get("sell_signal_risk_score"))
     if str(sell_signal).lower() == "hold" and not math.isnan(risk_net) and risk_net < 4.0:
         nw_gate = 65.0
@@ -2561,20 +2591,16 @@ def _attach_prior_action_signals(
 
 
 def _refresh_symbol_scoring_outputs(audit: dict[str, Any]) -> None:
-    if isinstance(audit.get("factor_scores"), dict):
-        rollups = audit.get("_sector_rotation_rollups")
-        sector_rollups = rollups if isinstance(rollups, list) else None
-        _populate_factor_scores(audit, sector_rollups=sector_rollups)
     try:
         from market_regime import apply_regime_to_audit
 
         apply_regime_to_audit(audit)
-        if isinstance(audit.get("factor_scores"), dict):
-            from market_regime import score_market_regime_context
-
-            audit["factor_scores"]["market_regime"] = score_market_regime_context(audit)
     except ImportError:
         pass
+    if isinstance(audit.get("factor_scores"), dict):
+        rollups = audit.get("_sector_rotation_rollups")
+        sector_rollups = rollups if isinstance(rollups, list) else None
+        _populate_factor_scores(audit, sector_rollups=sector_rollups)
     try:
         from titan_fusion import apply_fusion_to_audit
 
@@ -3857,24 +3883,25 @@ def build_equity_live_audit(
         "option_chain_unavailable_reason": opt_audit_defaults.get("option_chain_unavailable_reason"),
         "option_chain_not_fno": option_chain_not_fno,
         "option_chain_fetch_attempted": option_chain_fetch_attempted,
-        "institutional_flow": {
-            "available": False,
-            "source": None,
-            "note": (
-                "FII/DII (and true delivery 'absorption') are not in Breeze daily cash bars. "
-                "Wire NSE/BSE institutional + delivery feeds by symbol/date to populate this object. "
-                "Next implementation step when you pick a source: add columns or a small table "
-                "(e.g. fii_net_crs, dii_net_crs, as_of), ingest in a script, and in build_equity_live_audit "
-                "set institutional_flow['available'] = True and fold that into a separate score block "
-                "so it is never confused with VPR (volume_participation_ratio)."
-            ),
-        },
     }
+    macro_ctx = getattr(_THREAD_LOCAL, "sector_macro_context", None)
+    if isinstance(macro_ctx, dict) and isinstance(macro_ctx.get("institutional"), dict):
+        audit["market_institutional_flow"] = dict(macro_ctx["institutional"])
+    try:
+        from institutional_flow import enrich_audit_institutional_data
+
+        enrich_audit_institutional_data(
+            audit,
+            cfg,
+            inst,
+            as_of_date=str(audit.get("ohlc_bar_as_of_date") or "").strip() or None,
+        )
+    except ImportError:
+        audit["institutional_flow"] = {"available": False, "source": None}
     fundamental = _assess_fundamental_strength(cfg, inst)
     audit["fundamental_status"] = fundamental.get("status", "unavailable")
     audit["fundamental_score"] = fundamental.get("score")
     audit["fundamental_reasons"] = fundamental.get("reasons", [])
-    macro_ctx = getattr(_THREAD_LOCAL, "sector_macro_context", None)
     if isinstance(macro_ctx, dict):
         from breadth_engine import apply_macro_context_to_audit
 
@@ -4093,15 +4120,13 @@ def run_sector_live(
         instruments = instruments[: max(0, int(max_symbols))]
 
     try:
-        from breadth_engine import compute_market_breadth, prefetch_breadth_panel, stamp_macro_context
+        from breadth_engine import BREADTH_PANEL_MAX_SYMBOLS, compute_market_breadth, prefetch_breadth_panel, stamp_macro_context
 
-        panel_max_raw = os.environ.get("TITAN_BREADTH_PANEL_MAX_SYMBOLS", "").strip()
-        panel_max = int(panel_max_raw) if panel_max_raw else None
         breadth_panel = prefetch_breadth_panel(
             cfg,
             breeze,
             instruments,
-            max_symbols=panel_max,
+            max_symbols=BREADTH_PANEL_MAX_SYMBOLS,
         )
         breadth_metrics = compute_market_breadth(breadth_panel) if breadth_panel else {}
         macro_ctx = stamp_macro_context(

@@ -22,6 +22,10 @@ import math
 import os
 from typing import Any
 
+# Blend fused titan_score into Layer D modifiers and risk_net (always on when valid).
+FUSION_SIGNAL_BLEND = 0.10
+FUSION_SIGV2_BLEND = FUSION_SIGNAL_BLEND  # alias for tests and legacy references
+
 # ---------------------------------------------------------------------------
 # config helpers (mirror analysis_store._env_truthy semantics)
 # ---------------------------------------------------------------------------
@@ -1068,18 +1072,16 @@ def layer_d(audit: dict[str, Any], c: dict[str, Any]) -> dict[str, Any]:
             f"prior-session corroborator: constructive={cs}/5 fail={fs}/5 -> ceiling {prior_ceil}"
         )
 
-    fusion_blend = _env_float("TITAN_FUSION_SIGNAL_BLEND", 0.0)
-    fusion_blend = max(0.0, min(1.0, fusion_blend))
-    if fusion_blend > 0.0:
-        titan = _sf(audit.get("titan_score"))
-        if not math.isnan(titan):
-            delta = ((titan - 50.0) / 50.0) * 0.15 * fusion_blend
-            out["mult_momentum"] *= 1.0 + delta
-            if titan >= 70.0:
-                out["pullback_bull_bump"] = max(float(out["pullback_bull_bump"]), 0.25 * fusion_blend)
-            elif titan <= 35.0:
-                out["mult_risk"] *= 1.0 + 0.1 * fusion_blend
-            reasons.append(f"titan_fusion signal blend {fusion_blend:.2f} (score {titan:.0f})")
+    fusion_blend = FUSION_SIGNAL_BLEND
+    titan = _sf(audit.get("titan_score"))
+    if not math.isnan(titan):
+        delta = ((titan - 50.0) / 50.0) * 0.15 * fusion_blend
+        out["mult_momentum"] *= 1.0 + delta
+        if titan >= 70.0:
+            out["pullback_bull_bump"] = max(float(out["pullback_bull_bump"]), 0.25 * fusion_blend)
+        elif titan <= 35.0:
+            out["mult_risk"] *= 1.0 + 0.1 * fusion_blend
+        reasons.append(f"titan_fusion signal blend {fusion_blend:.2f} (score {titan:.0f})")
 
     out["reasons"] = reasons
     return out
@@ -2106,13 +2108,9 @@ def _derive_next_open_gap_pct(audit: dict[str, Any]) -> tuple[float, str]:
     return float("nan"), "none"
 
 
-def _titan_fusion_sigv2_blend() -> float:
-    return _env_float("TITAN_FUSION_SIGV2_BLEND", 0.0)
-
-
 def _apply_titan_fusion_context(audit: dict[str, Any], risk_net: float) -> tuple[float, dict[str, Any]]:
-    """Minimal titan_score context modifier on risk_net (blend env-gated)."""
-    blend = _titan_fusion_sigv2_blend()
+    """Minimal titan_score context modifier on risk_net."""
+    blend = FUSION_SIGNAL_BLEND
     ts = _sf(audit.get("titan_score"))
     ctx: dict[str, Any] = {
         "blend": blend,

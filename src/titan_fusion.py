@@ -92,6 +92,12 @@ def _clamp(x: float, lo: float, hi: float) -> float:
 
 _DEFAULT_CALIBRATED_WEIGHTS_PATH = "data/calibration/recommended_weights.json"
 
+_RECOMMENDED_WEIGHTS_SEARCH_PATHS: tuple[str, ...] = (
+    "data/recommended_weights.json",
+    "config/recommended_weights.json",
+    "data/calibration/recommended_weights.json",
+)
+
 
 def _pillar_env_key(pillar: str) -> str:
     return f"TITAN_FUSION_WEIGHT_{pillar.upper()}"
@@ -118,6 +124,17 @@ def _load_calibrated_weights_json(path: str) -> dict[str, float] | None:
         return None
 
 
+def _resolve_recommended_weights_path() -> str | None:
+    env_path = os.environ.get("TITAN_FUSION_CALIBRATED_WEIGHTS_PATH", "").strip()
+    if env_path:
+        return env_path
+    for rel in _RECOMMENDED_WEIGHTS_SEARCH_PATHS:
+        candidate = Path(rel)
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
 def load_fusion_weights(
     *,
     sector_key: str | None = None,
@@ -131,15 +148,18 @@ def load_fusion_weights(
     warning: str | None = None
 
     if _env_flag("TITAN_FUSION_USE_CALIBRATED_WEIGHTS", default=False):
-        cal_path = os.environ.get(
-            "TITAN_FUSION_CALIBRATED_WEIGHTS_PATH",
-            _DEFAULT_CALIBRATED_WEIGHTS_PATH,
-        ).strip()
+        cal_path = _resolve_recommended_weights_path() or _DEFAULT_CALIBRATED_WEIGHTS_PATH
         calibrated = _load_calibrated_weights_json(cal_path)
         if calibrated:
             weights.update(calibrated)
         else:
             warning = f"calibrated weights unavailable at {cal_path}"
+    elif _resolve_recommended_weights_path():
+        cal_path = _resolve_recommended_weights_path()
+        if cal_path:
+            calibrated = _load_calibrated_weights_json(cal_path)
+            if calibrated:
+                weights.update(calibrated)
 
     raw_json = os.environ.get("TITAN_FUSION_WEIGHTS_JSON", "").strip()
     if raw_json:
@@ -663,7 +683,7 @@ def fuse_batch(
     *,
     weights: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
-    """Vectorized backtest path — fuse each row of pillar components."""
+    """Vectorized backtest path — fuse each row of pillar components in batch."""
     resolved = _clean_weights(weights)
     return [fuse_titan_score(row, weights=resolved) for row in rows]
 
