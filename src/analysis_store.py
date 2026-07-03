@@ -386,6 +386,7 @@ _SYMBOL_FEATURE_OPTIONAL_COLUMNS = frozenset(
     }
 )
 _SECTOR_ROLLUP_OPTIONAL_COLUMNS = frozenset({"pct_volume_participation_gt_1"})
+_TRANSITION_ANALYTICS_OPTIONAL_COLUMNS = frozenset({"accumulate_signal_consistency_ratio"})
 _TAPE_EXTRAS_SCORE_KEYS = (
     "next_day_score",
     "next_week_score",
@@ -545,6 +546,7 @@ def build_stock_signal_transition_analytics_row(
                 "hold_signal_consistency_ratio": 0.0,
                 "trim_signal_consistency_ratio": 0.0,
                 "exit_risk_signal_consistency_ratio": 0.0,
+                "accumulate_signal_consistency_ratio": 0.0,
                 "transition_stability_score": 0.0,
                 "is_whipsaw_transition": False,
                 "whipsaw_transition_count": 0,
@@ -746,10 +748,13 @@ def persist_stock_signal_transition_analytics(
             )
         )
 
-    client.table("stock_signal_transition_analytics").upsert(
+    _upsert_rows_with_optional_columns(
+        client,
+        "stock_signal_transition_analytics",
         transition_rows,
         on_conflict="trade_date,sector,symbol,exchange,trailing_window_days",
-    ).execute()
+        optional_columns=_TRANSITION_ANALYTICS_OPTIONAL_COLUMNS,
+    )
     return {"persisted": True, "rows": len(transition_rows)}
 
 

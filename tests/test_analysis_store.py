@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 from analysis_store import (
     _evaluate_transition_horizon_outcome,
     _forward_outcomes_need_update,
+    _signal_consistency_ratios_from_sequence,
     _safe_tape_extras,
     build_reconcile_digest_lines,
     build_comparison_payload,
@@ -222,6 +223,15 @@ def test_build_stock_reconcile_snapshot_uses_top_level_prediction_columns():
     assert snap["per_symbol"]["HAL"]["hit_next_day"] is True
 
 
+def test_signal_consistency_ratios_from_sequence_includes_accumulate():
+    ratios = _signal_consistency_ratios_from_sequence(
+        ["hold", "accumulate", "accumulate", "buy"]
+    )
+    assert ratios["accumulate_signal_consistency_ratio"] == 0.5
+    assert ratios["hold_signal_consistency_ratio"] == 0.25
+    assert ratios["buy_signal_consistency_ratio"] == 0.25
+
+
 def test_build_stock_signal_transition_analytics_row_computes_transition_and_ratios():
     history_rows = [
         {"trade_date": "2026-04-01", "action_signal": "hold", "return_1d_pct": 0.2},
@@ -247,6 +257,7 @@ def test_build_stock_signal_transition_analytics_row_computes_transition_and_rat
     assert row["transition_date"] == "2026-04-06"
     assert row["days_in_previous_signal"] == 1
     assert row["buy_signal_consistency_ratio"] > row["trim_signal_consistency_ratio"]
+    assert row["accumulate_signal_consistency_ratio"] == 0.0
     assert row["whipsaw_transition_count"] >= 1
     assert 0.0 <= row["transition_stability_score"] <= 100.0
 
