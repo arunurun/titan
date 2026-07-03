@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import sys
 import threading
 import time
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -18,6 +19,7 @@ from postgrest.exceptions import APIError
 from supabase import create_client
 
 from config_loader import TitanConfig, load_config
+from json_util import ensure_utf8_stdio
 from sector_registry import SectorInstrument, load_sector_instruments
 from market_calendar import is_cash_market_session_open_ist
 from tape_metrics import (
@@ -42,6 +44,18 @@ _PARTICIPATION_CALIBRATION_LOCK = threading.Lock()
 _PARTICIPATION_CALIBRATION_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 _THREAD_LOCAL = threading.local()
 IST = ZoneInfo("Asia/Kolkata")
+
+
+def _safe_print(text: str, **kwargs: Any) -> None:
+    """Print digest text without crashing on Windows cp1252 consoles."""
+    try:
+        print(text, **kwargs)
+    except UnicodeEncodeError:
+        data = (text if text.endswith("\n") else text + "\n").encode("utf-8", errors="replace")
+        sys.stdout.buffer.write(data)
+        if kwargs.get("flush"):
+            sys.stdout.flush()
+
 # Volume participation ratio caps (historical column in DB may still be named absorption_ratio).
 PARTICIPATION_CAP_DEFAULT = 2.5
 PARTICIPATION_CAP_MIN_HISTORY = 8
@@ -4066,6 +4080,7 @@ def run_sector_live(
     priority_only: bool = False,
     priority_top_n: int | None = None,
 ) -> str:
+    ensure_utf8_stdio()
     from email_notify import send_success_post_email
     from breeze_client import create_breeze_session
     from sector_registry import resolve_sector_key
@@ -4620,7 +4635,7 @@ def run_sector_live(
                 subject_prefix=f"Titan V12.0 sector {sector_id}",
                 eod_as_of_date=_digest_eod_as_of_date(results),
             )
-        print(digest_text)
+        _safe_print(digest_text)
         return digest_text
 
     lines = [f"Titan sector run: {sector_id!r} — {ok_count}/{len(results)} succeeded\n"]
@@ -4655,5 +4670,5 @@ def run_sector_live(
         update_sector_period_rollups(cfg, sector=sector_id)
     except Exception:
         logger.exception("Analysis store persist hook failed")
-    print(digest_out)
+    _safe_print(digest_out)
     return digest_out

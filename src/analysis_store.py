@@ -382,6 +382,7 @@ _SYMBOL_FEATURE_OPTIONAL_COLUMNS = frozenset(
         "position_score",
         "signal_reason_trace",
         "signal_engine_version",
+        "fundamental_score",
     }
 )
 _SECTOR_ROLLUP_OPTIONAL_COLUMNS = frozenset({"pct_volume_participation_gt_1"})
@@ -2656,3 +2657,6 @@ def persist_llm_digest_memory(
         msg = payload.get("message", str(e)) if isinstance(payload, dict) else str(e)
         logger.warning("LLM digest memory persist failed: %s", msg)
         return {"enabled": True, "persisted": False, "reason": "api_error", "message": msg}
+    except (TypeError, ValueError) as e:
+        logger.warning("LLM digest memory persist failed (serialization): %s", e)
+        return {"enabled": True, "persisted": False, "reason": "serialization_error", "message": str(e)}
