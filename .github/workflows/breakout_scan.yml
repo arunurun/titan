@@ -1,5 +1,8 @@
 name: Breakout scan
 
+# Run ingest_breakout_ohlcv workflow (or scripts/ingest_breakout_ohlcv.py) before scan
+# so equity_ohlcv_daily is warm; scanner falls back to Yahoo on cache miss.
+
 on:
   workflow_dispatch:
 

@@ -272,9 +272,31 @@ def _yahoo_http_error_msg(e):
     return f"{base} ({snippet})" if snippet else base
 
 
-def fetch_yahoo_data(ticker):
-    """Fetches ~1 year of daily historical stock data from Yahoo Finance API."""
+def fetch_yahoo_data(ticker, *, skip_supabase: bool = False):
+    """Fetches ~1 year of daily historical stock data (Supabase cache, then Yahoo)."""
     ticker = _resolve_yahoo_ticker(ticker)
+    if not skip_supabase:
+        try:
+            try:
+                from .breakout_ohlcv_store import load_ohlcv_from_supabase, record_yahoo_fetch
+            except ImportError:
+                from breakout_ohlcv_store import load_ohlcv_from_supabase, record_yahoo_fetch
+            sym = ticker.replace(".NS", "").strip().upper()
+            cached, cache_err = load_ohlcv_from_supabase(sym, min_bars=50, max_stale_trading_days=3)
+            if cached and not cache_err:
+                return cached, None
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Supabase OHLCV miss %s: %s", ticker, exc)
+
+    try:
+        try:
+            from .breakout_ohlcv_store import record_yahoo_fetch
+        except ImportError:
+            from breakout_ohlcv_store import record_yahoo_fetch
+        record_yahoo_fetch()
+    except Exception:  # noqa: BLE001
+        pass
+
     cache_path = _yahoo_cache_path(ticker)
     if os.path.isfile(cache_path):
         try:
@@ -2236,6 +2258,17 @@ def run_breakout_scan(
                 log_file.flush()
 
             emit_and_log(f"=== Breakout scanner run {started_at.isoformat()} run_id={run_id} ===")
+            try:
+                try:
+                    from .breakout_ohlcv_store import clear_bulk_cache, get_ohlcv_stats, reset_ohlcv_stats
+                except ImportError:
+                    from breakout_ohlcv_store import clear_bulk_cache, get_ohlcv_stats, reset_ohlcv_stats
+                reset_ohlcv_stats()
+                clear_bulk_cache()
+            except Exception:  # noqa: BLE001
+                def get_ohlcv_stats() -> dict[str, int]:  # type: ignore[misc]
+                    return {"supabase_hits": 0, "yahoo_fetches": 0}
+
             warm_yahoo_session()
             emit_and_log("Yahoo session warm-up complete.")
 
@@ -2247,6 +2280,17 @@ def run_breakout_scan(
                 all_tickers.extend(tickers)
 
             all_syms = sorted({t.replace(".NS", "").upper() for t in all_tickers})
+            try:
+                try:
+                    from .breakout_ohlcv_store import load_ohlcv_bulk_from_supabase
+                except ImportError:
+                    from breakout_ohlcv_store import load_ohlcv_bulk_from_supabase
+                bulk = load_ohlcv_bulk_from_supabase(all_syms, min_bars=50, max_stale_trading_days=3)
+                if bulk:
+                    emit_and_log(f"Supabase OHLCV bulk cache: {len(bulk)}/{len(all_syms)} symbols.")
+            except Exception as exc:  # noqa: BLE001
+                emit_and_log(f"Supabase OHLCV bulk load skipped: {exc}")
+
             delivery_by_sym: dict[str, float | None] = {}
             sector_lead_by_sym: dict[str, float] = {}
             free_float_by_sym: dict[str, float | None] = {}
@@ -2339,6 +2383,11 @@ def run_breakout_scan(
                     print("\n Scan & Audit complete for this tier.\n")
 
             all_results = _cap_setup_candidates_per_tier(all_results)
+            ohlcv_stats = get_ohlcv_stats()
+            emit_and_log(
+                f"OHLCV sources: supabase_hits={ohlcv_stats.get('supabase_hits', 0)} "
+                f"yahoo_fetches={ohlcv_stats.get('yahoo_fetches', 0)}"
+            )
 
         persist_meta: dict[str, Any] = {"configured": False, "persisted": False, "rows": 0}
         try:
