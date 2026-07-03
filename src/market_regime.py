@@ -15,7 +15,19 @@ import math
 import os
 from typing import Any
 
+from score_types import FactorResult
+
 REGIMES: tuple[str, ...] = ("STRONG_BULL", "BULL", "NEUTRAL", "DEFENSIVE", "BEAR")
+
+REGIME_SCORE_MAP: dict[str, float] = {
+    "STRONG_BULL": 90.0,
+    "BULL": 75.0,
+    "NEUTRAL": 50.0,
+    "DEFENSIVE": 40.0,
+    "BEAR": 25.0,
+    "CORRECTION": 40.0,
+    "STRONG_BEAR": 15.0,
+}
 
 _BUY_THRESHOLD_DELTA_STRONG_BULL = -5.0
 _BUY_THRESHOLD_DELTA_BEAR = 5.0
@@ -296,3 +308,59 @@ def apply_regime_to_audit(audit: dict[str, Any]) -> dict[str, Any]:
         audit["regime_ignore_mild_overextension"] = False
 
     return payload
+
+
+def _regime_breadth_blend() -> float:
+    return _env_float("TITAN_REGIME_BREADTH_BLEND", 0.30)
+
+
+def score_market_regime_context(
+    audit: dict[str, Any],
+    *,
+    regime_label: str | None = None,
+    breadth_score: float | None = None,
+) -> FactorResult:
+    """
+    Regime factor with discrete label map and optional breadth blend.
+    Breadth is diagnostic input to regime_score — not a fusion pillar weight.
+    """
+    label = str(regime_label or "").strip().upper()
+    if not label:
+        payload = audit.get("market_regime")
+        if isinstance(payload, dict):
+            label = str(payload.get("regime") or payload.get("raw_regime") or "NEUTRAL").upper()
+        else:
+            label = "NEUTRAL"
+
+    rule_score = REGIME_SCORE_MAP.get(label, REGIME_SCORE_MAP["NEUTRAL"])
+    breadth_raw = breadth_score
+    if breadth_raw is None:
+        breadth_raw = _sf(audit.get("market_breadth_pct", audit.get("breadth_above_ema200_pct")))
+        if math.isnan(breadth_raw):
+            bf = audit.get("breadth")
+            if isinstance(bf, dict) and bf.get("score") is not None:
+                breadth_raw = _sf(bf.get("score"))
+
+    blend = _regime_breadth_blend()
+    if breadth_raw is not None and not math.isnan(float(breadth_raw)):
+        b = float(breadth_raw)
+        score = round((1.0 - blend) * rule_score + blend * b, 2)
+        reasons = [f"regime={label}", f"breadth blend {blend:.0%}"]
+        meta = {
+            "regime_label": label,
+            "rule_score": rule_score,
+            "breadth_score": round(b, 2),
+            "breadth_blend": blend,
+        }
+    else:
+        score = round(rule_score, 2)
+        reasons = [f"regime={label}"]
+        meta = {"regime_label": label, "rule_score": rule_score, "breadth_blend": blend}
+
+    return {
+        "score": score,
+        "confidence": 0.8 if label != "NEUTRAL" else 0.65,
+        "reasons": reasons,
+        "metadata": meta,
+        "available": True,
+    }

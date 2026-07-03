@@ -34,6 +34,7 @@ _DEFAULT_BUCKETS: tuple[tuple[float, float, float], ...] = (
 _ISOTONIC_FEATURE_KEYS: tuple[str, ...] = (
     "next_week_score",
     "effective_intent_score",
+    "titan_score",
     "risk_net",
     "sector",
     "market_regime",
@@ -112,6 +113,7 @@ def extract_isotonic_features(audit: dict[str, Any]) -> dict[str, Any]:
     return {
         "next_week_score": _sf(audit.get("next_week_score")),
         "effective_intent_score": _sf(audit.get("effective_intent_score")),
+        "titan_score": _sf(audit.get("titan_score")),
         "risk_net": _sf(risk),
         "sector": str(sector).strip().lower() if sector else "",
         "market_regime": str(regime_val or "").strip().upper(),
@@ -133,6 +135,10 @@ def composite_calibration_input(audit: dict[str, Any]) -> float:
     intent = feats["effective_intent_score"]
     if not math.isnan(intent):
         adj += (intent - 50.0) * 0.15
+
+    titan = feats["titan_score"]
+    if not math.isnan(titan):
+        adj += (titan - 50.0) * 0.12
 
     risk = feats["risk_net"]
     if not math.isnan(risk):

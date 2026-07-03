@@ -1,0 +1,15 @@
+{
+  "weights": {
+    "technical": 0.30,
+    "relative_strength": 0.20,
+    "institutional_flow": 0.15,
+    "fundamentals": 0.15,
+    "market_regime": 0.10,
+    "sector_strength": 0.05,
+    "risk": 0.05
+  },
+  "method": "default",
+  "n_rows": 0,
+  "feature_names": [],
+  "warning": null
+}

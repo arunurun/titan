@@ -382,9 +382,11 @@ _SYMBOL_FEATURE_OPTIONAL_COLUMNS = frozenset(
         "position_score",
         "signal_reason_trace",
         "signal_engine_version",
+        "fundamental_score",
     }
 )
 _SECTOR_ROLLUP_OPTIONAL_COLUMNS = frozenset({"pct_volume_participation_gt_1"})
+_TRANSITION_ANALYTICS_OPTIONAL_COLUMNS = frozenset({"accumulate_signal_consistency_ratio"})
 _TAPE_EXTRAS_SCORE_KEYS = (
     "next_day_score",
     "next_week_score",
@@ -544,6 +546,7 @@ def build_stock_signal_transition_analytics_row(
                 "hold_signal_consistency_ratio": 0.0,
                 "trim_signal_consistency_ratio": 0.0,
                 "exit_risk_signal_consistency_ratio": 0.0,
+                "accumulate_signal_consistency_ratio": 0.0,
                 "transition_stability_score": 0.0,
                 "is_whipsaw_transition": False,
                 "whipsaw_transition_count": 0,
@@ -745,10 +748,13 @@ def persist_stock_signal_transition_analytics(
             )
         )
 
-    client.table("stock_signal_transition_analytics").upsert(
+    _upsert_rows_with_optional_columns(
+        client,
+        "stock_signal_transition_analytics",
         transition_rows,
         on_conflict="trade_date,sector,symbol,exchange,trailing_window_days",
-    ).execute()
+        optional_columns=_TRANSITION_ANALYTICS_OPTIONAL_COLUMNS,
+    )
     return {"persisted": True, "rows": len(transition_rows)}
 
 
@@ -805,6 +811,9 @@ def build_symbol_daily_feature(
         "rel_return_5d_vs_nifty_pct": audit.get("rel_return_5d_vs_nifty_pct"),
         "rel_return_10d_vs_nifty_pct": audit.get("rel_return_10d_vs_nifty_pct"),
         "rel_return_20d_vs_nifty_pct": audit.get("rel_return_20d_vs_nifty_pct"),
+        "fundamental_score": audit.get("fundamental_score"),
+        "fundamental_status": audit.get("fundamental_status"),
+        "sector_relative_strength_pctile": audit.get("sector_relative_strength_pctile"),
         "median_notional_inr_20d": audit.get("median_notional_inr_20d"),
         "liquidity_thin_proxy": audit.get("liquidity_thin_proxy"),
         "extreme_price_move_proxy": audit.get("extreme_price_move_proxy"),
@@ -865,6 +874,9 @@ def build_symbol_daily_feature(
         "market_regime_streak": (audit.get("market_regime") or {}).get("streak")
         if isinstance(audit.get("market_regime"), dict)
         else None,
+        "titan_fusion": audit.get("titan_fusion"),
+        "factor_scores": audit.get("factor_scores"),
+        "breadth": audit.get("breadth"),
     }
 
     vpr = audit.get("volume_participation_ratio", audit.get("absorption_ratio"))
@@ -901,6 +913,7 @@ def build_symbol_daily_feature(
             "news_sentiment_score": audit.get("news_sentiment_score"),
             "news_sentiment_trend": audit.get("news_sentiment_trend"),
             "news_count": audit.get("news_count"),
+            "fundamental_score": audit.get("fundamental_score"),
         }
     )
 
@@ -1105,6 +1118,70 @@ def _rollup_from_daily_rows(
             "updated_at": datetime.now(IST).isoformat(timespec="seconds"),
         }
     )
+
+
+def _rollup_row_from_audits(sector: str, audits: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    eff = [_safe_float(a.get("effective_intent_score", a.get("intent_score"))) for a in audits]
+    eff = [x for x in eff if not math.isnan(x)]
+    intents = [_safe_float(a.get("intent_score")) for a in audits]
+    intents = [x for x in intents if not math.isnan(x)]
+    rel20 = [_safe_float(a.get("rel_return_20d_vs_nifty_pct")) for a in audits]
+    rel20 = [x for x in rel20 if not math.isnan(x)]
+    return sanitize_for_json(
+        {
+            "sector_key": sector,
+            "sector": sector,
+            "avg_effective_intent_score": (round(sum(eff) / len(eff), 2) if eff else None),
+            "avg_intent_score": (round(sum(intents) / len(intents), 2) if intents else None),
+            "avg_rel_return_20d_vs_nifty_pct": (round(sum(rel20) / len(rel20), 4) if rel20 else None),
+            "symbol_count": len(audits),
+        }
+    )
+
+
+def build_rotation_sector_rollups(
+    cfg: TitanConfig,
+    *,
+    current_sector: str,
+    current_audits: Sequence[dict[str, Any]],
+    trade_date: str | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Cross-sector rollup rows for sector_rotation scoring.
+
+    Merges the in-flight sector cohort with persisted ``sector_daily_rollup`` rows
+    for the same trade date (when analysis store is enabled).
+    """
+    sector = str(current_sector or "").strip().lower()
+    as_of_s = trade_date or datetime.now(IST).date().isoformat()
+    rollups: list[dict[str, Any]] = []
+    if current_audits:
+        rollups.append(_rollup_row_from_audits(sector, current_audits))
+
+    if not analysis_store_enabled():
+        return rollups
+
+    client = create_client(cfg.supabase_url, cfg.supabase_key)
+    try:
+        res = (
+            client.table("sector_daily_rollup")
+            .select("*")
+            .eq("trade_date", as_of_s)
+            .execute()
+        )
+        rows = list(getattr(res, "data", None) or [])
+    except APIError as e:
+        logger.warning("Cross-sector rollup fetch failed: %s", e)
+        return rollups
+
+    seen = {sector}
+    for row in rows:
+        sk = str(row.get("sector") or row.get("sector_key") or "").strip().lower()
+        if not sk or sk in seen:
+            continue
+        seen.add(sk)
+        rollups.append({**row, "sector_key": sk})
+    return rollups
 
 
 def update_sector_period_rollups(
@@ -2585,3 +2662,6 @@ def persist_llm_digest_memory(
         msg = payload.get("message", str(e)) if isinstance(payload, dict) else str(e)
         logger.warning("LLM digest memory persist failed: %s", msg)
         return {"enabled": True, "persisted": False, "reason": "api_error", "message": msg}
+    except (TypeError, ValueError) as e:
+        logger.warning("LLM digest memory persist failed (serialization): %s", e)
+        return {"enabled": True, "persisted": False, "reason": "serialization_error", "message": str(e)}

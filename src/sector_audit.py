@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import sys
 import threading
 import time
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -18,6 +19,7 @@ from postgrest.exceptions import APIError
 from supabase import create_client
 
 from config_loader import TitanConfig, load_config
+from json_util import ensure_utf8_stdio
 from sector_registry import SectorInstrument, load_sector_instruments
 from market_calendar import is_cash_market_session_open_ist
 from tape_metrics import (
@@ -42,6 +44,18 @@ _PARTICIPATION_CALIBRATION_LOCK = threading.Lock()
 _PARTICIPATION_CALIBRATION_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 _THREAD_LOCAL = threading.local()
 IST = ZoneInfo("Asia/Kolkata")
+
+
+def _safe_print(text: str, **kwargs: Any) -> None:
+    """Print digest text without crashing on Windows cp1252 consoles."""
+    try:
+        print(text, **kwargs)
+    except UnicodeEncodeError:
+        data = (text if text.endswith("\n") else text + "\n").encode("utf-8", errors="replace")
+        sys.stdout.buffer.write(data)
+        if kwargs.get("flush"):
+            sys.stdout.flush()
+
 # Volume participation ratio caps (historical column in DB may still be named absorption_ratio).
 PARTICIPATION_CAP_DEFAULT = 2.5
 PARTICIPATION_CAP_MIN_HISTORY = 8
@@ -654,10 +668,130 @@ def _digest_reconcile_mode_enabled() -> bool:
     )
 
 
+def _digest_show_factor_scores_enabled() -> bool:
+    """Render titan_fusion pillar breakdown in digest/email per-symbol blocks (always on)."""
+    return True
+
+
+def _digest_investment_report_enabled() -> bool:
+    """Investment report appendix in sector digest (always on)."""
+    return True
+
+
+def _format_fusion_factor_digest_lines(audit: dict[str, Any]) -> list[str]:
+    """Optional fusion pillar section; empty when titan_fusion missing."""
+    fusion = audit.get("titan_fusion")
+    if not isinstance(fusion, dict):
+        return []
+    lines: list[str] = ["▸ Titan fusion"]
+    titan = fusion.get("titan_score")
+    conf = fusion.get("overall_confidence")
+    if titan is not None:
+        conf_txt = f" · conf {_fmt_metric(conf, 3)}" if conf is not None else ""
+        lines.append(f"   Titan score {_fmt_metric(titan, 1)}/100{conf_txt}")
+    contributions = fusion.get("contributions") if isinstance(fusion.get("contributions"), dict) else {}
+    if contributions:
+        try:
+            from titan_fusion import DISPLAY_LABELS, FUSION_PILLARS
+        except ImportError:
+            DISPLAY_LABELS = {}
+            FUSION_PILLARS = tuple(contributions.keys())
+        for pillar in FUSION_PILLARS:
+            row = contributions.get(pillar)
+            if not isinstance(row, dict):
+                continue
+            label = DISPLAY_LABELS.get(pillar, pillar)
+            w_pct = int(round(float(row.get("weight_effective", 0)) * 100))
+            lines.append(
+                f"   {label}: {_fmt_metric(row.get('score'), 0)} × {w_pct}% "
+                f"= {_fmt_metric(row.get('weighted'), 1)}"
+            )
+    else:
+        for key, label in (
+            ("technical_score", "Technical"),
+            ("relative_strength_score", "Relative strength"),
+            ("flow_score", "Flow"),
+            ("fundamental_score", "Fundamentals"),
+            ("regime_score", "Regime"),
+            ("sector_score", "Sector"),
+            ("risk_score", "Risk"),
+        ):
+            val = fusion.get(key)
+            if val is not None:
+                lines.append(f"   {label}: {_fmt_metric(val, 0)}")
+    expl = fusion.get("overall_explanation")
+    if expl and not contributions:
+        compact = " | ".join(str(expl).splitlines())
+        lines.append(f"   {compact}")
+    breadth = fusion.get("breadth_score")
+    if breadth is not None:
+        lines.append(f"   Breadth (diagnostic): {_fmt_metric(breadth, 0)}")
+    return lines
+
+
+def _append_investment_report_digest_lines(
+    lines: list[str],
+    ok_results: list[dict[str, Any]],
+    *,
+    top_n: int = 3,
+) -> None:
+    if not _digest_investment_report_enabled() or not ok_results:
+        return
+    try:
+        from titan_investment_report import generate_investment_report
+    except ImportError:
+        return
+    ranked = sorted(
+        ok_results,
+        key=lambda x: (
+            float("-inf")
+            if math.isnan(_safe_float((x.get("audit") or {}).get("next_week_score", float("nan"))))
+            else _safe_float((x.get("audit") or {}).get("next_week_score", float("nan")))
+        ),
+        reverse=True,
+    )
+    lines.extend(["", "--- Investment reports (top ranked) ---"])
+    for r in ranked[:top_n]:
+        audit = r.get("audit")
+        if not isinstance(audit, dict):
+            continue
+        report = generate_investment_report(audit)
+        lines.append("")
+        lines.append(report.get("markdown") or "")
+
+
 def _sell_signal_plain_english(signal: str) -> str:
     from action_signals import action_signal_plain_english
 
     return action_signal_plain_english(signal)
+
+
+def _action_recommendation_digest_lines(audit: dict[str, Any]) -> list[str]:
+    """Recommendation block: display label, sizing, expected return/drawdown."""
+    try:
+        from action_engine import derive_full_action
+    except ImportError:
+        return []
+    action = derive_full_action(audit)
+    audit["full_action"] = action
+    label = str(action.get("label") or "hold").upper()
+    internal = str(action.get("label_internal") or "hold")
+    lines = [f"▸ Recommendation: {label}"]
+    if label in ("REDUCE", "EXIT"):
+        lines[0] = f"▸ Recommendation: {label} — review exposure"
+    plain = _sell_signal_plain_english(internal)
+    if plain:
+        lines.append(f"   {plain}")
+    pos = action.get("position_size_pct")
+    if pos is not None:
+        lines.append(f"   Position size: {pos:.0f}% of mandate")
+    exp_ret = action.get("expected_return_5d_pct")
+    exp_dd = action.get("expected_drawdown_5d_pct")
+    if exp_ret is not None or exp_dd is not None:
+        ret_txt = f"{exp_ret:+.1f}%" if exp_ret is not None else "n/a"
+        dd_txt = f"{exp_dd:.1f}%" if exp_dd is not None else "n/a"
+        lines.append(f"   5D outlook: return {ret_txt} · drawdown risk {dd_txt}")
+    return lines
 
 
 def _digest_eod_as_of_date(results: list[dict[str, Any]]) -> str | None:
@@ -1673,7 +1807,18 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     nf = audit.get("next_day_score")
 
     lines_out: list[str] = []
-    lines_out.append(f"{symbol} ({exchange}) — {_sell_signal_plain_english(str(sell_signal))}")
+    try:
+        from action_engine import derive_full_action, digest_headline_text
+
+        action = derive_full_action(audit)
+        audit["full_action"] = action
+        lines_out.append(f"{symbol} ({exchange}) — {digest_headline_text(audit, action)}")
+        rec_lines = _action_recommendation_digest_lines(audit)
+        if len(rec_lines) > 1:
+            lines_out.extend(rec_lines[1:])
+    except ImportError:
+        sell_signal = audit.get("sell_signal", "unknown")
+        lines_out.append(f"{symbol} ({exchange}) — {_sell_signal_plain_english(str(sell_signal))}")
     risk_net = _safe_float(audit.get("sell_signal_risk_score"))
     if str(sell_signal).lower() == "hold" and not math.isnan(risk_net) and risk_net < 4.0:
         nw_gate = 65.0
@@ -1895,6 +2040,11 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
     if context_tail:
         lines_out.append("▸ Context")
         lines_out.extend(context_tail)
+
+    if _digest_show_factor_scores_enabled():
+        fusion_lines = _format_fusion_factor_digest_lines(audit)
+        if fusion_lines:
+            lines_out.extend(fusion_lines)
 
     head = lines_out[0]
     tail = ["  " + ln for ln in lines_out[1:]]
@@ -2296,110 +2446,9 @@ def _apply_contemporaneous_dampener(audit: dict[str, Any]) -> None:
 
 
 def _predictive_scores(audit: dict[str, Any]) -> tuple[float, float, dict[str, Any]]:
-    """
-    Heuristic lead scores (0-100).
+    from prediction_engine import predictive_scores
 
-    Uses a **single** cash-market composite (``effective_intent_score`` = z + volume
-    participation via ``calculate_equity_technical_score``) plus **orthogonal**
-    horizon features (1d return, EMA200 distance with history confidence, ATR).
-    Avoids double-counting z/participation alongside that composite.
-    """
-    tech = _safe_float(audit.get("effective_intent_score", audit.get("intent_score")))
-    ret1d = _safe_float(audit.get("return_1d_pct"))
-    ret5d = _safe_float(audit.get("return_5d_pct"))
-    ret10d = _safe_float(audit.get("return_10d_pct"))
-    rel5 = _safe_float(audit.get("rel_return_5d_vs_nifty_pct"))
-    rel20 = _safe_float(audit.get("rel_return_20d_vs_nifty_pct"))
-    ema_dist = _safe_float(audit.get("ema_200_distance_pct"))
-    atr_in = _safe_float(audit.get("atr_penalty_input"))
-    if math.isnan(atr_in):
-        atr_in = _safe_float(audit.get("atr_14_pct"))
-    ema_conf = _ema_history_confidence(audit.get("rows"))
-
-    tech_day = 0.0 if math.isnan(tech) else ((tech - 50.0) * 0.52)
-    tech_week = 0.0 if math.isnan(tech) else ((tech - 50.0) * 0.62)
-    ret1_w = 0.18 if audit.get("extreme_price_move_proxy") else 0.42
-    ret_term = 0.0 if math.isnan(ret1d) else (ret1d * ret1_w)
-    # Fix C: shave the same-day-pop slice of the 1d momentum term (upside only) so a
-    # single big green session cannot inflate the forward-looking scores.
-    _contemp_move, _contemp_frac = _contemporaneous_discount_factor(audit)
-    if _contemp_frac > 0.0 and ret_term > 0.0:
-        ret_term *= (1.0 - _contemp_frac)
-    ret5_term = 0.0 if math.isnan(ret5d) else (ret5d * 0.28)
-    ret10_term = 0.0 if math.isnan(ret10d) else (ret10d * 0.15)
-    rel5_term = 0.0 if math.isnan(rel5) else (rel5 * 0.2)
-    rel20_term = 0.0 if math.isnan(rel20) else (rel20 * 0.11)
-    ema_base = 0.0 if math.isnan(ema_dist) else (ema_dist * 0.26 * ema_conf)
-    ema_day = ema_base * 0.85
-    ema_week = ema_base * 1.0
-    atr_penalty = 0.0 if math.isnan(atr_in) else (atr_in * 0.45)
-
-    day_score = (
-        50.0
-        + tech_day
-        + ret_term
-        + ret5_term
-        + 0.55 * ret10_term
-        + rel5_term
-        + 0.55 * rel20_term
-        + ema_day
-        - atr_penalty
-    )
-    week_score = (
-        50.0
-        + tech_week
-        + (ret_term * 0.78)
-        + 0.82 * ret5_term
-        + 0.48 * ret10_term
-        + 0.72 * rel5_term
-        + 0.5 * rel20_term
-        + ema_week
-        - (atr_penalty * 0.35)
-    )
-
-    penalties: list[str] = []
-    if audit.get("trap_exit_proxy"):
-        day_score -= 8.0
-        week_score -= 5.0
-        penalties.append("trap_exit_proxy")
-    if _high_volume_down_day_stress(audit):
-        day_score -= 6.0
-        week_score -= 4.0
-        penalties.append("high_volume_down_day_stress")
-    if audit.get("event_risk_soon"):
-        day_score -= 4.0
-        week_score -= 6.0
-        penalties.append("event_risk_soon")
-
-    breakdown = {
-        "baseline": 50.0,
-        "day": {
-            "tech_composite_term": round(tech_day, 2),
-            "ret1d_term": round(ret_term, 2),
-            "ret5d_term": round(ret5_term, 2),
-            "ret10d_term": round(0.55 * ret10_term, 2),
-            "rel5_term": round(rel5_term, 2),
-            "rel20_term": round(0.55 * rel20_term, 2),
-            "ema_term": round(ema_day, 2),
-            "ema_history_confidence": round(ema_conf, 2),
-            "atr_penalty": round(atr_penalty, 2),
-        },
-        "week": {
-            "tech_composite_term": round(tech_week, 2),
-            "ret1d_term": round(ret_term * 0.78, 2),
-            "ret5d_term": round(0.82 * ret5_term, 2),
-            "ret10d_term": round(0.48 * ret10_term, 2),
-            "rel5_term": round(0.72 * rel5_term, 2),
-            "rel20_term": round(0.5 * rel20_term, 2),
-            "ema_term": round(ema_week, 2),
-            "ema_history_confidence": round(ema_conf, 2),
-            "atr_penalty": round(atr_penalty * 0.35, 2),
-        },
-        "penalties": penalties,
-        "contemporaneous_discount_fraction": round(_contemp_frac, 4),
-        "contemporaneous_move_pct": (None if math.isnan(_contemp_move) else round(_contemp_move, 4)),
-    }
-    return _clamp_score(day_score), _clamp_score(week_score), breakdown
+    return predictive_scores(audit)
 
 
 def _bucket_name(audit: dict[str, Any]) -> str:
@@ -2562,6 +2611,16 @@ def _refresh_symbol_scoring_outputs(audit: dict[str, Any]) -> None:
         apply_regime_to_audit(audit)
     except ImportError:
         pass
+    if isinstance(audit.get("factor_scores"), dict):
+        rollups = audit.get("_sector_rotation_rollups")
+        sector_rollups = rollups if isinstance(rollups, list) else None
+        _populate_factor_scores(audit, sector_rollups=sector_rollups)
+    try:
+        from titan_fusion import apply_fusion_to_audit
+
+        apply_fusion_to_audit(audit)
+    except ImportError:
+        pass
     _apply_contemporaneous_dampener(audit)  # Fix C: de-bias same-day pop before scoring
     next_day_score, next_week_score, prediction_breakdown = _predictive_scores(audit)
     audit["next_day_score"] = next_day_score
@@ -2662,101 +2721,9 @@ def _first_float_field(row: dict[str, Any], keys: tuple[str, ...]) -> float:
 
 
 def _assess_fundamental_strength(cfg: TitanConfig, inst: SectorInstrument) -> dict[str, Any]:
-    cache_key = (inst.symbol, inst.exchange)
-    with _FUNDAMENTAL_CACHE_LOCK:
-        cached = _FUNDAMENTAL_CACHE.get(cache_key)
-    if cached is not None:
-        return dict(cached)
+    from fundamental_engine import assess_fundamental_strength
 
-    client = create_client(cfg.supabase_url, cfg.supabase_key)
-    try:
-        res = (
-            client.table("market_instruments")
-            .select("*")
-            .eq("symbol", inst.symbol)
-            .eq("exchange", inst.exchange)
-            .limit(1)
-            .execute()
-        )
-    except Exception:
-        out = {"status": "unavailable", "score": None, "reasons": ["fundamental lookup unavailable"]}
-        with _FUNDAMENTAL_CACHE_LOCK:
-            _FUNDAMENTAL_CACHE[cache_key] = dict(out)
-        return out
-
-    rows = list(getattr(res, "data", None) or [])
-    if not rows or not isinstance(rows[0], dict):
-        out = {"status": "unavailable", "score": None, "reasons": ["fundamental row missing"]}
-        with _FUNDAMENTAL_CACHE_LOCK:
-            _FUNDAMENTAL_CACHE[cache_key] = dict(out)
-        return out
-
-    row = rows[0]
-    roe = _first_float_field(row, ("roe", "roe_pct", "return_on_equity", "return_on_equity_pct"))
-    roce = _first_float_field(row, ("roce", "roce_pct", "return_on_capital", "return_on_capital_employed"))
-    de = _first_float_field(row, ("debt_to_equity", "de_ratio", "debt_equity"))
-    margin = _first_float_field(row, ("net_profit_margin", "npm", "operating_margin", "opm"))
-    score = 50.0
-    reasons: list[str] = []
-    used = 0
-
-    if not math.isnan(roe):
-        used += 1
-        if roe >= 15.0:
-            score += 12.0
-            reasons.append(f"ROE strong {_fmt_metric(roe)}")
-        elif roe >= 10.0:
-            score += 6.0
-            reasons.append(f"ROE acceptable {_fmt_metric(roe)}")
-        elif roe < 5.0:
-            score -= 8.0
-            reasons.append(f"ROE weak {_fmt_metric(roe)}")
-    if not math.isnan(roce):
-        used += 1
-        if roce >= 15.0:
-            score += 10.0
-            reasons.append(f"ROCE strong {_fmt_metric(roce)}")
-        elif roce >= 10.0:
-            score += 5.0
-            reasons.append(f"ROCE acceptable {_fmt_metric(roce)}")
-        elif roce < 6.0:
-            score -= 6.0
-            reasons.append(f"ROCE weak {_fmt_metric(roce)}")
-    if not math.isnan(de):
-        used += 1
-        if de <= 0.5:
-            score += 8.0
-            reasons.append(f"debt/equity low {_fmt_metric(de)}")
-        elif de <= 1.0:
-            score += 4.0
-            reasons.append(f"debt/equity moderate {_fmt_metric(de)}")
-        elif de > 2.0:
-            score -= 8.0
-            reasons.append(f"debt/equity high {_fmt_metric(de)}")
-    if not math.isnan(margin):
-        used += 1
-        if margin >= 12.0:
-            score += 6.0
-            reasons.append(f"margin strong {_fmt_metric(margin)}")
-        elif margin < 3.0:
-            score -= 4.0
-            reasons.append(f"margin thin {_fmt_metric(margin)}")
-
-    if used == 0:
-        out = {"status": "unavailable", "score": None, "reasons": ["fundamental fields unavailable"]}
-    else:
-        s = _clamp_score(score)
-        if s >= 65.0:
-            st = "strong"
-        elif s <= 40.0:
-            st = "weak"
-        else:
-            st = "balanced"
-        out = {"status": st, "score": s, "reasons": reasons[:3]}
-
-    with _FUNDAMENTAL_CACHE_LOCK:
-        _FUNDAMENTAL_CACHE[cache_key] = dict(out)
-    return out
+    return assess_fundamental_strength(cfg, inst)
 
 
 def _hypothesis_support_tag(audit: dict[str, Any]) -> str:
@@ -3208,6 +3175,34 @@ def _liquidity_floor_inr() -> float:
         return 1_200_000.0
 
 
+def _apply_sector_rotation_scores(
+    cfg: TitanConfig,
+    sector_id: str,
+    ok_results: list[dict[str, Any]],
+) -> list[dict[str, Any]] | None:
+    """Stamp cross-sector rollups for sector_rotation when available."""
+    audits = [r["audit"] for r in ok_results if isinstance(r.get("audit"), dict)]
+    if not audits:
+        return None
+    try:
+        from analysis_store import build_rotation_sector_rollups
+
+        rollups = build_rotation_sector_rollups(
+            cfg,
+            current_sector=sector_id,
+            current_audits=audits,
+        )
+    except ImportError:
+        return None
+    if len(rollups) < 2:
+        return rollups
+    for r in ok_results:
+        audit = r.get("audit")
+        if isinstance(audit, dict):
+            audit["_sector_rotation_rollups"] = rollups
+    return rollups
+
+
 def _apply_sector_cross_section(
     ok_results: list[dict[str, Any]], *, score_percentiles: bool = True
 ) -> None:
@@ -3378,6 +3373,162 @@ def _blend_equity_z_score(close_series: Any) -> tuple[float, float, float | None
     z_slow = calculate_z_score(s, window=max(2, slow_win))
     z = round(0.55 * z_fast + 0.45 * z_slow, 4)
     return z, z_fast, z_slow, f"0.55*{win_fast}d+0.45*{slow_win}d"
+
+
+def _score_risk_factor(audit: dict[str, Any]) -> dict[str, Any]:
+    """Defensive risk proxies — does not use post-signal risk_net."""
+    score = 100.0
+    penalties = 0
+    reasons: list[str] = []
+    if audit.get("trap_exit_proxy"):
+        score -= 25.0
+        penalties += 1
+        reasons.append("trap_exit_proxy")
+    if audit.get("high_volume_down_day_proxy"):
+        score -= 15.0
+        penalties += 1
+        reasons.append("high_volume_down_day_proxy")
+    if audit.get("event_risk_soon"):
+        score -= 10.0
+        penalties += 1
+        reasons.append("event_risk_soon")
+    atr = _safe_float(audit.get("atr_14_pct"))
+    med_atr = _safe_float(audit.get("sector_median_atr_14_pct"))
+    if not math.isnan(atr) and not math.isnan(med_atr) and med_atr > 0 and atr > med_atr * 1.5:
+        score -= 10.0
+        penalties += 1
+        reasons.append("elevated_atr_vs_sector")
+    if audit.get("history_lt_200_sessions"):
+        score -= 10.0
+        penalties += 1
+        reasons.append("history_lt_200_sessions")
+    if audit.get("liquidity_thin_proxy"):
+        score -= 15.0
+        penalties += 1
+        reasons.append("liquidity_thin_proxy")
+    score = max(0.0, min(100.0, score))
+    confidence = max(0.3, 1.0 - 0.1 * penalties)
+    return {
+        "score": round(score, 2),
+        "confidence": round(confidence, 3),
+        "reasons": reasons if reasons else ["clean risk profile"],
+        "metadata": {"penalties_applied": penalties},
+        "available": True,
+    }
+
+
+def _sector_strength_factor(
+    audit: dict[str, Any],
+    *,
+    sector_rollups: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    rollups = sector_rollups
+    if rollups is None:
+        raw = audit.get("_sector_rotation_rollups")
+        if isinstance(raw, list):
+            rollups = raw
+    sector_key = str(audit.get("sector") or audit.get("sector_key") or "").strip().lower()
+    if rollups and sector_key:
+        try:
+            from sector_rotation import score_sector_rotation
+
+            rotation = score_sector_rotation(rollups, sector_key)
+            if rotation.get("available"):
+                audit["sector_rotation"] = rotation
+                return rotation
+        except ImportError:
+            pass
+
+    pctile = _safe_float(audit.get("sector_relative_strength_pctile"))
+    if math.isnan(pctile):
+        return {
+            "score": None,
+            "confidence": 0.0,
+            "reasons": ["sector_relative_strength_pctile missing"],
+            "metadata": {},
+            "available": False,
+        }
+    return {
+        "score": round(max(0.0, min(100.0, pctile)), 2),
+        "confidence": 0.75,
+        "reasons": ["sector_relative_strength_pctile"],
+        "metadata": {},
+        "available": True,
+    }
+
+
+def _populate_factor_scores(
+    audit: dict[str, Any],
+    *,
+    fundamental: dict[str, Any] | None = None,
+    sector_rollups: list[dict[str, Any]] | None = None,
+) -> None:
+    """Populate audit factor_scores for titan_fusion (lazy imports avoid circular deps)."""
+    from institutional_flow import score_institutional_flow
+    from market_regime import score_market_regime_context
+    from relative_strength import score_relative_strength_from_audit
+
+    tech = _safe_float(audit.get("effective_intent_score", audit.get("intent_score")))
+    technical: dict[str, Any]
+    if math.isnan(tech):
+        technical = {
+            "score": None,
+            "confidence": 0.0,
+            "reasons": ["technical score missing"],
+            "metadata": {},
+            "available": False,
+        }
+    else:
+        technical = {
+            "score": round(max(0.0, min(100.0, tech)), 2),
+            "confidence": 0.85,
+            "reasons": ["effective_intent_score"],
+            "metadata": {"source": "effective_intent_score"},
+            "available": True,
+        }
+
+    flow = score_institutional_flow(audit)
+    audit["institutional_flow"] = {
+        "available": flow.get("available", False),
+        "score": flow.get("score"),
+        "confidence": flow.get("confidence"),
+        "reasons": flow.get("reasons"),
+        "source": "cmf_obv_audit",
+        "factor": flow,
+    }
+
+    fund_factor = None
+    if isinstance(fundamental, dict) and isinstance(fundamental.get("factor"), dict):
+        fund_factor = fundamental["factor"]
+    elif audit.get("fundamental_score") is not None or (fundamental and fundamental.get("score") is not None):
+        score_val = fundamental.get("score") if fundamental else audit.get("fundamental_score")
+        fund_factor = {
+            "score": float(score_val) if score_val is not None else None,
+            "confidence": 0.7,
+            "reasons": list((fundamental or {}).get("reasons") or audit.get("fundamental_reasons") or []),
+            "metadata": {"status": (fundamental or {}).get("status", audit.get("fundamental_status"))},
+            "available": score_val is not None,
+        }
+    else:
+        fund_factor = {
+            "score": None,
+            "confidence": 0.0,
+            "reasons": ["fundamental_score missing"],
+            "metadata": {},
+            "available": False,
+        }
+
+    sector_strength = _sector_strength_factor(audit, sector_rollups=sector_rollups)
+
+    audit["factor_scores"] = {
+        "technical": technical,
+        "relative_strength": score_relative_strength_from_audit(audit),
+        "institutional_flow": flow,
+        "fundamentals": fund_factor,
+        "market_regime": score_market_regime_context(audit),
+        "sector_strength": sector_strength,
+        "risk": _score_risk_factor(audit),
+    }
 
 
 def build_equity_live_audit(
@@ -3746,23 +3897,30 @@ def build_equity_live_audit(
         "option_chain_unavailable_reason": opt_audit_defaults.get("option_chain_unavailable_reason"),
         "option_chain_not_fno": option_chain_not_fno,
         "option_chain_fetch_attempted": option_chain_fetch_attempted,
-        "institutional_flow": {
-            "available": False,
-            "source": None,
-            "note": (
-                "FII/DII (and true delivery 'absorption') are not in Breeze daily cash bars. "
-                "Wire NSE/BSE institutional + delivery feeds by symbol/date to populate this object. "
-                "Next implementation step when you pick a source: add columns or a small table "
-                "(e.g. fii_net_crs, dii_net_crs, as_of), ingest in a script, and in build_equity_live_audit "
-                "set institutional_flow['available'] = True and fold that into a separate score block "
-                "so it is never confused with VPR (volume_participation_ratio)."
-            ),
-        },
     }
+    macro_ctx = getattr(_THREAD_LOCAL, "sector_macro_context", None)
+    if isinstance(macro_ctx, dict) and isinstance(macro_ctx.get("institutional"), dict):
+        audit["market_institutional_flow"] = dict(macro_ctx["institutional"])
+    try:
+        from institutional_flow import enrich_audit_institutional_data
+
+        enrich_audit_institutional_data(
+            audit,
+            cfg,
+            inst,
+            as_of_date=str(audit.get("ohlc_bar_as_of_date") or "").strip() or None,
+        )
+    except ImportError:
+        audit["institutional_flow"] = {"available": False, "source": None}
     fundamental = _assess_fundamental_strength(cfg, inst)
     audit["fundamental_status"] = fundamental.get("status", "unavailable")
     audit["fundamental_score"] = fundamental.get("score")
     audit["fundamental_reasons"] = fundamental.get("reasons", [])
+    if isinstance(macro_ctx, dict):
+        from breadth_engine import apply_macro_context_to_audit
+
+        apply_macro_context_to_audit(audit, macro_ctx)
+    _populate_factor_scores(audit, fundamental=fundamental)
     if stretch_fields:
         audit.update(stretch_fields)
     _refresh_symbol_scoring_outputs(audit)
@@ -3922,6 +4080,7 @@ def run_sector_live(
     priority_only: bool = False,
     priority_top_n: int | None = None,
 ) -> str:
+    ensure_utf8_stdio()
     from email_notify import send_success_post_email
     from breeze_client import create_breeze_session
     from sector_registry import resolve_sector_key
@@ -3941,6 +4100,7 @@ def run_sector_live(
     from options_context import build_sector_options_digest, sector_options_underlying
 
     sector_options_ctx: dict[str, Any] = {"sector_option_chain_unavailable": True}
+    macro_ctx: dict[str, Any] = {}
     try:
         _nifty_df = fetch_nifty_data(cfg, breeze=breeze, lookback_calendar_days=210)
         _THREAD_LOCAL.sector_benchmark_ohlc = _nifty_df if not _nifty_df.empty else None
@@ -3948,23 +4108,6 @@ def run_sector_live(
         logger.warning("NIFTY benchmark prefetch skipped: %s", ex)
         _THREAD_LOCAL.sector_benchmark_ohlc = None
         _nifty_df = pd.DataFrame()
-
-    if digest:
-        try:
-            underlying = sector_options_underlying(sector_id)
-            opt = fetch_option_metrics_with_expiry_fallback(breeze, underlying, max_expiry_tries=6)
-            nifty_spot = float("nan")
-            if not _nifty_df.empty and "close" in _nifty_df.columns:
-                nifty_spot = float(
-                    pd.to_numeric(_nifty_df["close"], errors="coerce").dropna().iloc[-1]
-                )
-            sector_options_ctx = build_sector_options_digest(
-                opt,
-                spot=nifty_spot,
-                sector_id=sector_id,
-            )
-        except Exception as ex:
-            logger.warning("Sector options context fetch skipped for %s: %s", sector_id, ex)
 
     if instruments_override is not None:
         instruments = instruments_override
@@ -3990,6 +4133,63 @@ def run_sector_live(
 
     if max_symbols is not None:
         instruments = instruments[: max(0, int(max_symbols))]
+
+    try:
+        from breadth_engine import BREADTH_PANEL_MAX_SYMBOLS, compute_market_breadth, prefetch_breadth_panel, stamp_macro_context
+
+        breadth_panel = prefetch_breadth_panel(
+            cfg,
+            breeze,
+            instruments,
+            max_symbols=BREADTH_PANEL_MAX_SYMBOLS,
+        )
+        breadth_metrics = compute_market_breadth(breadth_panel) if breadth_panel else {}
+        macro_ctx = stamp_macro_context(
+            nifty_df=_nifty_df if not _nifty_df.empty else None,
+            macro_snapshot=macro_snapshot,
+            breadth_metrics=breadth_metrics if breadth_metrics.get("n_symbols") else None,
+        )
+        _THREAD_LOCAL.sector_macro_context = macro_ctx
+    except ImportError:
+        try:
+            from breadth_engine import stamp_macro_context
+
+            macro_ctx = stamp_macro_context(
+                nifty_df=_nifty_df if not _nifty_df.empty else None,
+                macro_snapshot=macro_snapshot,
+            )
+            _THREAD_LOCAL.sector_macro_context = macro_ctx
+        except ImportError:
+            _THREAD_LOCAL.sector_macro_context = {}
+    except Exception as ex:
+        logger.warning("Breadth panel prefetch skipped for %s: %s", sector_id, ex)
+        try:
+            from breadth_engine import stamp_macro_context
+
+            macro_ctx = stamp_macro_context(
+                nifty_df=_nifty_df if not _nifty_df.empty else None,
+                macro_snapshot=macro_snapshot,
+            )
+            _THREAD_LOCAL.sector_macro_context = macro_ctx
+        except ImportError:
+            _THREAD_LOCAL.sector_macro_context = {}
+
+    if digest:
+        try:
+            underlying = sector_options_underlying(sector_id)
+            opt = fetch_option_metrics_with_expiry_fallback(breeze, underlying, max_expiry_tries=6)
+            nifty_spot = float("nan")
+            if not _nifty_df.empty and "close" in _nifty_df.columns:
+                nifty_spot = float(
+                    pd.to_numeric(_nifty_df["close"], errors="coerce").dropna().iloc[-1]
+                )
+            sector_options_ctx = build_sector_options_digest(
+                opt,
+                spot=nifty_spot,
+                sector_id=sector_id,
+            )
+        except Exception as ex:
+            logger.warning("Sector options context fetch skipped for %s: %s", sector_id, ex)
 
     workers = max_workers if max_workers is not None else MAX_WORKERS
     workers = max(1, min(int(workers), 16))
@@ -4087,6 +4287,8 @@ def run_sector_live(
 
     if hasattr(_THREAD_LOCAL, "sector_benchmark_ohlc"):
         delattr(_THREAD_LOCAL, "sector_benchmark_ohlc")
+    if hasattr(_THREAD_LOCAL, "sector_macro_context"):
+        delattr(_THREAD_LOCAL, "sector_macro_context")
 
     ok_count = sum(1 for r in results if r.get("ok"))
     if ok_count == 0:
@@ -4114,6 +4316,7 @@ def run_sector_live(
         event_adjustments = _apply_event_guardrails(ok_results)
         macro_applied, macro_reason = _apply_macro_guardrails(ok_results, macro_snapshot)
         _apply_sector_cross_section(ok_results, score_percentiles=False)
+        _apply_sector_rotation_scores(cfg, sector_id, ok_results)
         _attach_prior_action_signals(cfg, sector_id, ok_results)
         for r in ok_results:
             if isinstance(r.get("audit"), dict):
@@ -4359,6 +4562,7 @@ def run_sector_live(
                 lines.append(_format_symbol_metrics_line(r))
                 if i < len(ranked) - 1:
                     lines.append("")
+        _append_investment_report_digest_lines(lines, ok_results)
         for r in sorted(
             (x for x in results if (not x.get("ok")) and not _is_skipped_no_data_error(x.get("error"))),
             key=lambda x: (x["symbol"], x["exchange"]),
@@ -4431,7 +4635,7 @@ def run_sector_live(
                 subject_prefix=f"Titan V12.0 sector {sector_id}",
                 eod_as_of_date=_digest_eod_as_of_date(results),
             )
-        print(digest_text)
+        _safe_print(digest_text)
         return digest_text
 
     lines = [f"Titan sector run: {sector_id!r} — {ok_count}/{len(results)} succeeded\n"]
@@ -4466,5 +4670,5 @@ def run_sector_live(
         update_sector_period_rollups(cfg, sector=sector_id)
     except Exception:
         logger.exception("Analysis store persist hook failed")
-    print(digest_out)
+    _safe_print(digest_out)
     return digest_out

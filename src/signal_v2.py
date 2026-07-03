@@ -22,6 +22,10 @@ import math
 import os
 from typing import Any
 
+# Blend fused titan_score into Layer D modifiers and risk_net (always on when valid).
+FUSION_SIGNAL_BLEND = 0.10
+FUSION_SIGV2_BLEND = FUSION_SIGNAL_BLEND  # alias for tests and legacy references
+
 # ---------------------------------------------------------------------------
 # config helpers (mirror analysis_store._env_truthy semantics)
 # ---------------------------------------------------------------------------
@@ -1068,6 +1072,17 @@ def layer_d(audit: dict[str, Any], c: dict[str, Any]) -> dict[str, Any]:
             f"prior-session corroborator: constructive={cs}/5 fail={fs}/5 -> ceiling {prior_ceil}"
         )
 
+    fusion_blend = FUSION_SIGNAL_BLEND
+    titan = _sf(audit.get("titan_score"))
+    if not math.isnan(titan):
+        delta = ((titan - 50.0) / 50.0) * 0.15 * fusion_blend
+        out["mult_momentum"] *= 1.0 + delta
+        if titan >= 70.0:
+            out["pullback_bull_bump"] = max(float(out["pullback_bull_bump"]), 0.25 * fusion_blend)
+        elif titan <= 35.0:
+            out["mult_risk"] *= 1.0 + 0.1 * fusion_blend
+        reasons.append(f"titan_fusion signal blend {fusion_blend:.2f} (score {titan:.0f})")
+
     out["reasons"] = reasons
     return out
 
@@ -2093,6 +2108,25 @@ def _derive_next_open_gap_pct(audit: dict[str, Any]) -> tuple[float, str]:
     return float("nan"), "none"
 
 
+def _apply_titan_fusion_context(audit: dict[str, Any], risk_net: float) -> tuple[float, dict[str, Any]]:
+    """Minimal titan_score context modifier on risk_net."""
+    blend = FUSION_SIGNAL_BLEND
+    ts = _sf(audit.get("titan_score"))
+    ctx: dict[str, Any] = {
+        "blend": blend,
+        "titan_score": None if math.isnan(ts) else _round(ts, 1),
+        "risk_delta": 0.0,
+        "applied": False,
+    }
+    if blend <= 0.0 or math.isnan(ts):
+        return risk_net, ctx
+    # High titan_score slightly reduces risk; low score nudges risk up.
+    delta = ((50.0 - ts) / 50.0) * blend
+    ctx["risk_delta"] = _round(delta, 4)
+    ctx["applied"] = True
+    return _clamp(risk_net + delta, 0.0, 10.0), ctx
+
+
 def _gap_guard(audit: dict[str, Any], label: str) -> dict[str, Any]:
     """Shadow-first next-open gap guard for constructive entry labels."""
     gap_pct, source = _derive_next_open_gap_pct(audit)
@@ -2608,6 +2642,8 @@ def evaluate_signal_v2(audit: dict[str, Any]) -> tuple[str, float, list[str]]:
     buffer = _env_float("TITAN_SIGV2_E_HYST_BUFFER", 0.5)
 
     risk_net = _clamp(risk_c - bull_offset * bull_c, 0.0, 10.0)
+    risk_net, titan_ctx = _apply_titan_fusion_context(audit, risk_net)
+    audit["titan_fusion_signal_context"] = titan_ctx
 
     gate = _buy_gate(audit, a, c)
     prior_label = _prior_label_from_audit(audit)

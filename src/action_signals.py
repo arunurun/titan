@@ -78,10 +78,14 @@ def action_style(signal: str) -> dict[str, str]:
 
 
 def action_signal_from_digest_headline(line: str) -> str | None:
-    """Parse BUY/HOLD/TRIM/EXIT from a sector digest symbol headline."""
+    """Parse BUY/HOLD/REDUCE/EXIT (and legacy TRIM) from a sector digest symbol headline."""
     upper = line.upper()
     if "EXIT RISK" in upper or "EXIT-RISK" in upper:
         return "exit-risk"
+    if re.search(r"\bEXIT\b", upper):
+        return "exit-risk"
+    if re.search(r"\bREDUCE\b", upper):
+        return "trim"
     # Order matters: EXIT before TRIM substring checks.
     if re.search(r"\bBUY\b", upper):
         return "buy"

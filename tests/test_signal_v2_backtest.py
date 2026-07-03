@@ -76,6 +76,52 @@ def test_feature_row_to_audit_merges_tape_extras():
     assert audit_has_signal_inputs(audit)
 
 
+def test_feature_row_to_audit_round_trip_fusion_pillar_fields():
+    from analysis_store import build_symbol_daily_feature
+    from titan_fusion import fuse_from_audit
+
+    audit_in = {
+        "symbol": "TCS",
+        "exchange": "NSE",
+        "intent_score": 72.0,
+        "effective_intent_score": 70.0,
+        "absorption_ratio": 1.1,
+        "rows": 40,
+        "fundamental_score": 68.5,
+        "fundamental_status": "strong",
+        "sector_relative_strength_pctile": 81.0,
+        "rel_return_5d_vs_nifty_pct": 1.2,
+        "rel_return_10d_vs_nifty_pct": 2.4,
+        "rel_return_20d_vs_nifty_pct": 3.6,
+        "market_regime": {"regime": "BULL"},
+        "institutional_flow": {"available": True, "score": 62.0, "confidence": 0.8},
+        "cmf_20": 0.12,
+        "adx_14": 24.0,
+    }
+    row = build_symbol_daily_feature(
+        audit_in,
+        trade_date="2026-07-03",
+        sector="it",
+        run_id="it-20260703-100000",
+        run_ts_iso="2026-07-03T10:00:00+05:30",
+    )
+    audit_out = feature_row_to_audit(row)
+    assert audit_out is not None
+    assert audit_out["fundamental_score"] == 68.5
+    assert audit_out["fundamental_status"] == "strong"
+    assert audit_out["sector_relative_strength_pctile"] == 81.0
+    assert audit_out["rel_return_5d_vs_nifty_pct"] == 1.2
+    assert audit_out["rel_return_10d_vs_nifty_pct"] == 2.4
+    assert audit_out["rel_return_20d_vs_nifty_pct"] == 3.6
+
+    fusion = fuse_from_audit(audit_out)
+    assert fusion["fundamental_score"] is not None
+    assert fusion["sector_score"] is not None
+    assert fusion["relative_strength_score"] is not None
+    assert fusion["regime_score"] is not None
+    assert fusion["technical_score"] is not None
+
+
 def test_compare_label_streams_aggregates_drawdown_event():
     rows = [
         {

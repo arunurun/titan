@@ -45,6 +45,7 @@ from brain import generate_titan_narrative
 from compliance import compliance_scan
 from config_loader import load_config, try_parse_gemini_api_keys_from_env
 from email_notify import send_failure_email, send_success_post_email
+from json_util import ensure_utf8_stdio
 from protocol_runtime import available_clusters, resolve_protocol_runs
 from titan_engine import (
     calculate_absorption_ratio,
@@ -418,6 +419,7 @@ def run_live() -> None:
 
 
 def main() -> None:
+    ensure_utf8_stdio()
     p = argparse.ArgumentParser(description="Titan V12.0")
     p.add_argument("--dry-run", action="store_true", help="Simulate with dummy data")
     p.add_argument("--live", action="store_true", help="Fetch NIFTY via Breeze and persist")

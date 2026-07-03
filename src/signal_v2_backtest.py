@@ -65,6 +65,8 @@ _TAPE_AUDIT_KEYS = (
     "sector_pctile_effective_intent",
     "sector_pctile_return_5d_pct",
     "fundamental_status",
+    "fundamental_score",
+    "sector_relative_strength_pctile",
     "trap_exit_proxy",
     "high_volume_down_day_proxy",
     "panic_absorption_proxy",
@@ -822,3 +824,19 @@ def format_report(report: dict[str, Any]) -> str:
             f"flip_delta={off.get('flip_rate_vs_reference_delta')}"
         )
     return "\n".join(lines)
+
+
+def fuse_audits_batch(
+    audits: Sequence[dict[str, Any]],
+    *,
+    weights: dict[str, float] | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Backtest hook: fuse titan_score for a sequence of audits.
+
+    Fusion is always on in production; this helper calls ``fuse_from_audit`` per row.
+    Import path: ``from titan_fusion import fuse_batch, fuse_from_audit``.
+    """
+    from titan_fusion import fuse_from_audit
+
+    return [fuse_from_audit(a, weights=weights) for a in audits]
