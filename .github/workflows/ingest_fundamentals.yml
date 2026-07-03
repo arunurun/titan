@@ -3,6 +3,10 @@
 name: Ingest fundamentals
 
 on:
+  # Temporary: registers workflow on GitHub before first workflow_dispatch (feature branch only).
+  push:
+    branches:
+      - feature/fundamentals-ingest-gha
   workflow_dispatch:
     inputs:
       scope:
