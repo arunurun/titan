@@ -2647,6 +2647,11 @@ def _attach_prior_action_signals(
                 }
 
 
+def _sector_rollups_for_audit(audit: dict[str, Any]) -> list[dict[str, Any]] | None:
+    rollups = audit.get("_sector_rotation_rollups")
+    return rollups if isinstance(rollups, list) else None
+
+
 def _refresh_symbol_scoring_outputs(audit: dict[str, Any]) -> None:
     try:
         from market_regime import apply_regime_to_audit
@@ -2654,9 +2659,11 @@ def _refresh_symbol_scoring_outputs(audit: dict[str, Any]) -> None:
         apply_regime_to_audit(audit)
     except ImportError:
         pass
+    sector_rollups = _sector_rollups_for_audit(audit)
     if isinstance(audit.get("factor_scores"), dict):
-        rollups = audit.get("_sector_rotation_rollups")
-        sector_rollups = rollups if isinstance(rollups, list) else None
+        _populate_factor_scores(audit, sector_rollups=sector_rollups)
+    _apply_contemporaneous_dampener(audit)
+    if isinstance(audit.get("factor_scores"), dict):
         _populate_factor_scores(audit, sector_rollups=sector_rollups)
     try:
         from titan_fusion import apply_fusion_to_audit
@@ -2664,7 +2671,6 @@ def _refresh_symbol_scoring_outputs(audit: dict[str, Any]) -> None:
         apply_fusion_to_audit(audit)
     except ImportError:
         pass
-    _apply_contemporaneous_dampener(audit)  # Fix C: de-bias same-day pop before scoring
     next_day_score, next_week_score, prediction_breakdown = _predictive_scores(audit)
     audit["next_day_score"] = next_day_score
     audit["next_week_score"] = next_week_score
@@ -3500,6 +3506,60 @@ def _sector_strength_factor(
     }
 
 
+def _resolve_fundamental_factor(
+    audit: dict[str, Any],
+    *,
+    fundamental: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Resolve fundamentals pillar from audit, passed assessment, or market_instruments."""
+    if isinstance(fundamental, dict) and isinstance(fundamental.get("factor"), dict):
+        return fundamental["factor"]
+
+    score_val = audit.get("fundamental_score")
+    if score_val is not None or audit.get("fundamental_status"):
+        return {
+            "score": float(score_val) if score_val is not None else None,
+            "confidence": 0.7,
+            "reasons": list(audit.get("fundamental_reasons") or []),
+            "metadata": {"status": audit.get("fundamental_status", "unavailable")},
+            "available": score_val is not None,
+        }
+
+    symbol = str(audit.get("symbol") or "").strip()
+    exchange = str(audit.get("exchange") or "NSE").strip().upper()
+    if symbol:
+        try:
+            from fundamental_engine import assess_fundamental_strength
+
+            cfg = load_config()
+            loaded = assess_fundamental_strength(cfg, SectorInstrument(symbol, exchange))
+            if isinstance(loaded, dict):
+                audit["fundamental_status"] = loaded.get("status", "unavailable")
+                audit["fundamental_score"] = loaded.get("score")
+                audit["fundamental_reasons"] = list(loaded.get("reasons") or [])
+                if isinstance(loaded.get("factor"), dict):
+                    return loaded["factor"]
+                score_val = loaded.get("score")
+                if score_val is not None:
+                    return {
+                        "score": float(score_val),
+                        "confidence": 0.7,
+                        "reasons": list(loaded.get("reasons") or []),
+                        "metadata": {"status": loaded.get("status", "unavailable")},
+                        "available": True,
+                    }
+        except Exception as exc:  # noqa: BLE001 — pillar skips when DB/row unavailable
+            logger.debug("fundamental lazy load skipped for %s: %s", symbol, exc)
+
+    return {
+        "score": None,
+        "confidence": 0.0,
+        "reasons": ["fundamental_score missing"],
+        "metadata": {},
+        "available": False,
+    }
+
+
 def _populate_factor_scores(
     audit: dict[str, Any],
     *,
@@ -3540,26 +3600,7 @@ def _populate_factor_scores(
         "factor": flow,
     }
 
-    fund_factor = None
-    if isinstance(fundamental, dict) and isinstance(fundamental.get("factor"), dict):
-        fund_factor = fundamental["factor"]
-    elif audit.get("fundamental_score") is not None or (fundamental and fundamental.get("score") is not None):
-        score_val = fundamental.get("score") if fundamental else audit.get("fundamental_score")
-        fund_factor = {
-            "score": float(score_val) if score_val is not None else None,
-            "confidence": 0.7,
-            "reasons": list((fundamental or {}).get("reasons") or audit.get("fundamental_reasons") or []),
-            "metadata": {"status": (fundamental or {}).get("status", audit.get("fundamental_status"))},
-            "available": score_val is not None,
-        }
-    else:
-        fund_factor = {
-            "score": None,
-            "confidence": 0.0,
-            "reasons": ["fundamental_score missing"],
-            "metadata": {},
-            "available": False,
-        }
+    fund_factor = _resolve_fundamental_factor(audit, fundamental=fundamental)
 
     sector_strength = _sector_strength_factor(audit, sector_rollups=sector_rollups)
 
@@ -3584,6 +3625,7 @@ def build_equity_live_audit(
     with_narrative: bool = True,
     strict_data: bool = False,
     event_snapshot: dict[str, Any] | None = None,
+    defer_scoring_outputs: bool = False,
 ) -> tuple[dict[str, Any], str]:
     """
     Cash-market metrics: z-score, **volume participation ratio** (VPR), equity technical
@@ -3980,7 +4022,11 @@ def build_equity_live_audit(
         )
     except ImportError:
         audit["institutional_flow"] = {"available": False, "source": None}
-    fundamental = _assess_fundamental_strength(cfg, inst)
+    try:
+        fundamental = _assess_fundamental_strength(cfg, inst)
+    except Exception as exc:  # noqa: BLE001 — do not block audit when fundamentals lookup fails
+        logger.debug("fundamental assessment skipped for %s: %s", inst.symbol, exc)
+        fundamental = {"status": "unavailable", "score": None, "reasons": ["fundamental lookup failed"]}
     audit["fundamental_status"] = fundamental.get("status", "unavailable")
     audit["fundamental_score"] = fundamental.get("score")
     audit["fundamental_reasons"] = fundamental.get("reasons", [])
@@ -3991,7 +4037,8 @@ def build_equity_live_audit(
     _populate_factor_scores(audit, fundamental=fundamental)
     if stretch_fields:
         audit.update(stretch_fields)
-    _refresh_symbol_scoring_outputs(audit)
+    if not defer_scoring_outputs:
+        _refresh_symbol_scoring_outputs(audit)
     if not with_narrative:
         return audit, ""
     from brain import generate_titan_narrative
@@ -4110,6 +4157,7 @@ def _process_one_metrics(
         with_narrative=False,
         strict_data=False,
         event_snapshot=event_snapshot,
+        defer_scoring_outputs=True,
     )
     if audit.get("skipped_no_data"):
         logger.warning(
