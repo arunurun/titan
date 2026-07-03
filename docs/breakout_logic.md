@@ -15,8 +15,9 @@ This document describes the **live** small- and micro-cap breakout scanner as wi
 | Source | Module / path | Used for |
 |--------|---------------|----------|
 | NSE index CSVs | `INDEX_URLS` in `breakout_scanner.py` | Universe tickers (`SYMBOL.NS`) |
-| Yahoo Finance chart API | `fetch_yahoo_data` | ~1y daily OHLCV (min 50 bars) |
-| On-disk Yahoo cache | `data/cache/breakout_yahoo/{ticker}_{YYYYMMDD}.json` | Rate-limit relief |
+| Supabase `equity_ohlcv_daily` | `breakout_ohlcv_store.load_ohlcv_from_supabase` | ~1y daily OHLCV when warm (min 50 bars, last bar within 3 trading days) |
+| Yahoo Finance chart API | `fetch_yahoo_data` | ~1y daily OHLCV fallback (min 50 bars) |
+| On-disk Yahoo cache | `data/cache/breakout_yahoo/{ticker}_{YYYYMMDD}.json` | Rate-limit relief when Supabase miss/stale |
 | Bhav copy cache | `temp/nse_cache/sec_bhavdata_full_*.csv` | Avg turnover (lacs); delivery fallback |
 | Supabase `delivery_daily` | `load_delivery_pct_by_symbol` | Trailing avg delivery % |
 | Supabase `shareholding_quarterly` | `load_free_float_pct_by_symbol` | Free-float % for liquidity quality |
@@ -337,6 +338,8 @@ Scan continues if Supabase is unavailable; delivery/sector/free-float load error
 | `src/breakout_evidence.py` | Liquidity, persistence, stage, rank |
 | `src/breakout_eod_context.py` | Bhav turnover, delivery, free float |
 | `src/breakout_sector_context.py` | Sector leadership scores |
+| `src/breakout_ohlcv_store.py` | Supabase OHLCV cache read + bulk prime |
+| `scripts/ingest_breakout_ohlcv.py` | Incremental Yahoo → `equity_ohlcv_daily` ingest |
 | `src/breakout_store.py` | Supabase analysis persistence |
 | `src/breakout_breeze_codes.py` | Bulk Breeze stock_code resolution |
 | `src/breakout_setup.py` | PRE_BREAKOUT setup evaluation |

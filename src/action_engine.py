@@ -97,20 +97,6 @@ def _position_size_pct(audit: dict[str, Any]) -> float | None:
     return None
 
 
-def digest_headline_text(audit: dict[str, Any], action: dict[str, Any] | None = None) -> str:
-    """Single-line digest headline with canonical REDUCE/EXIT/BUY labels."""
-    act = action or derive_full_action(audit)
-    label = str(act.get("label") or "hold").upper()
-    pos = act.get("position_size_pct")
-    exp_ret = act.get("expected_return_5d_pct")
-    parts = [label]
-    if pos is not None:
-        parts.append(f"size {pos:.0f}%")
-    if exp_ret is not None:
-        parts.append(f"5D {exp_ret:+.1f}%")
-    return " — ".join(parts)
-
-
 def _thresholds_used(audit: dict[str, Any], risk_net: float) -> dict[str, Any]:
     trace = audit.get("signal_reason_trace")
     if not isinstance(trace, dict):
@@ -144,6 +130,135 @@ def digest_headline_text(audit: dict[str, Any], action: dict[str, Any] | None = 
     payload = action if isinstance(action, dict) else derive_full_action(audit)
     label = str(payload.get("label") or "hold").strip().lower()
     return _DISPLAY_HEADLINE.get(label, _DISPLAY_HEADLINE["hold"])
+
+
+def conviction_band(score: float) -> str:
+    """Map 0–100 conviction score to low / moderate / high."""
+    if math.isnan(score):
+        return "n/a"
+    if score >= 70.0:
+        return "high"
+    if score >= 40.0:
+        return "moderate"
+    return "low"
+
+
+def _short_term_tilt_descriptor(ret_pct: float) -> str:
+    if math.isnan(ret_pct):
+        return "unclear"
+    if ret_pct >= 3.0:
+        return "strongly positive"
+    if ret_pct >= 1.0:
+        return "positive"
+    if ret_pct >= 0.3:
+        return "slightly positive"
+    if ret_pct > -0.3:
+        return "neutral"
+    if ret_pct > -1.0:
+        return "slightly negative"
+    if ret_pct > -3.0:
+        return "negative"
+    return "strongly negative"
+
+
+def _win_odds_pct(audit: dict[str, Any]) -> float | None:
+    prob = audit.get("predicted_probability")
+    if prob is None:
+        cal = audit.get("probability_calibration")
+        if isinstance(cal, dict):
+            prob = cal.get("predicted_probability")
+    p = _sf(prob) if prob is not None else float("nan")
+    if math.isnan(p):
+        return None
+    return round(p * 100.0, 1)
+
+
+def format_conviction_digest_line(action: dict[str, Any]) -> str | None:
+    pos = action.get("position_size_pct")
+    if pos is None:
+        return None
+    band = conviction_band(float(pos))
+    return (
+        f"Conviction score: {pos:.0f}/100 ({band}) — "
+        "model blend of 5-day win odds + technical strength; "
+        "not a portfolio allocation"
+    )
+
+
+def format_short_term_tilt_digest_lines(
+    action: dict[str, Any], audit: dict[str, Any]
+) -> list[str]:
+    exp_ret = action.get("expected_return_5d_pct")
+    exp_dd = action.get("expected_drawdown_5d_pct")
+    if exp_ret is None and exp_dd is None:
+        return []
+    ret_f = _sf(exp_ret) if exp_ret is not None else float("nan")
+    dd_f = _sf(exp_dd) if exp_dd is not None else float("nan")
+    tilt = _short_term_tilt_descriptor(ret_f)
+    if not math.isnan(ret_f):
+        ret_part = f"{tilt} ({ret_f:+.1f}% indicative)"
+    else:
+        ret_part = tilt
+    if not math.isnan(dd_f):
+        vol_part = f"typical volatility band ~{dd_f:.1f}% (from ATR)"
+    else:
+        vol_part = "volatility band n/a"
+    lines = [f"Short-term tilt: {ret_part} · {vol_part}"]
+    inputs: list[str] = []
+    win_odds = _win_odds_pct(audit)
+    if win_odds is not None:
+        inputs.append(f"win odds {win_odds:.0f}%")
+    atr = _sf(audit.get("atr_14_pct"))
+    if not math.isnan(atr) and atr > 0:
+        inputs.append(f"ATR {atr:.1f}%")
+    if inputs:
+        lines.append(f"based on {' and '.join(inputs)}")
+    return lines
+
+
+def format_buy_checklist_digest_line(audit: dict[str, Any]) -> str | None:
+    """Plain-English buy gate for HOLD names (next-week + intent thresholds)."""
+    sell_signal = str(audit.get("sell_signal", "unknown")).strip().lower()
+    risk_net = _sf(audit.get("sell_signal_risk_score"))
+    if sell_signal != "hold":
+        return None
+    if not math.isnan(risk_net) and risk_net >= 4.0:
+        return None
+
+    nw_gate = 65.0
+    intent_gate = 60.0
+    nw_val = _sf(audit.get("next_week_score"))
+    intent_val = _sf(
+        audit.get("effective_intent_score", audit.get("intent_score"))
+    )
+
+    nw_pass = not math.isnan(nw_val) and nw_val >= nw_gate
+    intent_pass = not math.isnan(intent_val) and intent_val >= intent_gate
+    nw_disp = f"{nw_val:.0f}" if not math.isnan(nw_val) else "n/a"
+    intent_disp = f"{intent_val:.0f}" if not math.isnan(intent_val) else "n/a"
+    nw_mark = "✓ passes" if nw_pass else "✗ fails"
+    intent_mark = "✓ passes" if intent_pass else "✗ fails"
+    verdict = "BUY eligible" if (nw_pass and intent_pass) else "HOLD not BUY"
+
+    return (
+        f"Buy checklist: 1-week outlook {nw_disp} {nw_mark} (need ≥{nw_gate:.0f}) · "
+        f"technical intent {intent_disp} {intent_mark} (need ≥{intent_gate:.0f}) — "
+        f"{verdict}"
+    )
+
+
+def action_recommendation_digest_lines(audit: dict[str, Any]) -> list[str]:
+    """Indented digest detail lines under the symbol headline (conviction + short-term tilt)."""
+    action = derive_full_action(audit)
+    audit["full_action"] = action
+    lines: list[str] = []
+    conv = format_conviction_digest_line(action)
+    if conv:
+        lines.append(f"   {conv}")
+    for tilt_line in format_short_term_tilt_digest_lines(action, audit):
+        indent = "   " if tilt_line.startswith("based on") else "   "
+        lines.append(f"{indent}{tilt_line}")
+    return lines
 
 
 def derive_full_action(audit: dict[str, Any]) -> dict[str, Any]:

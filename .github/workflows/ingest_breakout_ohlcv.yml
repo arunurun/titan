@@ -1,0 +1,65 @@
+# Nightly Yahoo OHLCV ingest for breakout scanner universe into Supabase.
+
+name: Ingest breakout OHLCV
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbol:
+        description: "Optional single NSE symbol (e.g. RELIANCE); blank = universe"
+        required: false
+        default: ""
+      full_backfill:
+        description: "Upsert full ~1y history per symbol"
+        required: false
+        default: false
+        type: boolean
+      workers:
+        description: "Parallel Yahoo workers (1-6)"
+        required: false
+        default: "4"
+  schedule:
+    # 18:30 UTC ≈ midnight IST — after US close, before India open prep
+    - cron: "30 18 * * 1-5"
+
+permissions:
+  contents: read
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Apply equity_ohlcv_daily migration (idempotent DDL)
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: python scripts/apply_equity_ohlcv_daily_migration.py
+
+      - name: Ingest breakout OHLCV into Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          PYTHONUNBUFFERED: "1"
+          TITAN_YAHOO_INGEST_THROTTLE_SEC: "0.5"
+        run: |
+          ARGS=(--workers "${{ github.event.inputs.workers || '4' }}")
+          if [ -n "${{ github.event.inputs.symbol }}" ]; then
+            ARGS+=(--symbol "${{ github.event.inputs.symbol }}")
+          fi
+          if [ "${{ github.event.inputs.full_backfill }}" = "true" ]; then
+            ARGS+=(--full-backfill)
+          fi
+          echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Starting breakout OHLCV ingest with args: ${ARGS[*]}"
+          python -u scripts/ingest_breakout_ohlcv.py "${ARGS[@]}"

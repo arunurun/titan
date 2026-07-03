@@ -767,31 +767,13 @@ def _sell_signal_plain_english(signal: str) -> str:
 
 
 def _action_recommendation_digest_lines(audit: dict[str, Any]) -> list[str]:
-    """Recommendation block: display label, sizing, expected return/drawdown."""
+    """Recommendation block: conviction score and short-term tilt (headline carries action label)."""
     try:
-        from action_engine import derive_full_action
+        from action_engine import action_recommendation_digest_lines
+
+        return action_recommendation_digest_lines(audit)
     except ImportError:
         return []
-    action = derive_full_action(audit)
-    audit["full_action"] = action
-    label = str(action.get("label") or "hold").upper()
-    internal = str(action.get("label_internal") or "hold")
-    lines = [f"▸ Recommendation: {label}"]
-    if label in ("REDUCE", "EXIT"):
-        lines[0] = f"▸ Recommendation: {label} — review exposure"
-    plain = _sell_signal_plain_english(internal)
-    if plain:
-        lines.append(f"   {plain}")
-    pos = action.get("position_size_pct")
-    if pos is not None:
-        lines.append(f"   Position size: {pos:.0f}% of mandate")
-    exp_ret = action.get("expected_return_5d_pct")
-    exp_dd = action.get("expected_drawdown_5d_pct")
-    if exp_ret is not None or exp_dd is not None:
-        ret_txt = f"{exp_ret:+.1f}%" if exp_ret is not None else "n/a"
-        dd_txt = f"{exp_dd:.1f}%" if exp_dd is not None else "n/a"
-        lines.append(f"   5D outlook: return {ret_txt} · drawdown risk {dd_txt}")
-    return lines
 
 
 def _digest_eod_as_of_date(results: list[dict[str, Any]]) -> str | None:
@@ -1814,21 +1796,28 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
         audit["full_action"] = action
         lines_out.append(f"{symbol} ({exchange}) — {digest_headline_text(audit, action)}")
         rec_lines = _action_recommendation_digest_lines(audit)
-        if len(rec_lines) > 1:
-            lines_out.extend(rec_lines[1:])
+        if rec_lines:
+            lines_out.extend(rec_lines)
     except ImportError:
         sell_signal = audit.get("sell_signal", "unknown")
         lines_out.append(f"{symbol} ({exchange}) — {_sell_signal_plain_english(str(sell_signal))}")
-    risk_net = _safe_float(audit.get("sell_signal_risk_score"))
-    if str(sell_signal).lower() == "hold" and not math.isnan(risk_net) and risk_net < 4.0:
-        nw_gate = 65.0
-        intent_gate = 60.0
-        nw_val = _safe_float(next_week)
-        intent_val = _safe_float(intent)
-        lines_out.append(
-            f"   Buy gate: next_week {_fmt_metric(nw_val)}/{nw_gate:.0f}, "
-            f"intent {_fmt_metric(intent_val)}/{intent_gate:.0f}"
-        )
+    try:
+        from action_engine import format_buy_checklist_digest_line
+
+        buy_line = format_buy_checklist_digest_line(audit)
+        if buy_line:
+            lines_out.append(f"   {buy_line}")
+    except ImportError:
+        risk_net = _safe_float(audit.get("sell_signal_risk_score"))
+        if str(sell_signal).lower() == "hold" and not math.isnan(risk_net) and risk_net < 4.0:
+            nw_gate = 65.0
+            intent_gate = 60.0
+            nw_val = _safe_float(next_week)
+            intent_val = _safe_float(intent)
+            lines_out.append(
+                f"   Buy gate: next_week {_fmt_metric(nw_val)}/{nw_gate:.0f}, "
+                f"intent {_fmt_metric(intent_val)}/{intent_gate:.0f}"
+            )
 
     lines_out.append("▸ Trend Regime (14D)")
     trend_regime = _trend_regime_label(adx_14, plus_di_14, minus_di_14)
@@ -2033,6 +2022,10 @@ def _format_symbol_metrics_line_simple(result: dict[str, Any]) -> str:
             f"• Fundamentals: {fundamental_status} ({_fmt_metric(fundamental_score)})"
             + (f" — {fr}" if fr else ""),
         )
+    elif fundamental_status.lower() in ("unavailable", "na", "n/a", "") or str(fundamental_status).startswith(
+        "unavailable",
+    ):
+        context_tail.append("• Fundamentals: unavailable (run ingest_fundamentals)")
 
     if fallback_used and exchange_used.upper() != str(exchange).upper():
         context_tail.append(f"• Price feed: {exchange_used} (alternate to {exchange})")

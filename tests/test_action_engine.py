@@ -108,3 +108,68 @@ def test_expected_drawdown_from_atr():
     dd = out.get("expected_drawdown_5d_pct")
     assert dd is not None
     assert 0.5 <= float(dd) <= 15.0
+
+
+def test_conviction_band_labels():
+    from action_engine import conviction_band
+
+    assert conviction_band(25.0) == "low"
+    assert conviction_band(46.0) == "moderate"
+    assert conviction_band(75.0) == "high"
+
+
+def test_action_recommendation_digest_lines_plain_english():
+    from action_engine import action_recommendation_digest_lines
+
+    audit = {
+        **_constructive_audit(),
+        "predicted_probability": 0.43,
+        "technical_confidence": 0.5,
+        "sell_signal": "hold",
+        "sell_signal_risk_score": 2.0,
+        "next_week_score": 67.27,
+        "effective_intent_score": 57.51,
+    }
+    lines = action_recommendation_digest_lines(audit)
+    text = "\n".join(lines)
+    assert "Conviction score:" in text
+    assert "not a portfolio allocation" in text
+    assert "Short-term tilt:" in text
+    assert "from ATR" in text
+    assert "based on win odds 43%" in text
+    assert "Position size:" not in text
+    assert "5D outlook:" not in text
+    assert "HOLD — risk score" not in text
+
+
+def test_format_buy_checklist_digest_line_hold_not_buy():
+    from action_engine import format_buy_checklist_digest_line
+
+    audit = {
+        "sell_signal": "hold",
+        "sell_signal_risk_score": 2.0,
+        "next_week_score": 67.27,
+        "effective_intent_score": 57.51,
+    }
+    line = format_buy_checklist_digest_line(audit)
+    assert line is not None
+    assert "Buy checklist:" in line
+    assert "67" in line
+    assert "✓ passes" in line
+    assert "58" in line or "57" in line
+    assert "✗ fails" in line
+    assert "HOLD not BUY" in line
+
+
+def test_format_buy_checklist_digest_line_buy_eligible():
+    from action_engine import format_buy_checklist_digest_line
+
+    audit = {
+        "sell_signal": "hold",
+        "sell_signal_risk_score": 1.0,
+        "next_week_score": 70.0,
+        "effective_intent_score": 62.0,
+    }
+    line = format_buy_checklist_digest_line(audit)
+    assert line is not None
+    assert "BUY eligible" in line
