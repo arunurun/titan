@@ -805,6 +805,9 @@ def build_symbol_daily_feature(
         "rel_return_5d_vs_nifty_pct": audit.get("rel_return_5d_vs_nifty_pct"),
         "rel_return_10d_vs_nifty_pct": audit.get("rel_return_10d_vs_nifty_pct"),
         "rel_return_20d_vs_nifty_pct": audit.get("rel_return_20d_vs_nifty_pct"),
+        "fundamental_score": audit.get("fundamental_score"),
+        "fundamental_status": audit.get("fundamental_status"),
+        "sector_relative_strength_pctile": audit.get("sector_relative_strength_pctile"),
         "median_notional_inr_20d": audit.get("median_notional_inr_20d"),
         "liquidity_thin_proxy": audit.get("liquidity_thin_proxy"),
         "extreme_price_move_proxy": audit.get("extreme_price_move_proxy"),
@@ -904,6 +907,7 @@ def build_symbol_daily_feature(
             "news_sentiment_score": audit.get("news_sentiment_score"),
             "news_sentiment_trend": audit.get("news_sentiment_trend"),
             "news_count": audit.get("news_count"),
+            "fundamental_score": audit.get("fundamental_score"),
         }
     )
 

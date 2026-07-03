@@ -124,6 +124,40 @@ def test_build_symbol_daily_feature_includes_news_columns():
     assert row["tape_extras"]["news_correlation"]["direction"] == "tailwind"
 
 
+def test_build_symbol_daily_feature_persists_fusion_pillar_fields():
+    audit = {
+        "symbol": "TCS",
+        "exchange": "NSE",
+        "intent_score": 72.0,
+        "effective_intent_score": 70.0,
+        "absorption_ratio": 1.1,
+        "rows": 40,
+        "fundamental_score": 68.5,
+        "fundamental_status": "strong",
+        "sector_relative_strength_pctile": 81.0,
+        "rel_return_5d_vs_nifty_pct": 1.2,
+        "rel_return_10d_vs_nifty_pct": 2.4,
+        "rel_return_20d_vs_nifty_pct": 3.6,
+        "market_regime": {"regime": "BULL"},
+        "institutional_flow": {"available": True, "score": 62.0, "confidence": 0.8},
+    }
+    row = build_symbol_daily_feature(
+        audit,
+        trade_date="2026-07-03",
+        sector="it",
+        run_id="it-20260703-100000",
+        run_ts_iso="2026-07-03T10:00:00+05:30",
+    )
+    tape = row["tape_extras"]
+    assert row["fundamental_score"] == 68.5
+    assert tape["fundamental_score"] == 68.5
+    assert tape["fundamental_status"] == "strong"
+    assert tape["sector_relative_strength_pctile"] == 81.0
+    assert tape["rel_return_5d_vs_nifty_pct"] == 1.2
+    assert tape["rel_return_10d_vs_nifty_pct"] == 2.4
+    assert tape["rel_return_20d_vs_nifty_pct"] == 3.6
+
+
 def test_build_symbol_daily_feature_denormalizes_prediction_scores():
     audit = {
         "symbol": "HAL",

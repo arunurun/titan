@@ -65,6 +65,8 @@ _TAPE_AUDIT_KEYS = (
     "sector_pctile_effective_intent",
     "sector_pctile_return_5d_pct",
     "fundamental_status",
+    "fundamental_score",
+    "sector_relative_strength_pctile",
     "trap_exit_proxy",
     "high_volume_down_day_proxy",
     "panic_absorption_proxy",
