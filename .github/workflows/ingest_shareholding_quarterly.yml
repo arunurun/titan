@@ -1,0 +1,83 @@
+# Quarterly NSE shareholding / free-float ingest into Supabase.
+# Runs after typical results-season windows (Jan/Apr/Jul/Oct).
+
+name: Ingest shareholding quarterly
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbol:
+        description: "Optional single NSE symbol (e.g. RELIANCE); blank = all"
+        required: false
+        default: ""
+      index:
+        description: "NSE index segment"
+        required: false
+        default: "equities"
+        type: choice
+        options:
+          - equities
+          - sme
+      start:
+        description: "Window start YYYY-MM-DD (optional; with end)"
+        required: false
+        default: ""
+      end:
+        description: "Window end YYYY-MM-DD (optional; with start)"
+        required: false
+        default: ""
+      latest_only:
+        description: "Fetch NSE latest submissions only (skip date window)"
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    # 5th of Jan/Apr/Jul/Oct at 06:00 UTC — after quarterly filing season
+    - cron: "0 6 5 1,4,7,10 *"
+
+permissions:
+  contents: read
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Apply shareholding_quarterly migration (idempotent DDL)
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: python scripts/apply_shareholding_quarterly_migration.py
+
+      - name: Ingest NSE shareholding into Supabase
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          PYTHONUNBUFFERED: "1"
+          TITAN_NSE_INGEST_THROTTLE_SEC: "0.5"
+        run: |
+          ARGS=()
+          if [ -n "${{ github.event.inputs.symbol }}" ]; then
+            ARGS+=(--symbol "${{ github.event.inputs.symbol }}")
+          fi
+          if [ -n "${{ github.event.inputs.index }}" ]; then
+            ARGS+=(--index "${{ github.event.inputs.index }}")
+          fi
+          if [ "${{ github.event.inputs.latest_only }}" = "true" ]; then
+            ARGS+=(--latest-only)
+          elif [ -n "${{ github.event.inputs.start }}" ] && [ -n "${{ github.event.inputs.end }}" ]; then
+            ARGS+=(--start "${{ github.event.inputs.start }}" --end "${{ github.event.inputs.end }}")
+          fi
+          echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Starting shareholding ingest with args: ${ARGS[*]:-default window}"
+          python -u scripts/ingest_shareholding_quarterly.py "${ARGS[@]}"

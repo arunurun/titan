@@ -846,6 +846,107 @@ def _format_risk_flags(
     return ": ".join(parts) + (f": {suffix}" if parts else suffix)
 
 
+_V7_FAIL_REASONS = frozenset({
+    "pre_filter_cum_return",
+    "pre_filter_vol_spike",
+    "pre_filter_standard_adx_trajectory",
+    "pre_filter_adx_trajectory",
+    "pre_filter_signal_cooldown",
+    "pre_filter_adx_soft_chase",
+    "pre_filter_liquidity",
+    "pre_filter_micro_participation",
+    "v7_low_volume_persistence",
+    "v7_breakout_stage_3",
+})
+
+
+def _classic_filter_failures(eval_result: dict[str, Any], tier_name: str) -> list[str]:
+    """Return classic breakout filters that fail independently on this bar."""
+    filt = FILTERS[tier_name]
+    failures: list[str] = []
+    price = eval_result.get("latest_price", 0.0)
+    if price < filt["min_price"]:
+        failures.append("min_price")
+
+    pct = eval_result.get("pct_change", 0.0)
+    if pct < PCT_CHANGE_MIN or pct > PCT_CHANGE_MAX_POWER_GAP:
+        failures.append("pct_change")
+
+    sma50 = eval_result.get("sma50_last", 0.0)
+    sma20 = eval_result.get("sma20_last", 0.0)
+    vol_mult = eval_result.get("vol_mult", 0.0)
+    if price < sma50:
+        sma20_reclaim = price >= sma20 and vol_mult >= SMA20_RECLAIM_VOL_THRESHOLD
+        if not sma20_reclaim:
+            failures.append("SMA50")
+
+    vol_cum = eval_result.get("vol_cum_mult", 0.0)
+    prior_spike = eval_result.get("prior_volume_spike", False)
+    vol_ok, _ = _volume_filter_passes(
+        vol_mult=vol_mult,
+        vol_cum_mult=vol_cum,
+        vol_thresh=filt["vol_mult"],
+        tier_name=tier_name,
+        prior_spike=prior_spike,
+    )
+    if not vol_ok:
+        failures.append("vol")
+
+    rsi = eval_result.get("rsi_val", 0.0)
+    rsi_ok = RSI_MIN <= rsi <= RSI_MAX_NORMAL
+    if not rsi_ok and RSI_MAX_NORMAL < rsi <= RSI_MAX_HOT and vol_mult > HOT_VOL_THRESHOLD:
+        rsi_ok = True
+    if not rsi_ok:
+        failures.append("RSI")
+
+    adx = eval_result.get("adx_val", 0.0)
+    adx_ok = adx >= ADX_HARD_FLOOR
+    if (
+        not adx_ok
+        and ADX_SOFT_FLOOR <= adx < ADX_HARD_FLOOR
+        and vol_mult >= filt["vol_mult"]
+        and price > sma50
+        and pct > 0
+    ):
+        adx_ok = True
+    if not adx_ok:
+        failures.append("ADX")
+
+    if eval_result.get("target_gain", 0.0) < 8.0:
+        failures.append("target_gain")
+    return failures
+
+
+def collect_filter_failures(eval_result: dict[str, Any], tier_name: str) -> list[str]:
+    """Every production filter / v7 gate that fails on this bar (for missed-breakout analysis)."""
+    failures = _classic_filter_failures(eval_result, tier_name)
+    seen = set(failures)
+
+    def _add(tag: str) -> None:
+        if tag and tag not in seen:
+            failures.append(tag)
+            seen.add(tag)
+
+    evidence = eval_result.get("evidence") or {}
+    if not evidence.get("liquidity_gate_pass", True):
+        _add(evidence.get("liquidity_gate_fail") or "pre_filter_liquidity")
+
+    if evidence.get("micro_participation_pass") is False:
+        _add("pre_filter_micro_participation")
+
+    fail_reason = eval_result.get("fail_reason")
+    if fail_reason and (
+        fail_reason in _V7_FAIL_REASONS or str(fail_reason).startswith("pre_filter_")
+    ):
+        _add(str(fail_reason))
+
+    watch = eval_result.get("v7_watch_reason")
+    if watch and eval_result.get("signal_tier") == SIGNAL_TIER_WATCH:
+        _add(str(watch))
+
+    return failures
+
+
 def evaluate_bars_as_of(
     df: dict[str, Any],
     as_of_idx: int,
@@ -853,6 +954,9 @@ def evaluate_bars_as_of(
     *,
     last_pass_idx: int | None = None,
     bhav_turnover_lacs: float | None = None,
+    delivery_pct: float | None = None,
+    free_float_pct: float | None = None,
+    sector_lead: float | None = None,
 ) -> dict[str, Any]:
     """Point-in-time breakout filter evaluation using bars[0..as_of_idx] inclusive.
 
@@ -1050,7 +1154,13 @@ def evaluate_bars_as_of(
         metrics["adx_soft_solo_watch"] = True
 
     evidence = compute_evidence_metrics(
-        df, as_of_idx, tier_name, vol_20_avg, bhav_turnover_lacs=bhav_turnover_lacs,
+        df,
+        as_of_idx,
+        tier_name,
+        vol_20_avg,
+        bhav_turnover_lacs=bhav_turnover_lacs,
+        delivery_pct=delivery_pct,
+        free_float_pct=free_float_pct,
     )
     metrics["evidence"] = evidence
     metrics["liquidity_quality"] = evidence.get("liquidity_quality")
@@ -1058,11 +1168,23 @@ def evaluate_bars_as_of(
     metrics["breakout_stage"] = evidence.get("breakout_stage")
     metrics["base_score"] = evidence.get("base_score")
     metrics["median_turnover_inr"] = evidence.get("median_turnover_inr")
+    metrics["delivery_pct"] = evidence.get("delivery_pct")
+    metrics["free_float_pct"] = evidence.get("free_float_pct")
+    metrics["vpr"] = evidence.get("vpr")
+    metrics["cmf"] = evidence.get("cmf")
+    metrics["sector_lead"] = sector_lead
 
     if fail_reason is None and not evidence.get("liquidity_gate_pass", True):
         pre_filter_fail = evidence.get("liquidity_gate_fail") or "pre_filter_liquidity"
         fail_reason = pre_filter_fail
         signal_tier = None
+
+    if fail_reason is None:
+        part = evidence.get("micro_participation_pass")
+        if part is False:
+            pre_filter_fail = "pre_filter_micro_participation"
+            fail_reason = pre_filter_fail
+            signal_tier = None
 
     v7_watch_reason: str | None = None
     if fail_reason is None and signal_tier == SIGNAL_TIER_PASS:
@@ -1082,7 +1204,7 @@ def evaluate_bars_as_of(
             signal_tier=signal_tier,
         )
 
-    metrics["composite_rank"] = composite_rank_score(metrics)
+    metrics["composite_rank"] = composite_rank_score(metrics, sector_lead=sector_lead)
 
     metrics["pass_paths"] = pass_paths
     metrics["signal_tier"] = signal_tier
@@ -1223,6 +1345,10 @@ def evaluate_and_audit_stock(
     *,
     run_id: str = "",
     scan_date: str = "",
+    bhav_turnover_lacs: float | None = None,
+    delivery_pct: float | None = None,
+    free_float_pct: float | None = None,
+    sector_lead: float | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     filt = FILTERS[tier_name]
     vol_thresh = filt["vol_mult"]
@@ -1247,7 +1373,15 @@ def evaluate_and_audit_stock(
         )
         return None, analysis_record
 
-    eval_result = evaluate_bars_as_of(df, len(df["close"]) - 1, tier_name)
+    eval_result = evaluate_bars_as_of(
+        df,
+        len(df["close"]) - 1,
+        tier_name,
+        bhav_turnover_lacs=bhav_turnover_lacs,
+        delivery_pct=delivery_pct,
+        free_float_pct=free_float_pct,
+        sector_lead=sector_lead,
+    )
     latest_price = eval_result["latest_price"]
     prev_price = eval_result["prev_price"]
     pct_change = eval_result["pct_change"]
@@ -1349,6 +1483,10 @@ Volume Profile (30-day Visible Range):
         "Breakout Stage": eval_result.get("breakout_stage"),
         "Base Score": eval_result.get("base_score"),
         "Composite Rank": eval_result.get("composite_rank"),
+        "Sector Lead": sector_lead,
+        "Delivery Pct": eval_result.get("delivery_pct"),
+        "VPR": eval_result.get("vpr"),
+        "CMF": eval_result.get("cmf"),
         "Pass Paths": ", ".join(pass_paths) if pass_paths else "",
         "Watch Reason": watch_reason or "",
         "Payload": payload,
@@ -1878,12 +2016,62 @@ def run_breakout_scan(
             warm_yahoo_session()
             emit_and_log("Yahoo session warm-up complete.")
 
+            all_tickers: list[str] = []
+            tier_ticker_lists: dict[str, list[str]] = {}
             for tier_key, url in INDEX_URLS.items():
-                tier_label = FILTERS[tier_key]["type"]
-                if emit_to_stdout:
-                    print(f"Downloading constituent list for {tier_label} ...")
                 tickers = download_nse_tickers(url)
+                tier_ticker_lists[tier_key] = tickers
+                all_tickers.extend(tickers)
+
+            all_syms = sorted({t.replace(".NS", "").upper() for t in all_tickers})
+            delivery_by_sym: dict[str, float | None] = {}
+            sector_lead_by_sym: dict[str, float] = {}
+            free_float_by_sym: dict[str, float | None] = {}
+            turnover_by_sym: dict[str, float] = {}
+
+            try:
+                from breakout_eod_context import (
+                    load_bhav_turnover_lacs_by_symbol,
+                    load_delivery_pct_by_symbol,
+                    load_free_float_pct_by_symbol,
+                )
+            except ImportError:
+                from .breakout_eod_context import (
+                    load_bhav_turnover_lacs_by_symbol,
+                    load_delivery_pct_by_symbol,
+                    load_free_float_pct_by_symbol,
+                )
+
+            try:
+                from breakout_sector_context import load_sector_lead_scores
+            except ImportError:
+                from .breakout_sector_context import load_sector_lead_scores
+
+            bhav_dir = _repo_root() / "temp" / "nse_cache"
+            if bhav_dir.is_dir():
+                turnover_by_sym = load_bhav_turnover_lacs_by_symbol(bhav_dir)
+                emit_and_log(f"Bhav turnover cache: {len(turnover_by_sym)} symbols.")
+
+            try:
+                delivery_by_sym = load_delivery_pct_by_symbol(
+                    all_syms, as_of_date=scan_date_iso, nse_cache_dir=bhav_dir if bhav_dir.is_dir() else None,
+                )
+                sector_lead_by_sym = load_sector_lead_scores(all_syms, as_of_date=scan_date_iso)
+                free_float_by_sym = load_free_float_pct_by_symbol(all_syms, as_of_date=scan_date_iso)
+                loaded_delivery = sum(1 for v in delivery_by_sym.values() if v is not None)
+                emit_and_log(
+                    f"EOD context: delivery={loaded_delivery}/{len(all_syms)} "
+                    f"sector_lead={len(sector_lead_by_sym)} free_float="
+                    f"{sum(1 for v in free_float_by_sym.values() if v is not None)}",
+                )
+            except Exception as exc:  # noqa: BLE001
+                emit_and_log(f"EOD context bulk load skipped: {exc}")
+
+            for tier_key, tickers in tier_ticker_lists.items():
+                tier_label = FILTERS[tier_key]["type"]
                 tier_ticker_counts[tier_label] = len(tickers)
+                if emit_to_stdout:
+                    print(f"Scanning {tier_label} ({len(tickers)} tickers)...")
                 if not tickers:
                     if emit_to_stdout:
                         print(f" Warning: No tickers found for {tier_key}. Skipping.")
@@ -1894,12 +2082,17 @@ def run_breakout_scan(
                     print(f" Found {total} tickers. Scanning & Auditing technicals...")
 
                 for ticker in tickers:
+                    sym = ticker.replace(".NS", "").upper()
                     candidate, analysis_record = evaluate_and_audit_stock(
                         ticker,
                         tier_key,
                         emit=emit_and_log,
                         run_id=run_id,
                         scan_date=scan_date_iso,
+                        bhav_turnover_lacs=turnover_by_sym.get(sym),
+                        delivery_pct=delivery_by_sym.get(sym),
+                        free_float_pct=free_float_by_sym.get(sym),
+                        sector_lead=sector_lead_by_sym.get(sym),
                     )
                     analysis_records.append(analysis_record)
                     if candidate:

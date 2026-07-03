@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import csv
 import datetime
 import json
 import math
@@ -13,23 +12,15 @@ from pathlib import Path
 from typing import Any
 
 from breakout_scanner import (
-    ADX_HARD_FLOOR,
-    ADX_SOFT_FLOOR,
     FILTERS,
-    HOT_VOL_THRESHOLD,
     INDEX_URLS,
-    PCT_CHANGE_MAX_POWER_GAP,
-    PCT_CHANGE_MIN,
-    RSI_MAX_HOT,
-    RSI_MAX_NORMAL,
-    RSI_MIN,
-    SMA20_RECLAIM_VOL_THRESHOLD,
+    SIGNAL_TIER_WATCH,
     bar_dates_from_df,
+    collect_filter_failures,
     download_nse_tickers,
     evaluate_bars_as_of,
     fetch_yahoo_history,
     warm_yahoo_session,
-    _volume_filter_passes,
 )
 
 FORWARD_HORIZONS: tuple[int, ...] = (5, 10, 15)
@@ -61,28 +52,11 @@ def _parse_bhav_date(raw: str) -> str | None:
 
 def load_bhav_liquidity(nse_cache_dir: Path) -> dict[str, float]:
     """Average daily turnover (lacs) per EQ symbol from cached bhav copies."""
-    totals: dict[str, list[float]] = defaultdict(list)
-    if not nse_cache_dir.is_dir():
-        return {}
-    for path in sorted(nse_cache_dir.glob("sec_bhavdata_full_*.csv")):
-        try:
-            with path.open(newline="", encoding="utf-8", errors="replace") as f:
-                for row in csv.reader(f):
-                    if len(row) < 12:
-                        continue
-                    cells = [c.strip() for c in row]
-                    if cells[1] != "EQ":
-                        continue
-                    sym = cells[0]
-                    try:
-                        turnover = float(cells[11])
-                    except (TypeError, ValueError):
-                        continue
-                    if turnover > 0:
-                        totals[sym].append(turnover)
-        except OSError:
-            continue
-    return {sym: sum(vals) / len(vals) for sym, vals in totals.items() if vals}
+    try:
+        from breakout_eod_context import load_bhav_turnover_lacs_by_symbol
+    except ImportError:
+        from .breakout_eod_context import load_bhav_turnover_lacs_by_symbol
+    return load_bhav_turnover_lacs_by_symbol(nse_cache_dir)
 
 
 def build_backtest_universe(
@@ -266,60 +240,8 @@ def fetch_universe_history_throttled(
 
 
 def _all_filter_failures(eval_result: dict[str, Any], tier_key: str) -> list[str]:
-    """Return every production filter that fails on this bar (not just first)."""
-    filt = FILTERS[tier_key]
-    failures: list[str] = []
-    price = eval_result.get("latest_price", 0.0)
-    if price < filt["min_price"]:
-        failures.append("min_price")
-
-    pct = eval_result.get("pct_change", 0.0)
-    if pct < PCT_CHANGE_MIN or pct > PCT_CHANGE_MAX_POWER_GAP:
-        failures.append("pct_change")
-
-    sma50 = eval_result.get("sma50_last", 0.0)
-    sma20 = eval_result.get("sma20_last", 0.0)
-    vol_mult = eval_result.get("vol_mult", 0.0)
-    if price < sma50:
-        sma20_reclaim = price >= sma20 and vol_mult >= SMA20_RECLAIM_VOL_THRESHOLD
-        if not sma20_reclaim:
-            failures.append("SMA50")
-
-    vol_cum = eval_result.get("vol_cum_mult", 0.0)
-    prior_spike = eval_result.get("prior_volume_spike", False)
-    vol_ok, _ = _volume_filter_passes(
-        vol_mult=vol_mult,
-        vol_cum_mult=vol_cum,
-        vol_thresh=filt["vol_mult"],
-        tier_name=tier_key,
-        prior_spike=prior_spike,
-    )
-    if not vol_ok:
-        failures.append("vol")
-
-    rsi = eval_result.get("rsi_val", 0.0)
-    rsi_ok = RSI_MIN <= rsi <= RSI_MAX_NORMAL
-    if not rsi_ok and RSI_MAX_NORMAL < rsi <= RSI_MAX_HOT and vol_mult > HOT_VOL_THRESHOLD:
-        rsi_ok = True
-    if not rsi_ok:
-        failures.append("RSI")
-
-    adx = eval_result.get("adx_val", 0.0)
-    adx_ok = adx >= ADX_HARD_FLOOR
-    if (
-        not adx_ok
-        and ADX_SOFT_FLOOR <= adx < ADX_HARD_FLOOR
-        and vol_mult >= filt["vol_mult"]
-        and price > sma50
-        and pct > 0
-    ):
-        adx_ok = True
-    if not adx_ok:
-        failures.append("ADX")
-
-    if eval_result.get("target_gain", 0.0) < 8.0:
-        failures.append("target_gain")
-    return failures
+    """Return every production filter that fails on this bar (classic + v7 gates)."""
+    return collect_filter_failures(eval_result, tier_key)
 
 
 def _forward_max_return_pct(df: dict[str, Any], signal_idx: int, horizon: int) -> float | None:
@@ -353,12 +275,22 @@ def analyze_missed_breakouts_for_stock(
     n = len(df["close"])
 
     missed: list[dict[str, Any]] = []
+    watch_missed: list[dict[str, Any]] = []
     single_filter_near_misses: list[dict[str, Any]] = []
     obvious_blocked: list[dict[str, Any]] = []
+    last_pass_idx: int | None = None
+    turnover_lacs = stock_data.get("liquidity_turnover_lacs_avg")
 
     for idx in range(MIN_HISTORY_BARS - 1, n):
-        eval_result = evaluate_bars_as_of(df, idx, tier_key)
+        eval_result = evaluate_bars_as_of(
+            df,
+            idx,
+            tier_key,
+            last_pass_idx=last_pass_idx,
+            bhav_turnover_lacs=turnover_lacs,
+        )
         if eval_result.get("passed"):
+            last_pass_idx = idx
             continue
 
         fwd_max = _forward_max_return_pct(df, idx, forward_h)
@@ -367,10 +299,13 @@ def analyze_missed_breakouts_for_stock(
 
         all_fails = _all_filter_failures(eval_result, tier_key)
         primary_fail = eval_result.get("fail_reason")
+        signal_tier = eval_result.get("signal_tier")
         row = {
             "signal_date": dates[idx] if idx < len(dates) else "",
             "bar_idx": idx,
+            "signal_tier": signal_tier,
             "primary_fail_reason": primary_fail,
+            "v7_watch_reason": eval_result.get("v7_watch_reason"),
             "all_fail_reasons": all_fails,
             "fail_count": len(all_fails),
             "forward_max_return_pct": fwd_max,
@@ -380,6 +315,10 @@ def analyze_missed_breakouts_for_stock(
             "adx_val": eval_result.get("adx_val"),
             "latest_price": eval_result.get("latest_price"),
         }
+        if signal_tier == SIGNAL_TIER_WATCH:
+            watch_missed.append(row)
+            continue
+
         missed.append(row)
         if len(all_fails) == 1:
             single_filter_near_misses.append(row)
@@ -389,9 +328,12 @@ def analyze_missed_breakouts_for_stock(
             obvious_blocked.append(row)
 
     fail_counts: dict[str, int] = defaultdict(int)
+    watch_fail_counts: dict[str, int] = defaultdict(int)
     single_fail_counts: dict[str, int] = defaultdict(int)
     for m in missed:
         fail_counts[m["primary_fail_reason"] or "unknown"] += 1
+    for m in watch_missed:
+        watch_fail_counts[m.get("v7_watch_reason") or m.get("primary_fail_reason") or "watch"] += 1
     for m in single_filter_near_misses:
         reasons = m.get("all_fail_reasons") or []
         if len(reasons) == 1:
@@ -401,11 +343,14 @@ def analyze_missed_breakouts_for_stock(
         "symbol": sym,
         "tier_label": stock_data["tier_label"],
         "missed_count": len(missed),
+        "watch_missed_count": len(watch_missed),
         "single_filter_near_miss_count": len(single_filter_near_misses),
         "obvious_blocked_count": len(obvious_blocked),
         "primary_fail_reason_counts": dict(sorted(fail_counts.items(), key=lambda x: -x[1])),
+        "watch_fail_reason_counts": dict(sorted(watch_fail_counts.items(), key=lambda x: -x[1])),
         "single_filter_fail_counts": dict(sorted(single_fail_counts.items(), key=lambda x: -x[1])),
         "missed_opportunities": missed,
+        "watch_missed_opportunities": watch_missed,
         "single_filter_near_misses": single_filter_near_misses,
         "obvious_blocked": obvious_blocked,
     }
@@ -420,8 +365,10 @@ def analyze_missed_breakouts(
     """Cohort missed-breakout analysis across a fetched universe."""
     per_stock: dict[str, Any] = {}
     cohort_primary: dict[str, int] = defaultdict(int)
+    cohort_watch: dict[str, int] = defaultdict(int)
     cohort_single: dict[str, int] = defaultdict(int)
     total_missed = 0
+    total_watch = 0
     total_single = 0
     total_obvious = 0
 
@@ -431,10 +378,13 @@ def analyze_missed_breakouts(
         )
         per_stock[sym] = stock_report
         total_missed += stock_report["missed_count"]
+        total_watch += stock_report.get("watch_missed_count", 0)
         total_single += stock_report["single_filter_near_miss_count"]
         total_obvious += stock_report["obvious_blocked_count"]
         for reason, cnt in (stock_report.get("primary_fail_reason_counts") or {}).items():
             cohort_primary[reason] += cnt
+        for reason, cnt in (stock_report.get("watch_fail_reason_counts") or {}).items():
+            cohort_watch[reason] += cnt
         for reason, cnt in (stock_report.get("single_filter_fail_counts") or {}).items():
             cohort_single[reason] += cnt
 
@@ -443,9 +393,11 @@ def analyze_missed_breakouts(
         "min_forward_return_pct": min_return_pct,
         "stocks_analyzed": len(per_stock),
         "total_missed_opportunities": total_missed,
+        "total_watch_missed_opportunities": total_watch,
         "total_single_filter_near_misses": total_single,
         "total_obvious_blocked": total_obvious,
         "cohort_primary_fail_counts": dict(sorted(cohort_primary.items(), key=lambda x: -x[1])),
+        "cohort_watch_fail_counts": dict(sorted(cohort_watch.items(), key=lambda x: -x[1])),
         "cohort_single_filter_fail_counts": dict(sorted(cohort_single.items(), key=lambda x: -x[1])),
         "per_stock": per_stock,
     }
@@ -463,7 +415,8 @@ def build_missed_breakouts_markdown(analysis: dict[str, Any]) -> str:
         "",
         f"| Metric | Count |",
         f"| :--- | ---: |",
-        f"| Total missed opportunities | {analysis.get('total_missed_opportunities', 0)} |",
+        f"| Total missed opportunities (FAIL) | {analysis.get('total_missed_opportunities', 0)} |",
+        f"| WATCH-tier missed (v7 demoted) | {analysis.get('total_watch_missed_opportunities', 0)} |",
         f"| Single-filter near misses | {analysis.get('total_single_filter_near_misses', 0)} |",
         f"| Obvious breakouts blocked (+10% day, vol OK) | {analysis.get('total_obvious_blocked', 0)} |",
         "",
@@ -472,6 +425,11 @@ def build_missed_breakouts_markdown(analysis: dict[str, Any]) -> str:
     ]
     for reason, cnt in (analysis.get("cohort_primary_fail_counts") or {}).items():
         lines.append(f"- **{reason}**: {cnt}")
+    watch_cohort = analysis.get("cohort_watch_fail_counts") or {}
+    if watch_cohort:
+        lines.extend(["", "### WATCH bucket (v7 demotion reasons)", ""])
+        for reason, cnt in watch_cohort.items():
+            lines.append(f"- **{reason}**: {cnt}")
     lines.extend(["", "### Single-filter near misses (would pass if one rule removed)", ""])
     for reason, cnt in (analysis.get("cohort_single_filter_fail_counts") or {}).items():
         lines.append(f"- **{reason}**: {cnt}")
@@ -482,12 +440,16 @@ def build_missed_breakouts_markdown(analysis: dict[str, Any]) -> str:
         lines.append(f"### {sym} ({stock.get('tier_label', 'n/a')})")
         lines.append(
             f"- Missed: {stock.get('missed_count', 0)} | "
+            f"WATCH missed: {stock.get('watch_missed_count', 0)} | "
             f"Single-filter near misses: {stock.get('single_filter_near_miss_count', 0)} | "
             f"Obvious blocked: {stock.get('obvious_blocked_count', 0)}"
         )
         prim = stock.get("primary_fail_reason_counts") or {}
         if prim:
             lines.append(f"- Primary blocks: {', '.join(f'{k}={v}' for k, v in prim.items())}")
+        watch_prim = stock.get("watch_fail_reason_counts") or {}
+        if watch_prim:
+            lines.append(f"- WATCH demotions: {', '.join(f'{k}={v}' for k, v in watch_prim.items())}")
         singles = stock.get("single_filter_near_misses") or []
         if singles:
             lines.append("- **Near misses (1 filter only)**:")
@@ -514,11 +476,13 @@ def build_missed_breakouts_markdown(analysis: dict[str, Any]) -> str:
         "",
         "## Methodology",
         "",
-        "Replays production filters point-in-time on cached Yahoo 6m bars. "
+        "Replays production filters point-in-time on cached Yahoo 6m bars (with "
+        "``last_pass_idx`` cooldown and bhav turnover when available). "
         "A missed opportunity is a day that failed filters but achieved "
         f"+{analysis.get('min_forward_return_pct')}% or more within "
         f"T+{analysis.get('forward_horizon_sessions')} sessions (close-to-close max). "
         "Primary fail reason follows production sequential filter order. "
+        "WATCH bucket tracks v7 demotions (low persistence, stage 3). "
         "Single-filter near miss = exactly one filter fails when all are checked independently.",
         "",
         "*Analysis only; production thresholds unchanged.*",

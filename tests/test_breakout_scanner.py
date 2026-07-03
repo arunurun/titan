@@ -1313,3 +1313,87 @@ def test_power_gap_stays_pass_with_low_cum_return(monkeypatch):
     assert result["passed"] is True
     assert result["signal_tier"] == "PASS"
     assert "power_gap" in result["pass_paths"]
+
+
+def test_evaluate_bars_as_of_micro_participation_fail(monkeypatch):
+    from breakout_scanner import evaluate_bars_as_of
+
+    n = 80
+    close = _uptrend_closes(n, start=50.0, step=0.25)
+    close[-2] = close[-3]
+    close[-1] = close[-2] * 1.05
+    volume = [80000.0] * (n - 1) + [400000.0]
+
+    monkeypatch.setattr("breakout_scanner.calculate_rsi", lambda prices, period=14: [60.0] * len(prices))
+    monkeypatch.setattr("breakout_scanner.calculate_adx", _flat_adx_mock(28.0))
+    monkeypatch.setattr(
+        "breakout_scanner.pre_signal_validation",
+        lambda df, idx: (True, None, {"full_window": True, "cum_return_t10_t1": 5.0}),
+    )
+    monkeypatch.setattr(
+        "breakout_scanner._adx_trajectory_gate",
+        lambda *a, **k: (True, None, {"adx_trajectory_required": True}),
+    )
+    monkeypatch.setattr(
+        "breakout_scanner.compute_evidence_metrics",
+        lambda *a, **k: {
+            "liquidity_gate_pass": True,
+            "liquidity_gate_fail": None,
+            "liquidity_quality": 70.0,
+            "median_turnover_inr": 50_000_000.0,
+            "persistence_score": 4,
+            "persistence_pass_min": 2,
+            "breakout_stage": 1,
+            "base_score": 65.0,
+            "micro_participation_pass": False,
+            "delivery_pct": 20.0,
+            "vpr": 1.0,
+            "cmf": -0.1,
+        },
+    )
+
+    result = evaluate_bars_as_of(
+        _synthetic_df(close, volume),
+        n - 1,
+        "MICRO_CAP_250",
+        delivery_pct=20.0,
+    )
+    assert result["passed"] is False
+    assert result["fail_reason"] == "pre_filter_micro_participation"
+
+
+def test_evaluate_bars_as_of_sector_lead_affects_composite_rank(monkeypatch):
+    from breakout_scanner import evaluate_bars_as_of
+
+    n = 80
+    close = _uptrend_closes(n, start=50.0, step=0.25)
+    close[-2] = close[-3]
+    close[-1] = close[-2] * 1.05
+    volume = [80000.0] * (n - 1) + [400000.0]
+
+    monkeypatch.setattr("breakout_scanner.calculate_rsi", lambda prices, period=14: [60.0] * len(prices))
+    monkeypatch.setattr("breakout_scanner.calculate_adx", _flat_adx_mock(28.0))
+    monkeypatch.setattr(
+        "breakout_scanner.pre_signal_validation",
+        lambda df, idx: (True, None, {"full_window": True, "cum_return_t10_t1": 5.0}),
+    )
+    monkeypatch.setattr(
+        "breakout_scanner.compute_evidence_metrics",
+        lambda *a, **k: {
+            "liquidity_gate_pass": True,
+            "liquidity_gate_fail": None,
+            "liquidity_quality": 70.0,
+            "median_turnover_inr": 50_000_000.0,
+            "persistence_score": 4,
+            "persistence_pass_min": 1,
+            "breakout_stage": 1,
+            "base_score": 65.0,
+            "micro_participation_pass": True,
+        },
+    )
+
+    base = evaluate_bars_as_of(_synthetic_df(close, volume), n - 1, "SMALL_CAP_100")
+    boosted = evaluate_bars_as_of(
+        _synthetic_df(close, volume), n - 1, "SMALL_CAP_100", sector_lead=90.0,
+    )
+    assert boosted.get("composite_rank", 0) >= base.get("composite_rank", 0)
