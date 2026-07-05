@@ -606,6 +606,16 @@ def _news_driver_limit() -> int:
         return _NEWS_DRIVER_LIMIT_DEFAULT
 
 
+def _stock_news_coverage_top_n() -> int:
+    raw = (str(os.environ.get("TITAN_STOCK_NEWS_COVERAGE_TOP_N", "")) or "").strip()
+    if not raw:
+        return 5
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 5
+
+
 def _configured_news_feeds() -> list[str]:
     raw = (str(os.environ.get("TITAN_NEWS_FEEDS", "")) or "").strip()
     if not raw:
@@ -904,7 +914,13 @@ def _stock_news_summary_identity_match(*, symbol: str, aliases: list[str], summa
     return False
 
 
-def _stock_news_relevance_score(*, symbol: str, aliases: list[str], item: dict[str, Any]) -> float:
+def _stock_news_relevance_score(
+    *,
+    symbol: str,
+    aliases: list[str],
+    item: dict[str, Any],
+    sector_key: str = "",
+) -> float:
     source = str(item.get("source") or "").strip().lower()
     if source in _STOCK_NEWS_NSE_SOURCES:
         return 1.0
@@ -929,6 +945,11 @@ def _stock_news_relevance_score(*, symbol: str, aliases: list[str], item: dict[s
         score -= 0.20
     else:
         return 0.0
+    sector = str(sector_key or "").strip().lower()
+    if sector:
+        theme_weight = _theme_hits_for_sector(text, sector)
+        if theme_weight > 0.0:
+            score += min(0.10, theme_weight * 0.05)
     url = str(item.get("url") or "").lower()
     source_blob = f"{source} {url}"
     if any(fragment in source_blob for fragment in _stock_news_quality_source_fragments()):
@@ -945,6 +966,7 @@ def _filter_stock_news_items(
     symbol: str,
     aliases: list[str],
     items: list[dict[str, Any]],
+    sector_key: str = "",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     min_relevance = _stock_news_min_relevance()
     kept: list[dict[str, Any]] = []
@@ -968,7 +990,12 @@ def _filter_stock_news_items(
                 if not _stock_news_summary_identity_match(symbol=symbol, aliases=aliases, summary=summary):
                     rejected.append({"title": title[:120], "reason": "identity_mismatch"})
                     continue
-        relevance = _stock_news_relevance_score(symbol=symbol, aliases=aliases, item=item)
+        relevance = _stock_news_relevance_score(
+            symbol=symbol,
+            aliases=aliases,
+            item=item,
+            sector_key=sector_key,
+        )
         top_relevance = max(top_relevance, relevance)
         if relevance < min_relevance:
             rejected.append({"title": title[:120], "reason": f"low_relevance:{relevance:.2f}"})
@@ -1476,6 +1503,161 @@ def fetch_stock_news_for_symbol(
     }
 
 
+def _news_feed_rows_to_correlator_items(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Map news_feed rows to the item shape expected by correlate_stock_news_with_macro."""
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        title = str(row.get("title") or "").strip()
+        if not title:
+            continue
+        items.append(
+            {
+                "title": title,
+                "summary": str(row.get("summary") or "").strip(),
+                "source": str(row.get("source") or "news_feed").strip() or "news_feed",
+                "url": str(row.get("url") or "").strip(),
+                "published_at": str(row.get("published_at") or "").strip(),
+            }
+        )
+    return items
+
+
+def resolve_stock_news_for_symbol(
+    cfg: TitanConfig,
+    *,
+    symbol: str,
+    exchange: str,
+    allow_live_fetch: bool,
+) -> dict[str, Any]:
+    """Prefer cached news_feed rows; fall back to live fetch when allowed."""
+    sym = str(symbol).strip().upper()
+    ex = str(exchange).strip().upper()
+    aliases = _instrument_alias_candidates(cfg, symbol=sym, exchange=ex)
+    try:
+        from news_store import get_recent_news_for_symbol
+    except ImportError as exc:
+        logger.warning("news_store unavailable for %s (%s): %s", sym, ex, exc)
+        get_recent_news_for_symbol = None  # type: ignore[misc, assignment]
+
+    if get_recent_news_for_symbol is not None:
+        try:
+            lookback_hours = int(os.environ.get("TITAN_NEWS_MAX_AGE_HOURS", 36))
+            fetch_limit = int(os.environ.get("TITAN_NEWS_FETCH_LIMIT", 40))
+            cached_rows = get_recent_news_for_symbol(
+                cfg,
+                sym,
+                ex,
+                lookback_hours=lookback_hours,
+                limit=fetch_limit,
+            )
+            cached_items = _news_feed_rows_to_correlator_items(cached_rows)
+            if cached_items:
+                return {
+                    "symbol": sym,
+                    "exchange": ex,
+                    "items": cached_items,
+                    "aliases": aliases,
+                    "query_used": "",
+                    "alias_used": "",
+                    "fallback_used": False,
+                    "error": "",
+                    "data_source": "news_feed_cache",
+                }
+        except Exception as exc:
+            logger.warning("Cached news read failed for %s (%s): %s", sym, ex, exc)
+
+    if not allow_live_fetch:
+        return {
+            "symbol": sym,
+            "exchange": ex,
+            "items": [],
+            "aliases": aliases,
+            "query_used": "",
+            "alias_used": "",
+            "fallback_used": False,
+            "error": "cache_empty_live_skipped",
+            "data_source": "none",
+        }
+
+    try:
+        live = fetch_stock_news_for_symbol(cfg, symbol=sym, exchange=ex)
+        if isinstance(live, dict):
+            live_aliases = live.get("aliases")
+            if not isinstance(live_aliases, list):
+                live = {**live, "aliases": aliases}
+            return {**live, "data_source": "google_rss_live"}
+    except Exception as exc:
+        return {
+            "symbol": sym,
+            "exchange": ex,
+            "items": [],
+            "aliases": aliases,
+            "query_used": "",
+            "alias_used": "",
+            "fallback_used": False,
+            "error": f"unexpected:{exc}",
+            "data_source": "none",
+        }
+    return {
+        "symbol": sym,
+        "exchange": ex,
+        "items": [],
+        "aliases": aliases,
+        "query_used": "",
+        "alias_used": "",
+        "fallback_used": False,
+        "error": "unavailable",
+        "data_source": "none",
+    }
+
+
+def resolve_stock_news_batch(
+    cfg: TitanConfig,
+    *,
+    pairs: list[tuple[str, str]],
+    allow_live_fetch_for: set[tuple[str, str]] | None = None,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    allow = allow_live_fetch_for or set()
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for symbol, exchange in pairs:
+        sym = str(symbol).strip().upper()
+        ex = str(exchange).strip().upper()
+        if not sym or ex not in ("NSE", "BSE"):
+            continue
+        out[(sym, ex)] = resolve_stock_news_for_symbol(
+            cfg,
+            symbol=sym,
+            exchange=ex,
+            allow_live_fetch=(sym, ex) in allow,
+        )
+    return out
+
+
+def _stock_news_coverage_status(
+    *,
+    pair: tuple[str, str],
+    stock_news_meta: dict[str, Any],
+    resolved_keys: set[tuple[str, str]],
+) -> str:
+    stock_news_items = stock_news_meta.get("items")
+    stock_news_items = stock_news_items if isinstance(stock_news_items, list) else []
+    stock_fetch_error = str(stock_news_meta.get("error") or "").strip()
+    data_source = str(stock_news_meta.get("data_source") or "").strip()
+    if pair not in resolved_keys:
+        return "not_covered"
+    if stock_news_items:
+        return "cached" if data_source == "news_feed_cache" else "fetched"
+    if stock_fetch_error == "cache_empty_live_skipped":
+        return "empty:cache_miss_live_skipped"
+    if stock_fetch_error == "helper_unavailable":
+        return "helper_unavailable"
+    if stock_fetch_error:
+        return f"empty:{stock_fetch_error}"
+    return "empty:unknown"
+
+
 def _news_sentiment_score(text: str, *, stock_path: bool = False) -> float:
     t = _normalize_news_text(text)
     if not t:
@@ -1696,10 +1878,12 @@ def correlate_stock_news_with_macro(
     aliases: list[str] | None = None,
 ) -> dict[str, Any]:
     alias_list = aliases if isinstance(aliases, list) else []
+    sector = str(sector_key or "").strip().lower()
     filtered_items, filter_meta = _filter_stock_news_items(
         symbol=symbol,
         aliases=alias_list,
         items=stock_news_items,
+        sector_key=sector,
     )
     stock_rows: list[dict[str, Any]] = []
     stock_contribution = 0.0
@@ -1715,7 +1899,12 @@ def correlate_stock_news_with_macro(
         text = _normalize_news_text(f"{title} {summary}")
         relevance = _safe_float(item.get("relevance_score"))
         if math.isnan(relevance):
-            relevance = _stock_news_relevance_score(symbol=symbol, aliases=alias_list, item=item)
+            relevance = _stock_news_relevance_score(
+                symbol=symbol,
+                aliases=alias_list,
+                item=item,
+                sector_key=sector,
+            )
         if relevance < min_relevance:
             continue
         sentiment = _news_sentiment_score(text, stock_path=True)
@@ -1741,7 +1930,6 @@ def correlate_stock_news_with_macro(
     stock_score = 0.0 if stock_weight <= 0.0 else stock_contribution / stock_weight
     scores = snapshot.get("sector_scores")
     score_map = scores if isinstance(scores, dict) else {}
-    sector = str(sector_key or "").strip().lower()
     sector_row = score_map.get(sector) if isinstance(score_map.get(sector), dict) else {}
     macro_score = _safe_float(sector_row.get("score"))
     if math.isnan(macro_score):
@@ -3612,7 +3800,22 @@ def build_sector_rankings(
     sector_news_score = _safe_float(sector_news.get("score"))
     if math.isnan(sector_news_score):
         sector_news_score = 0.0
-    blend_points = _news_blend_points(sector_news_score)
+    sector_key_norm = sector_key.strip().lower()
+    sector_blend_points = _news_blend_points(sector_news_score)
+    coverage_pairs = sorted(
+        {
+            (str(inst.symbol).strip().upper(), str(inst.exchange).strip().upper())
+            for inst in instruments
+            if str(inst.symbol).strip() and str(inst.exchange).strip().upper() in ("NSE", "BSE")
+        }
+    )
+    live_fetch_pairs = set(coverage_pairs[: _stock_news_coverage_top_n()])
+    stock_news_by_symbol = resolve_stock_news_batch(
+        cfg,
+        pairs=coverage_pairs,
+        allow_live_fetch_for=live_fetch_pairs,
+    )
+    resolved_stock_pairs = set(stock_news_by_symbol.keys())
     # Shadow-mode gates context (read-only; NaN-safe). Regime is per-sector; the EOD /
     # v2-risk gates are per-symbol and resolved inside the loop.
     gate_client = create_client(cfg.supabase_url, cfg.supabase_key)
@@ -3777,7 +3980,33 @@ def build_sector_rankings(
             sector_pctile_intent=_safe_float(p.get("percentile_intent")),
             sector_pctile_next_week=_safe_float(p.get("percentile_next_week")),
         )
-        pre_gate_score = round(base_score + blend_points, 4)
+        exchange_u = str(inst.exchange).strip().upper()
+        stock_pair = (symbol_u, exchange_u)
+        stock_news_meta = stock_news_by_symbol.get(stock_pair, {})
+        stock_items = stock_news_meta.get("items") if isinstance(stock_news_meta.get("items"), list) else []
+        stock_aliases = stock_news_meta.get("aliases")
+        if not isinstance(stock_aliases, list):
+            stock_aliases = _instrument_alias_candidates(cfg, symbol=symbol_u, exchange=inst.exchange)
+        stock_corr = correlate_stock_news_with_macro(
+            symbol=symbol_u,
+            sector_key=sector_key_norm,
+            stock_news_items=stock_items,
+            snapshot=snapshot,
+            aliases=stock_aliases,
+        )
+        stock_news_score = _safe_float(stock_corr.get("stock_news_score"))
+        if math.isnan(stock_news_score):
+            stock_news_score = 0.0
+        net_news_score = _safe_float(stock_corr.get("net_score"))
+        if math.isnan(net_news_score):
+            net_news_score = sector_news_score
+        row_blend_points = _news_blend_points(net_news_score)
+        stock_coverage = _stock_news_coverage_status(
+            pair=stock_pair,
+            stock_news_meta=stock_news_meta if isinstance(stock_news_meta, dict) else {},
+            resolved_keys=resolved_stock_pairs,
+        )
+        pre_gate_score = round(base_score + row_blend_points, 4)
         v2_signal = _resolve_v2_signal(symbol_u, eod_ctx)
         v2_rank = _v2_rank_adjustment(
             v2_signal,
@@ -3809,13 +4038,26 @@ def build_sector_rankings(
             "snapshot_refresh_error": snapshot.get("refresh_error"),
             "matched_items": int(sector_news.get("matched_items") or 0),
             "sector_news_score": round(sector_news_score, 4),
-            "blend_points": blend_points,
+            "stock_news_score": round(stock_news_score, 4),
+            "net_news_score": round(net_news_score, 4),
+            "sector_blend_points": sector_blend_points,
+            "blend_points": row_blend_points,
             "blend_weight": _news_blend_weight(),
             "blend_cap": _news_blend_cap(),
             "confidence": round(_safe_float(sector_news.get("confidence")), 4),
             "drivers_boosting": sector_news.get("drivers_boosting") or [],
             "drivers_dragging": sector_news.get("drivers_dragging") or [],
             "drivers_top": sector_news.get("drivers_top") or [],
+            "stock_news_fetched_count": len(stock_items),
+            "stock_news_coverage": stock_coverage,
+            "stock_news_driver": str(stock_corr.get("driver") or "").strip(),
+            "stock_news_direction": str(stock_corr.get("direction") or "neutral"),
+            "stock_news_fallback_label": str(stock_corr.get("fallback_label") or "").strip(),
+            "stock_news_top_headlines": (
+                (stock_corr.get("evidence") or {}).get("top_headlines", {}).get("stock")
+                if isinstance(stock_corr.get("evidence"), dict)
+                else []
+            ),
         }
         if not global_news:
             news_meta["reason"] = "news_unavailable"

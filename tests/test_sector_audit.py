@@ -378,7 +378,7 @@ def test_apply_global_news_correlation_macro_snapshot_survives_missing_stock_hel
         },
     }
     monkeypatch.setattr("sector_priority.resolve_global_news_snapshot", lambda _cfg: snapshot)
-    monkeypatch.delattr("sector_priority.fetch_stock_news_for_symbol", raising=False)
+    monkeypatch.delattr("sector_priority.resolve_stock_news_for_symbol", raising=False)
     monkeypatch.delattr("sector_priority.correlate_stock_news_with_macro", raising=False)
     ok_results = [
         {
@@ -925,7 +925,7 @@ def test_apply_global_news_correlation_missing_helpers_shows_reason_in_evidence(
         },
     }
     monkeypatch.setattr("sector_priority.resolve_global_news_snapshot", lambda _cfg: snapshot)
-    monkeypatch.delattr("sector_priority.fetch_stock_news_for_symbol", raising=False)
+    monkeypatch.delattr("sector_priority.resolve_stock_news_for_symbol", raising=False)
     monkeypatch.delattr("sector_priority.correlate_stock_news_with_macro", raising=False)
     ok_results = [
         {
