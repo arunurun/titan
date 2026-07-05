@@ -1107,7 +1107,7 @@ def test_apply_global_news_correlation_live_fetches_all_symbols_by_default(monke
         {"symbol": "HAL", "exchange": "NSE", "audit": {"symbol": "HAL", "exchange": "NSE"}},
     ]
     _apply_global_news_correlation(make_cfg(), sector_id="defence", ok_results=ok_results)
-    assert live_calls == ["BEL", "HAL"]
+    assert sorted(live_calls) == ["BEL", "HAL"]
 
 
 def test_build_equity_live_audit_records_exchange_fallback_metadata(monkeypatch):
