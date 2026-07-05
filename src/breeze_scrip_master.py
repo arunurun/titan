@@ -23,6 +23,8 @@ _STATIC_NSE_ALIASES: dict[str, str] | None = None
 # Daily file; cache on disk to avoid downloading every symbol.
 SCRIP_CSV_URL = "https://traderweb.icicidirect.com/Content/File/txtFile/ScripFile/StockScriptNew.csv"
 CACHE_MAX_AGE_SEC = 86_400
+_DOWNLOAD_MAX_ATTEMPTS = 3
+_DOWNLOAD_RETRY_BASE_SEC = 2.0
 _CACHE_LOCK = threading.Lock()
 _MEMO: dict[tuple[str, str], str] | None = None
 _CACHE_LOADED_AT: float = 0.0
@@ -65,12 +67,39 @@ def _load_static_nse_aliases() -> dict[str, str]:
     return aliases
 
 
-def _load_cache_bytes(path: Path) -> bytes | None:
+def _load_cache_bytes(path: Path, *, max_age_sec: float | None = CACHE_MAX_AGE_SEC) -> bytes | None:
     if not path.is_file():
         return None
-    if time.time() - path.stat().st_mtime > CACHE_MAX_AGE_SEC:
+    if max_age_sec is not None and time.time() - path.stat().st_mtime > max_age_sec:
         return None
     return path.read_bytes()
+
+
+def _download_scrip_csv_bytes() -> bytes:
+    req = urllib.request.Request(
+        SCRIP_CSV_URL,
+        headers={"User-Agent": "Titan/1.0 (breeze_scrip_master)"},
+    )
+    last_err: Exception | None = None
+    for attempt in range(1, _DOWNLOAD_MAX_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                return resp.read()
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            last_err = exc
+            if attempt >= _DOWNLOAD_MAX_ATTEMPTS:
+                break
+            delay = _DOWNLOAD_RETRY_BASE_SEC * (2 ** (attempt - 1))
+            logger.info(
+                "Scrip master download attempt %s/%s failed (%s); retrying in %.1fs",
+                attempt,
+                _DOWNLOAD_MAX_ATTEMPTS,
+                exc,
+                delay,
+            )
+            time.sleep(delay)
+    assert last_err is not None
+    raise last_err
 
 
 def _fetch_scrip_csv(cache_path: Path) -> str:
@@ -78,12 +107,19 @@ def _fetch_scrip_csv(cache_path: Path) -> str:
     if cached is not None:
         return cached.decode("utf-8", errors="replace")
     logger.info("Downloading Breeze scrip master from ICICI (StockScriptNew.csv)...")
-    req = urllib.request.Request(
-        SCRIP_CSV_URL,
-        headers={"User-Agent": "Titan/1.0 (breeze_scrip_master)"},
-    )
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        data = resp.read()
+    try:
+        data = _download_scrip_csv_bytes()
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        stale = _load_cache_bytes(cache_path, max_age_sec=None)
+        if stale is not None:
+            age_hours = (time.time() - cache_path.stat().st_mtime) / 3600.0
+            logger.warning(
+                "Could not refresh scrip master: %s — using stale cached copy (age=%.1fh).",
+                exc,
+                age_hours,
+            )
+            return stale.decode("utf-8", errors="replace")
+        raise
     cache_path.write_bytes(data)
     return data.decode("utf-8", errors="replace")
 

@@ -44,6 +44,17 @@ jobs:
           echo "BREEZE_SESSION_TOKEN_SOURCE=${BREEZE_SESSION_TOKEN_SOURCE:-unknown}"
           echo "BREEZE_SESSION_TOKEN_FINGERPRINT=${BREEZE_SESSION_TOKEN_FINGERPRINT:-unavailable}"
 
+      # One download before 28 sector subprocesses; retries live in breeze_scrip_master.
+      - name: Warm Breeze scrip master cache
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, "src")
+          from breeze_scrip_master import resolve_breeze_stock_code
+          code = resolve_breeze_stock_code("RELIANCE", "NSE")
+          print(f"scrip_master_warmup ok code={code}")
+          PY
+
       - name: Refresh all sector rankings
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
