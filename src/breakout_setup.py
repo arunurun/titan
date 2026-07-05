@@ -70,6 +70,20 @@ def _vol_mult_max(tier_name: str) -> float:
     return SETUP_VOL_MULT_MAX_SMALL
 
 
+def setup_trigger_hit(
+    df: dict[str, Any],
+    as_of_idx: int,
+    trigger_price: float | None,
+) -> bool:
+    """EOD trigger: Close[T] or High[T] reaches setup pivot (gap-up inclusive)."""
+    if trigger_price is None or not _is_finite(trigger_price):
+        return True
+    trigger = float(trigger_price)
+    close_t = float(df["close"][as_of_idx])
+    high_t = float(df["high"][as_of_idx])
+    return close_t >= trigger or high_t >= trigger
+
+
 def _setup_trigger_price(inputs: dict[str, Any], df: dict[str, Any], as_of_idx: int) -> float | None:
     highs = df["high"]
     t = as_of_idx
@@ -183,7 +197,10 @@ def evaluate_setup_as_of(
     inputs = compute_evidence_inputs(df, as_of_idx, bhav_turnover_lacs=bhav_turnover_lacs)
 
     median_inr = evidence.get("median_turnover_inr")
-    if not liquidity_gate_pass(tier_name, median_inr):
+    session_notional = latest_price * float(volume[-1]) if _is_finite(volume[-1]) else None
+    if not liquidity_gate_pass(
+        tier_name, median_inr, session_notional_inr=session_notional,
+    ):
         return None
 
     if evidence.get("breakout_stage") == 3:

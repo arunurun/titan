@@ -78,12 +78,12 @@ Filters run in sequence; first failure sets `fail_reason` and stops the primary 
 | 2 | Daily change | 3% ≤ `pct_change` ≤ 20% | `pct_change` |
 | 3 | SMA50 trend | `close[T] ≥ SMA50` **or** sma20_reclaim path | `SMA50` |
 | 4 | Volume | Standard, cum-3d, or micro continuation | `vol` |
-| 5 | RSI | 50–70 **or** rsi_hot path | `RSI` |
+| 5 | RSI | RSI ≥ 50 (no upper cap; stage 3 handles exhaustion) | `RSI` |
 | 6 | ADX | ≥ 25 **or** adx_soft path | `ADX` |
-| 7 | Target R:R | `(target − price) / price ≥ 8%` | `target_gain` |
-| 8 | Pre-signal validation | T−10 cum return ≤ 30%; ≤ 2 vol-spike days in T−15..T−1 | `pre_filter_cum_return`, `pre_filter_vol_spike` |
+| 7 | Target R:R | Stop = max(20d swing low, price − 2.5×ATR14); target = price + 2×risk; gain ≥ 8% | `target_gain` |
+| 8 | Pre-signal validation | T−10 cum return ≤ 30%; ≤ 4 vol-spike days in T−15..T−1 | `pre_filter_cum_return`, `pre_filter_vol_spike` |
 | 9 | ADX trajectory | Rising ADX T−1 vs T−10 (path-specific); standard allows vol ≥ 7× exception | `pre_filter_standard_adx_trajectory`, `pre_filter_adx_trajectory` |
-| 10 | Signal cooldown | No repeat PASS within 20 sessions unless consolidation exempt | `pre_filter_signal_cooldown` |
+| 10 | Signal cooldown | No repeat PASS within 10 sessions unless consolidation exempt | `pre_filter_signal_cooldown` |
 | 11 | ADX-soft chase | If `adx_soft`: T−10..T−1 cum return ≤ 20% | `pre_filter_adx_soft_chase` |
 | 12 | Power-gap / adx_soft tiering | May set WATCH (not fail) — see below | — |
 | 13 | Evidence: liquidity gate | Median turnover ≥ tier floor | `pre_filter_liquidity` |
@@ -100,18 +100,21 @@ Filters run in sequence; first failure sets `fail_reason` and stops the primary 
 | `ADX_HARD_FLOOR` | 25 |
 | `ADX_SOFT_FLOOR` | 20 |
 | `ADX_SOFT_VOL_BONUS` | +0.5× on tier vol thresh |
-| `RSI_MIN` / `RSI_MAX_NORMAL` / `RSI_MAX_HOT` | 50 / 70 / 75 |
-| `HOT_VOL_THRESHOLD` | 5.0× |
+| `RSI_MIN` | 50 |
+| `HOT_VOL_THRESHOLD` | 5.0× (power-gap vol recovery only) |
 | `SMA20_RECLAIM_VOL_THRESHOLD` | 5.0× |
 | `PRE_SIGNAL_CUM_RETURN_MAX` | 30% (T−10→T−1) |
 | `PRE_SIGNAL_VOL_SPIKE_MULT` | 2.0× 20d avg |
-| `PRE_SIGNAL_VOL_SPIKE_DAYS_MAX` | 2 days |
-| `PRE_SIGNAL_COOLDOWN_SESSIONS` | 20 |
+| `PRE_SIGNAL_VOL_SPIKE_DAYS_MAX` | 4 days |
+| `PRE_SIGNAL_COOLDOWN_SESSIONS` | 10 |
 | `PRE_SIGNAL_COOLDOWN_CONSOLIDATION_MAX` | 12% range |
 | `PRE_SIGNAL_COOLDOWN_DIST_20D_HIGH_MIN` | −3% from 20d high |
 | `POWER_GAP_CUM_RETURN_MAX` | 15% |
 | `POWER_GAP_VOL_RECOVERY_THRESHOLD` | 5.5× |
 | `STANDARD_ADX_TRAJECTORY_VOL_EXCEPTION` | 7.0× |
+| `UPPER_CIRCUIT_PCT_MIN` | 4.9% (close=high circuit lock → WATCH) |
+| `MARKET_REGIME_BENCHMARK` | `NIFTY_SMALLCAP_100.NS` |
+| `MARKET_REGIME_SMA_WINDOW` | 20 sessions |
 
 ---
 
@@ -125,7 +128,6 @@ Paths are recorded in `pass_paths` and echoed in `risk_flags`.
 | `vol_continuation_cum3d` | 3-session cumulative vol ≥ tier threshold |
 | `vol_continuation_prior_spike` | Micro-cap: prior spike + vol ≥ 2.5× |
 | `sma20_reclaim` | Below SMA50 but ≥ SMA20 with vol ≥ 5× |
-| `rsi_hot` | RSI 70–75 with vol > 5× |
 | `adx_soft` | ADX 20–25, vol ≥ tier+0.5, above SMA50, positive day |
 
 **Path-specific post-rules**
@@ -140,11 +142,11 @@ Paths are recorded in `pass_paths` and echoed in `risk_flags`.
 **Pre-signal window:** up to 15 sessions before T (`PRE_SIGNAL_FULL_LOOKBACK`).
 
 1. **Cum return cap:** close T−1 vs T−10 return > 30% → fail.
-2. **Vol spike count:** days in window with volume > 2× 20d avg; more than 2 → fail.
+2. **Vol spike count:** days in window with volume > 2× 20d avg; more than 4 → fail.
 
-**ADX trajectory** (standard, `adx_soft`, `rsi_hot` paths): ADX at T−1 must exceed ADX at T−10; `adx_soft` also requires ADX T−1 > ADX T−5. Standard path exempt when `vol_mult ≥ 7`.
+**ADX trajectory** (standard, `adx_soft` paths): ADX at T−1 must exceed ADX at T−10; `adx_soft` also requires ADX T−1 > ADX T−5. Standard path exempt when `vol_mult ≥ 7`.
 
-**Cooldown:** if the same symbol PASSed within the last 20 sessions, block unless T−10..T−1 consolidation range ≤ 12% **and** T−1 close within 3% of 20d high.
+**Cooldown:** if the same symbol PASSed within the last 10 sessions, block unless T−10..T−1 consolidation range ≤ 12% **and** T−1 close within 3% of 20d high.
 
 ---
 
@@ -188,7 +190,7 @@ Computed in `compute_evidence_metrics` after technical waterfall.
 
 ### Liquidity gate (hard fail)
 
-Median daily turnover INR (Yahoo 20d median notional, **overridden** by bhav avg lacs × 1,00,000 when present) must meet tier floor. Missing turnover **skips** the gate.
+Median daily turnover INR (Yahoo 20d median notional, **overridden** by bhav avg lacs × 1,00,000 when present) must meet tier floor. When median is missing, falls back to session Volume(T)×Close(T). Both missing → `missing_liquidity_data` (fail-closed).
 
 ### Liquidity quality (0–100, scoring only)
 
@@ -255,7 +257,7 @@ Computed on signal day T from Yahoo close:
 
 | Field | Formula |
 |-------|---------|
-| Stop-loss | `min(SMA50, POC) × 0.98` |
+| Stop-loss | `max(min(low T−20..T−1), price − 2.5×ATR14)` |
 | Target | `price + 2 × (price − stop)` (1:2 R:R) |
 | Entry low | `price × 0.985` |
 | Entry high | `price × 1.01` |

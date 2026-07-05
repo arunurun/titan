@@ -175,7 +175,7 @@ def _sample_candidate_row(*, signal_tier: str = "PASS") -> dict:
         "Breakout Stage": 1,
         "Base Score": 65.0,
         "Composite Rank": 58.3,
-        "Pass Paths": "rsi_hot",
+        "Pass Paths": "power_gap",
         "Watch Reason": "v7_low_volume_persistence" if signal_tier == "WATCH" else "",
         "Payload": "payload text",
     }
@@ -697,7 +697,7 @@ def test_adx_soft_band_pass_path(monkeypatch):
     assert "1% sizing" in result["risk_flags"]
 
 
-def test_rsi_hot_pass_path(monkeypatch):
+def test_high_rsi_passes_without_ceiling(monkeypatch):
     import breakout_scanner
     from breakout_scanner import evaluate_bars_as_of
 
@@ -707,11 +707,15 @@ def test_rsi_hot_pass_path(monkeypatch):
     volume = [40000.0] * (n - 1) + [350000.0]
 
     monkeypatch.setattr("breakout_scanner.calculate_rsi", lambda prices, period=14: [72.0] * len(prices))
-    monkeypatch.setattr("breakout_scanner.calculate_adx", _rising_adx_soft)
+    monkeypatch.setattr("breakout_scanner.calculate_adx", _rising_adx_mock(26.0, 0.15))
+    monkeypatch.setattr(
+        "breakout_scanner._atr_simple",
+        lambda high, low, close, period=14: [2.5] * len(close),
+    )
 
     result = evaluate_bars_as_of(_synthetic_df(close, volume), n - 1, "SMALL_CAP_100")
     assert result["passed"] is True
-    assert "rsi_hot" in result["pass_paths"]
+    assert "rsi_hot" not in result["pass_paths"]
 
 
 def test_sma20_reclaim_pass_path(monkeypatch):
@@ -776,15 +780,15 @@ def test_pre_signal_validation_vol_spike_skip():
     n = 70
     close = [100.0] * n
     volume = [50000.0] * n
-    # Three spike days in T-15..T-1 window
-    for idx in (n - 14, n - 10, n - 6):
+    # Five spike days in T-15..T-1 window (max allowed is 4)
+    for idx in (n - 14, n - 12, n - 10, n - 8, n - 6):
         volume[idx] = 250000.0
     df = _synthetic_df(close, volume)
 
     ok, reason, metrics = pre_signal_validation(df, n - 1)
     assert ok is False
     assert reason == "pre_filter_vol_spike"
-    assert metrics["vol_spike_days_t15_t1"] == 3
+    assert metrics["vol_spike_days_t15_t1"] == 5
 
 
 def test_pre_signal_validation_happy_path():
@@ -799,7 +803,7 @@ def test_pre_signal_validation_happy_path():
     assert ok is True
     assert reason is None
     assert metrics["full_window"] is True
-    assert metrics["vol_spike_days_t15_t1"] <= 2
+    assert metrics["vol_spike_days_t15_t1"] <= 4
 
 
 def test_evaluate_bars_as_of_pre_filter_blocks_after_breakout_pass(monkeypatch):
@@ -849,7 +853,7 @@ def test_adx_trajectory_gate_blocks_flat_adx_on_adx_soft(monkeypatch):
     assert "adx_soft" in result["pass_paths"] or result.get("adx_val", 0) < 25
 
 
-def test_adx_trajectory_gate_blocks_flat_adx_on_rsi_hot(monkeypatch):
+def test_adx_trajectory_gate_blocks_flat_adx_on_high_rsi(monkeypatch):
     import breakout_scanner
     from breakout_scanner import evaluate_bars_as_of
 
@@ -867,8 +871,8 @@ def test_adx_trajectory_gate_blocks_flat_adx_on_rsi_hot(monkeypatch):
 
     result = evaluate_bars_as_of(_synthetic_df(close, volume), n - 1, "SMALL_CAP_100")
     assert result["passed"] is False
-    assert result["fail_reason"] == "pre_filter_adx_trajectory"
-    assert "rsi_hot" in result["pass_paths"]
+    assert result["fail_reason"] in ("pre_filter_adx_trajectory", "pre_filter_standard_adx_trajectory")
+    assert "rsi_hot" not in result["pass_paths"]
 
 
 def test_signal_cooldown_gate_blocks_extended_repeat():
@@ -943,6 +947,10 @@ def test_signal_cooldown_exempt_on_tight_consolidation_near_high(monkeypatch):
     monkeypatch.setattr(
         "breakout_scanner.pre_signal_validation",
         lambda df, idx: (True, None, {"full_window": True}),
+    )
+    monkeypatch.setattr(
+        "breakout_scanner._atr_simple",
+        lambda high, low, close, period=14: [2.5] * len(close),
     )
 
     prior_idx = n - 11
@@ -1280,7 +1288,7 @@ def test_adx_soft_solo_downgrades_to_watch(monkeypatch):
     assert result.get("adx_soft_solo_watch") is True
 
 
-def test_adx_soft_with_rsi_hot_stays_pass(monkeypatch):
+def test_adx_soft_with_high_rsi_solo_downgrades_to_watch(monkeypatch):
     import breakout_scanner
     from breakout_scanner import evaluate_bars_as_of
 
@@ -1302,10 +1310,10 @@ def test_adx_soft_with_rsi_hot_stays_pass(monkeypatch):
     )
 
     result = evaluate_bars_as_of(_synthetic_df(close, volume), n - 1, "SMALL_CAP_100")
-    assert result["passed"] is True
-    assert result["signal_tier"] == "PASS"
+    assert result["passed"] is False
+    assert result["signal_tier"] == "WATCH"
     assert "adx_soft" in result["pass_paths"]
-    assert "rsi_hot" in result["pass_paths"]
+    assert "rsi_hot" not in result["pass_paths"]
 
 
 def test_power_gap_vol_recovery_passes_at_5_5x(monkeypatch):
@@ -1437,3 +1445,240 @@ def test_evaluate_bars_as_of_sector_lead_affects_composite_rank(monkeypatch):
         _synthetic_df(close, volume), n - 1, "SMALL_CAP_100", sector_lead=90.0,
     )
     assert boosted.get("composite_rank", 0) >= base.get("composite_rank", 0)
+
+
+def _passing_eval_mocks(monkeypatch):
+    monkeypatch.setattr("breakout_scanner.calculate_rsi", lambda prices, period=14: [60.0] * len(prices))
+    monkeypatch.setattr("breakout_scanner.calculate_adx", _flat_adx_mock(28.0))
+    monkeypatch.setattr(
+        "breakout_scanner.pre_signal_validation",
+        lambda df, idx: (True, None, {"full_window": True, "cum_return_t10_t1": 5.0}),
+    )
+    monkeypatch.setattr(
+        "breakout_scanner._adx_trajectory_gate",
+        lambda *a, **k: (True, None, {"adx_trajectory_required": True}),
+    )
+    monkeypatch.setattr(
+        "breakout_scanner.compute_evidence_metrics",
+        lambda *a, **k: {
+            "liquidity_gate_pass": True,
+            "liquidity_gate_fail": None,
+            "liquidity_quality": 70.0,
+            "median_turnover_inr": 50_000_000.0,
+            "persistence_score": 4,
+            "persistence_pass_min": 1,
+            "breakout_stage": 1,
+            "base_score": 65.0,
+            "micro_participation_pass": True,
+        },
+    )
+
+
+def test_is_upper_circuit_locked():
+    from breakout_scanner import is_upper_circuit_locked
+
+    assert is_upper_circuit_locked(105.0, 105.0, 5.0) is True
+    assert is_upper_circuit_locked(105.0, 105.01, 5.0) is False
+    assert is_upper_circuit_locked(105.0, 105.0, 4.0) is False
+
+
+def test_evaluate_bars_as_of_upper_circuit_downgrades_to_watch(monkeypatch):
+    from breakout_scanner import evaluate_bars_as_of
+
+    n = 80
+    close = _uptrend_closes(n, start=50.0, step=0.25)
+    close[-2] = close[-3]
+    close[-1] = close[-2] * 1.05
+    volume = [80000.0] * (n - 1) + [400000.0]
+    df = _synthetic_df(close, volume)
+    df["high"][-1] = close[-1]
+    _passing_eval_mocks(monkeypatch)
+
+    result = evaluate_bars_as_of(df, n - 1, "SMALL_CAP_100")
+    assert result["passed"] is False
+    assert result["signal_tier"] == "WATCH"
+    assert result.get("v7_watch_reason") == "circuit_locked"
+    assert result.get("upper_circuit_locked") is True
+    assert "UPPER_CIRCUIT" in (result.get("risk_flags") or "")
+
+
+def test_evaluate_bars_as_of_excessive_alternate_paths_downgrades(monkeypatch):
+    from breakout_scanner import _volume_filter_passes, evaluate_bars_as_of
+
+    n = 80
+    close = _uptrend_closes(n, start=50.0, step=0.25)
+    close[-2] = close[-3]
+    close[-1] = close[-2] * 1.05
+    volume = [80000.0] * (n - 1) + [400000.0]
+    df = _synthetic_df(close, volume)
+    df["high"][-1] = close[-1] + 0.5
+    _passing_eval_mocks(monkeypatch)
+    monkeypatch.setattr("breakout_scanner.calculate_adx", _flat_adx_mock(22.0))
+
+    real_vol_filter = _volume_filter_passes
+
+    def _vol_cum_bypass(**kwargs):
+        ok, path = real_vol_filter(**kwargs)
+        if not ok:
+            return True, "vol_continuation_cum3d"
+        if path is None:
+            return True, "vol_continuation_cum3d"
+        return ok, path
+
+    monkeypatch.setattr("breakout_scanner._volume_filter_passes", _vol_cum_bypass)
+    monkeypatch.setattr(
+        "breakout_scanner._atr_simple",
+        lambda high, low, close, period=14: [2.5] * len(close),
+    )
+
+    result = evaluate_bars_as_of(df, n - 1, "SMALL_CAP_100")
+    assert "vol_continuation_cum3d" in result.get("pass_paths", [])
+    assert "adx_soft" in result.get("pass_paths", [])
+    assert result["passed"] is False
+    assert result["signal_tier"] == "WATCH"
+    assert result.get("v7_watch_reason") == "excessive_alternate_paths"
+
+
+def test_evaluate_bars_as_of_market_regime_risk_off_downgrades(monkeypatch):
+    from breakout_scanner import evaluate_bars_as_of
+
+    n = 80
+    close = _uptrend_closes(n, start=50.0, step=0.25)
+    close[-2] = close[-3]
+    close[-1] = close[-2] * 1.05
+    volume = [80000.0] * (n - 1) + [400000.0]
+    df = _synthetic_df(close, volume)
+    df["high"][-1] = close[-1] + 0.5
+    _passing_eval_mocks(monkeypatch)
+
+    result = evaluate_bars_as_of(
+        df, n - 1, "SMALL_CAP_100", market_regime="RISK_OFF",
+    )
+    assert result["passed"] is False
+    assert result["signal_tier"] == "WATCH"
+    assert result.get("v7_watch_reason") == "market_regime_risk_off"
+
+
+def test_evaluate_market_regime_risk_off():
+    from breakout_scanner import evaluate_market_regime
+
+    n = 30
+    closes = [100.0 - i * 0.5 for i in range(n)]
+    df = {
+        "open": closes[:],
+        "high": [c + 0.5 for c in closes],
+        "low": [c - 0.5 for c in closes],
+        "close": closes,
+        "volume": [1000.0] * n,
+        "timestamp": list(range(n)),
+    }
+    out = evaluate_market_regime(df)
+    assert out["market_regime"] == "RISK_OFF"
+    assert out["benchmark_close"] < out["benchmark_sma20"]
+
+
+def test_validate_forward_path_upper_circuit_uses_next_open():
+    from breakout_backtest import validate_forward_path
+
+    df = {
+        "open": [100.0, 102.0, 103.0, 104.0],
+        "high": [101.0, 110.0, 111.0, 112.0],
+        "low": [99.0, 101.0, 102.0, 103.0],
+        "close": [100.0, 110.0, 109.0, 110.0],
+    }
+    outcome = validate_forward_path(
+        df,
+        1,
+        entry=110.0,
+        stop=95.0,
+        target=120.0,
+        pct_change=5.0,
+        horizons=(1, 2),
+    )
+    assert outcome["upper_circuit_locked"] is True
+    assert outcome["entry_source"] == "open_t1"
+    assert outcome["entry"] == 103.0
+
+
+def test_evaluate_bars_as_of_upper_wick_rejection(monkeypatch):
+    from breakout_scanner import evaluate_bars_as_of
+
+    n = 80
+    close = _uptrend_closes(n, start=50.0, step=0.25)
+    close[-2] = close[-3]
+    close[-1] = close[-2] * 1.05
+    volume = [80000.0] * (n - 1) + [400000.0]
+    df = _synthetic_df(close, volume)
+    df["high"][-1] = close[-1] * 1.08
+    df["low"][-1] = close[-1] * 0.99
+    _passing_eval_mocks(monkeypatch)
+
+    result = evaluate_bars_as_of(df, n - 1, "SMALL_CAP_100")
+    assert result["passed"] is False
+    assert result["fail_reason"] == "upper_wick_rejection"
+    assert result["close_position"] < 0.5
+
+
+def test_evaluate_bars_as_of_poc_excludes_signal_day():
+    from breakout_scanner import evaluate_bars_as_of, get_volume_profile
+
+    n = 80
+    close = [100.0] * n
+    volume = [1000.0] * n
+    close[-1] = 200.0
+    volume[-1] = 1_000_000.0
+    df = _synthetic_df(close, volume)
+
+    t = n - 1
+    expected_poc = get_volume_profile(close[t - 30 : t], volume[t - 30 : t])
+    result = evaluate_bars_as_of(df, t, "SMALL_CAP_100")
+    assert result["poc"] == expected_poc
+
+
+def test_evaluate_bars_as_of_imminent_earnings_downgrades(monkeypatch):
+    from breakout_scanner import evaluate_bars_as_of
+
+    n = 80
+    close = _uptrend_closes(n, start=50.0, step=0.25)
+    close[-2] = close[-3]
+    close[-1] = close[-2] * 1.05
+    volume = [80000.0] * (n - 1) + [400000.0]
+    df = _synthetic_df(close, volume)
+    df["high"][-1] = close[-1] + 0.5
+    _passing_eval_mocks(monkeypatch)
+
+    result = evaluate_bars_as_of(
+        df, n - 1, "SMALL_CAP_100", days_to_next_earnings=2,
+    )
+    assert result["passed"] is False
+    assert result["signal_tier"] == "WATCH"
+    assert result.get("v7_watch_reason") == "imminent_earnings"
+    assert "IMMINENT_EARNINGS" in (result.get("risk_flags") or "")
+
+
+def test_evaluate_bars_as_of_relative_strength_in_rank(monkeypatch):
+    from breakout_scanner import evaluate_bars_as_of
+
+    n = 80
+    close = _uptrend_closes(n, start=50.0, step=0.4)
+    close[-2] = close[-3]
+    close[-1] = close[-2] * 1.05
+    volume = [80000.0] * (n - 1) + [400000.0]
+    df = _synthetic_df(close, volume)
+    df["high"][-1] = close[-1] + 0.5
+    _passing_eval_mocks(monkeypatch)
+    monkeypatch.setattr(
+        "breakout_scanner.composite_rank_score",
+        lambda metrics, **kw: float(metrics.get("rel_return_5d_vs_benchmark") or 0.0),
+    )
+
+    flat_bench = evaluate_bars_as_of(
+        df, n - 1, "SMALL_CAP_100", benchmark_5d_return=0.0,
+    )
+    weak_bench = evaluate_bars_as_of(
+        df, n - 1, "SMALL_CAP_100", benchmark_5d_return=5.0,
+    )
+    assert (flat_bench.get("rel_return_5d_vs_benchmark") or 0) > (
+        weak_bench.get("rel_return_5d_vs_benchmark") or 0
+    )
+    assert flat_bench["composite_rank"] > weak_bench["composite_rank"]
