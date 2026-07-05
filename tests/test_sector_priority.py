@@ -580,7 +580,95 @@ def test_correlate_stock_news_macro_fallback_when_all_rejected():
         aliases=["Hyundai Motor India"],
     )
     assert out["fallback_label"] == "stock_news_no_relevant_items"
-    assert "Auto demand steady" in out["driver"]
+    assert out["driver"] == "No relevant news for HYUNDAI"
+    assert out["evidence"]["top_headlines"]["global"] == []
+    assert out["evidence"]["top_headlines"]["market"] == []
+
+
+def test_correlate_stock_news_no_cross_sector_macro_when_sector_empty():
+    from sector_priority import correlate_stock_news_with_macro
+
+    snapshot = {
+        "sector_scores": {
+            "data_centre": {"score": 0.0, "confidence": 0.4, "drivers_top": []},
+            "defence": {
+                "score": 0.2,
+                "confidence": 0.7,
+                "drivers_top": [
+                    {
+                        "title": "US military role in immigration crackdown expands",
+                        "source": "Al Jazeera",
+                        "published_at": "2026-01-02T08:00:00+00:00",
+                        "contribution": 0.15,
+                    }
+                ],
+            },
+        }
+    }
+    out = correlate_stock_news_with_macro(
+        symbol="ANANTRAJ",
+        sector_key="data_centre",
+        stock_news_items=[
+            {
+                "title": "5 stocks to buy today",
+                "summary": "Listicle",
+                "source": "Yahoo Finance",
+                "url": "https://x/list",
+                "published_at": "2026-01-02T10:00:00+00:00",
+            }
+        ],
+        snapshot=snapshot,
+    )
+    assert out["fallback_label"] == "stock_news_no_relevant_items"
+    assert "immigration" not in out["driver"].lower()
+    assert out["driver"] == "No relevant news for ANANTRAJ"
+    assert out["evidence"]["top_headlines"]["global"] == []
+
+
+def test_correlate_stock_news_all_filtered_uses_neutral_driver():
+    from sector_priority import correlate_stock_news_with_macro
+
+    snapshot = {
+        "sector_scores": {
+            "data_centre": {"score": 0.0, "confidence": 0.4, "drivers_top": []},
+            "defence": {
+                "score": 0.2,
+                "confidence": 0.7,
+                "drivers_top": [
+                    {
+                        "title": "Defence exports rise",
+                        "source": "Reuters",
+                        "published_at": "2026-01-02T08:00:00+00:00",
+                        "contribution": 0.15,
+                    }
+                ],
+            },
+        }
+    }
+    out = correlate_stock_news_with_macro(
+        symbol="E2E",
+        sector_key="data_centre",
+        stock_news_items=[],
+        snapshot=snapshot,
+        stock_news_fetch_error="all_filtered",
+    )
+    assert out["fallback_label"] == "stock_news_all_filtered"
+    assert out["driver"] == "No relevant news for E2E"
+    assert "Defence exports" not in out["driver"]
+
+
+def test_theme_hits_excludes_defence_false_positive_on_immigration():
+    from sector_priority import _theme_hits_for_sector
+
+    text = "us military role in immigration crackdown expands deportation operations"
+    assert _theme_hits_for_sector(text, "defence") == 0.0
+
+
+def test_theme_hits_keeps_defence_on_genuine_military_headline():
+    from sector_priority import _theme_hits_for_sector
+
+    text = "india defence ministry approves new military procurement order"
+    assert _theme_hits_for_sector(text, "defence") > 0.0
 
 
 def test_fetch_nse_bulk_block_deals_parses_payload(monkeypatch):
@@ -696,6 +784,67 @@ def test_stock_news_query_candidates_include_nse_suffix():
     assert all("-recommend" in q for q in primary if "when:7d" in q)
     assert any("HAL stock India" in q for q in fallback)
     assert "HAL" in fallback
+
+
+def test_stock_news_query_candidates_include_display_alias():
+    from sector_priority import _stock_news_query_candidates
+
+    _primary, fallback = _stock_news_query_candidates(symbol="ANANTRAJ", aliases=["ANANTRAJ"])
+    assert any('"Anant Raj" stock India' in q for q in fallback)
+
+
+def test_select_live_fetch_pairs_all_when_cap_zero(monkeypatch):
+    from sector_priority import _select_live_fetch_pairs
+
+    monkeypatch.delenv("TITAN_STOCK_NEWS_COVERAGE_TOP_N", raising=False)
+    pairs = [("BEL", "NSE"), ("HAL", "NSE"), ("BEML", "NSE")]
+    assert _select_live_fetch_pairs(pairs) == {("BEL", "NSE"), ("BEML", "NSE"), ("HAL", "NSE")}
+
+
+def test_select_live_fetch_pairs_respects_positive_cap(monkeypatch):
+    from sector_priority import _select_live_fetch_pairs
+
+    monkeypatch.setenv("TITAN_STOCK_NEWS_COVERAGE_TOP_N", "2")
+    pairs = [("BEL", "NSE"), ("HAL", "NSE"), ("BEML", "NSE")]
+    assert _select_live_fetch_pairs(pairs) == {("BEL", "NSE"), ("BEML", "NSE")}
+
+
+def test_filter_stock_news_relaxes_identity_for_specific_query():
+    from sector_priority import _filter_stock_news_items
+
+    items = [
+        {
+            "title": "Data centre capacity expansion gathers pace",
+            "summary": "Industry capex outlook improves",
+            "source": "Moneycontrol",
+            "url": "https://x/dc",
+            "published_at": "2026-05-28T10:00:00+00:00",
+        }
+    ]
+    _strict_kept, strict_meta = _filter_stock_news_items(
+        symbol="E2E",
+        aliases=["E2E Networks"],
+        items=items,
+        strict_identity=True,
+    )
+    _relaxed_kept, relaxed_meta = _filter_stock_news_items(
+        symbol="E2E",
+        aliases=["E2E Networks"],
+        items=items,
+        strict_identity=False,
+    )
+    assert _strict_kept == []
+    assert _relaxed_kept == []
+    assert strict_meta["rejection_samples"][0]["reason"] == "identity_mismatch"
+    assert relaxed_meta["rejection_samples"][0]["reason"].startswith("low_relevance")
+
+
+def test_stock_news_name_tokens_include_short_symbol():
+    from sector_priority import _stock_news_name_tokens
+
+    tokens = _stock_news_name_tokens(symbol="E2E", aliases=["E2E Networks"])
+    assert "e2e" in tokens
+    assert "networks" in tokens
 
 
 def test_fetch_stock_news_reports_all_filtered_when_items_rejected(monkeypatch):
