@@ -107,6 +107,7 @@ CLOSE_POSITION_MIN = 0.5
 IMMINENT_EARNINGS_DAYS = 3
 ADX_SOFT_VOL_BONUS = 0.5
 ADX_SOFT_CUM_RETURN_MAX = 20.0
+FRESH_BASE_REVERSAL_CUM_RETURN_MAX = 15.0
 POWER_GAP_CUM_RETURN_MAX = 15.0
 STANDARD_ADX_TRAJECTORY_VOL_EXCEPTION = 7.0
 POWER_GAP_VOL_RECOVERY_THRESHOLD = 5.5
@@ -921,20 +922,51 @@ def _signal_cooldown_gate(
     return False, "pre_filter_signal_cooldown", metrics
 
 
-def _adx_soft_chase_gate(
+def _low_adx_chase_gate(
     cum_return_t10_t1: float | None,
     pass_paths: list[str],
+    tier_name: str,
 ) -> tuple[bool, str | None, dict[str, Any]]:
-    """Block adx_soft when pre-trend run-up exceeds path-specific cap."""
+    """Block low-ADX alternate paths when pre-trend run-up exceeds path-specific cap.
+
+    Applies when ``adx_soft`` or ``fresh_base_reversal`` is in pass_paths.
+    ``adx_momentum_ignition`` exempts the chase block (momentum ignition sub-path).
+    """
+    has_low_adx_path = (
+        "adx_soft" in pass_paths or "fresh_base_reversal" in pass_paths
+    )
+    tier_config = FILTERS.get(tier_name, FILTERS["SMALL_CAP_100"])
+    adx_soft_cap = tier_config.get("adx_soft_cum_return_max", ADX_SOFT_CUM_RETURN_MAX)
+
+    if "fresh_base_reversal" in pass_paths:
+        chase_cap = FRESH_BASE_REVERSAL_CUM_RETURN_MAX
+        fail_code = "pre_filter_fresh_base_chase"
+    else:
+        chase_cap = adx_soft_cap
+        fail_code = "pre_filter_adx_soft_chase"
+
     metrics: dict[str, Any] = {
-        "adx_soft_chase_required": "adx_soft" in pass_paths,
-        "cum_return_t10_t1": round(cum_return_t10_t1, 4) if cum_return_t10_t1 is not None else None,
-        "adx_soft_cum_return_max": ADX_SOFT_CUM_RETURN_MAX,
+        "low_adx_chase_required": has_low_adx_path,
+        "pre_filter_cum_return_10d": (
+            round(cum_return_t10_t1, 4) if cum_return_t10_t1 is not None else None
+        ),
+        "cum_return_t10_t1": (
+            round(cum_return_t10_t1, 4) if cum_return_t10_t1 is not None else None
+        ),
+        "chase_cap": chase_cap,
+        "chase_fail_code": fail_code if has_low_adx_path else None,
+        "adx_momentum_ignition_exempt": "adx_momentum_ignition" in pass_paths,
+        "adx_soft_cum_return_max": adx_soft_cap,
+        "fresh_base_cum_return_max": FRESH_BASE_REVERSAL_CUM_RETURN_MAX,
     }
-    if "adx_soft" not in pass_paths:
+    if not has_low_adx_path:
         return True, None, metrics
-    if cum_return_t10_t1 is not None and cum_return_t10_t1 > ADX_SOFT_CUM_RETURN_MAX:
-        return False, "pre_filter_adx_soft_chase", metrics
+    if (
+        cum_return_t10_t1 is not None
+        and cum_return_t10_t1 > chase_cap
+        and "adx_momentum_ignition" not in pass_paths
+    ):
+        return False, fail_code, metrics
     return True, None, metrics
 
 
@@ -1034,6 +1066,7 @@ _V7_FAIL_REASONS = frozenset({
     "pre_filter_adx_trajectory",
     "pre_filter_signal_cooldown",
     "pre_filter_adx_soft_chase",
+    "pre_filter_fresh_base_chase",
     "pre_filter_liquidity",
     "missing_liquidity_data",
     "pre_filter_micro_participation",
@@ -1176,7 +1209,9 @@ def evaluate_bars_as_of(
     - vpcs_price_compressed_accumulation: +5% day, close near high, attenuated vol floor
     - sma20_reclaim: price > SMA20 with vol > 5x despite below SMA50
     - adx_soft: ADX 20–25 with strong vol + above SMA50 + positive day
-      (or ADX 18–20 momentum ignition when pct ≥ 8%, vol ≥ 4×, close_position ≥ 0.7)
+    - adx_momentum_ignition: ADX 18–20 with pct ≥ 8%, vol ≥ 4×, close_position ≥ 0.7
+      (also records adx_soft; exempt from low-ADX chase guard)
+    - fresh_base_reversal: not yet triggered in scanner (chase guard wired for future use)
     """
     filt = FILTERS[tier_name]
     vol_thresh = filt["vol_mult"]
@@ -1360,6 +1395,7 @@ def evaluate_bars_as_of(
         ):
             adx_ok = True
             pass_paths.append("adx_soft")
+            pass_paths.append("adx_momentum_ignition")
         if not adx_ok:
             fail_reason = "ADX"
 
@@ -1399,10 +1435,13 @@ def evaluate_bars_as_of(
             fail_reason = cd_fail
 
     cum_return_t10_t1 = (metrics.get("pre_validation") or {}).get("cum_return_t10_t1")
+    metrics["pre_filter_cum_return_10d"] = cum_return_t10_t1
 
     if fail_reason is None:
-        chase_ok, chase_fail, chase_metrics = _adx_soft_chase_gate(cum_return_t10_t1, pass_paths)
-        metrics["adx_soft_chase"] = chase_metrics
+        chase_ok, chase_fail, chase_metrics = _low_adx_chase_gate(
+            cum_return_t10_t1, pass_paths, tier_name,
+        )
+        metrics["low_adx_chase"] = chase_metrics
         if not chase_ok:
             pre_filter_fail = chase_fail
             fail_reason = chase_fail
