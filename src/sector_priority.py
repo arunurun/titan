@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import re
+import time
 import urllib.parse
 import urllib.error
 import urllib.request
@@ -316,6 +317,19 @@ _SECTOR_THEME_KEYWORDS: dict[str, tuple[str, ...]] = {
         "textile pli",
     ),
 }
+_SECTOR_THEME_NEGATIVE_PATTERNS: dict[str, tuple[str, ...]] = {
+    "defence": (
+        "immigration",
+        "deportation",
+        "migrant",
+        "asylum",
+        "border wall",
+        "undocumented",
+    ),
+}
+_SECTOR_THEME_WORD_BOUNDARY_TERMS: dict[str, tuple[str, ...]] = {
+    "defence": ("military",),
+}
 
 # P1: sector-tuned constructive thresholds consumed by signal_v2 (always-on, no flags).
 _SECTOR_SIGNAL_PROFILES: dict[str, dict[str, float]] = {
@@ -496,6 +510,11 @@ _STOCK_NEWS_NSE_SOURCES: frozenset[str] = frozenset(
     }
 )
 _STOCK_NEWS_MIN_RELEVANCE_DEFAULT = 0.35
+_STOCK_NEWS_FETCH_DELAY_SEC_DEFAULT = 0.75
+_STOCK_NEWS_SYMBOL_DISPLAY_ALIASES: dict[str, str] = {
+    "ANANTRAJ": "Anant Raj",
+    "E2E": "E2E Networks",
+}
 _STOCK_NEWS_RECO_CONTEXT_TERMS: frozenset[str] = frozenset(
     {
         "target",
@@ -607,13 +626,32 @@ def _news_driver_limit() -> int:
 
 
 def _stock_news_coverage_top_n() -> int:
+    """Return live-fetch cap; 0 means fetch every symbol in the scan."""
     raw = (str(os.environ.get("TITAN_STOCK_NEWS_COVERAGE_TOP_N", "")) or "").strip()
     if not raw:
-        return 5
+        return 0
     try:
-        return max(1, int(raw))
+        return max(0, int(raw))
     except ValueError:
-        return 5
+        return 0
+
+
+def _stock_news_fetch_delay_seconds() -> float:
+    raw = (str(os.environ.get("TITAN_STOCK_NEWS_FETCH_DELAY_SEC", "")) or "").strip()
+    if not raw:
+        return _STOCK_NEWS_FETCH_DELAY_SEC_DEFAULT
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return _STOCK_NEWS_FETCH_DELAY_SEC_DEFAULT
+
+
+def _select_live_fetch_pairs(coverage_pairs: list[tuple[str, str]] | set[tuple[str, str]]) -> set[tuple[str, str]]:
+    pairs = sorted({(str(s).strip().upper(), str(e).strip().upper()) for s, e in coverage_pairs if s and e})
+    top_n = _stock_news_coverage_top_n()
+    if top_n <= 0:
+        return set(pairs)
+    return set(pairs[:top_n])
 
 
 def _configured_news_feeds() -> list[str]:
@@ -850,7 +888,32 @@ def _instrument_alias_candidates(
             continue
         if txt not in out:
             out.append(txt)
+    display = _STOCK_NEWS_SYMBOL_DISPLAY_ALIASES.get(sym, "").strip()
+    if display and display not in out:
+        out.append(display)
     return out
+
+
+def _stock_news_legal_name_search_variants(legal_name: str) -> list[str]:
+    name = str(legal_name or "").strip()
+    if not name:
+        return []
+    variants = [name]
+    words = name.split()
+    if len(words) >= 2:
+        short_words: list[str] = []
+        for word in words:
+            upper = word.upper()
+            if upper in ("LIMITED", "LTD", "LTD.", "COMPANY", "CO", "CORP", "CORPORATION"):
+                continue
+            if word.isupper() and len(word) <= 4:
+                short_words.append(word)
+            else:
+                short_words.append(word.capitalize())
+        short = " ".join(short_words).strip()
+        if short and short.upper() != name.upper() and short not in variants:
+            variants.append(short)
+    return variants
 
 
 def _stock_news_query_exclusions() -> str:
@@ -860,12 +923,18 @@ def _stock_news_query_exclusions() -> str:
 def _stock_news_name_tokens(*, symbol: str, aliases: list[str]) -> list[str]:
     sym = str(symbol or "").strip().upper()
     tokens: list[str] = []
-    if sym:
+    min_tok_len = 3 if sym and len(sym) <= 4 else 4
+    if sym and len(sym) >= min_tok_len:
         tokens.append(sym.lower())
     for raw in aliases:
-        for part in re.split(r"[^a-zA-Z0-9]+", str(raw or "")):
+        phrase = str(raw or "").strip()
+        if phrase and phrase.upper() != sym:
+            phrase_norm = _normalize_news_text(phrase)
+            if phrase_norm and phrase_norm not in tokens:
+                tokens.append(phrase_norm)
+        for part in re.split(r"[^a-zA-Z0-9]+", phrase):
             tok = part.strip().lower()
-            if len(tok) < 4 or tok in _STOCK_NAME_STOPWORDS:
+            if len(tok) < min_tok_len or tok in _STOCK_NAME_STOPWORDS:
                 continue
             if tok not in tokens:
                 tokens.append(tok)
@@ -961,12 +1030,33 @@ def _stock_news_relevance_score(
     return round(_clamp(score, 0.0, 1.0), 4)
 
 
+def _stock_news_query_is_specific(*, query: str, symbol: str, aliases: list[str]) -> bool:
+    q = str(query or "").strip()
+    if not q:
+        return False
+    sym = str(symbol or "").strip().upper()
+    q_upper = q.upper()
+    if sym and re.search(rf"\b{re.escape(sym)}\b", q_upper):
+        return True
+    for raw in aliases:
+        alias = str(raw or "").strip()
+        if not alias or alias.upper() == sym:
+            continue
+        if f'"{alias}"' in q or f'"{alias.upper()}"' in q_upper:
+            return True
+        for variant in _stock_news_legal_name_search_variants(alias):
+            if f'"{variant}"' in q or variant.upper() in q_upper:
+                return True
+    return False
+
+
 def _filter_stock_news_items(
     *,
     symbol: str,
     aliases: list[str],
     items: list[dict[str, Any]],
     sector_key: str = "",
+    strict_identity: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     min_relevance = _stock_news_min_relevance()
     kept: list[dict[str, Any]] = []
@@ -986,7 +1076,9 @@ def _filter_stock_news_items(
             if neg_reason:
                 rejected.append({"title": title[:120], "reason": neg_reason})
                 continue
-            if not _stock_news_title_identity_match(symbol=symbol, aliases=aliases, title=title):
+            if strict_identity and not _stock_news_title_identity_match(
+                symbol=symbol, aliases=aliases, title=title
+            ):
                 if not _stock_news_summary_identity_match(symbol=symbol, aliases=aliases, summary=summary):
                     rejected.append({"title": title[:120], "reason": "identity_mismatch"})
                     continue
@@ -1021,20 +1113,25 @@ def _stock_news_query_candidates(*, symbol: str, aliases: list[str]) -> tuple[li
         if q and q.upper() != sym:
             legal_name = q
             break
+    name_variants = _stock_news_legal_name_search_variants(legal_name) if legal_name else []
     primary: list[str] = []
-    if legal_name:
-        primary.append(f'"{legal_name}" NSE when:7d {exclusions}')
-        primary.append(f'"{legal_name}" when:7d bulk OR block OR stake OR results {exclusions}')
+    for variant in name_variants:
+        primary.append(f'"{variant}" NSE when:7d {exclusions}')
+        primary.append(f'"{variant}" when:7d bulk OR block OR stake OR results {exclusions}')
     if sym:
         primary.append(f"{sym} NSE when:7d {exclusions}")
-        primary.append(f"{sym} stock when:7d {exclusions}")
+        primary.append(f"{sym} stock India when:7d {exclusions}")
     fallback: list[str] = []
-    if legal_name:
-        fallback.append(f'"{legal_name}" stock India')
-        fallback.append(f'"{legal_name}" NSE')
+    for variant in name_variants:
+        fallback.append(f'"{variant}" stock India')
+        fallback.append(f'"{variant}" NSE')
     if sym:
         fallback.append(f"{sym} stock India")
         fallback.append(f"{sym} NSE")
+        if sym in _STOCK_NEWS_SYMBOL_DISPLAY_ALIASES:
+            display = _STOCK_NEWS_SYMBOL_DISPLAY_ALIASES[sym]
+            fallback.append(f'"{display}" stock India')
+            fallback.append(f'"{display}" NSE')
     for raw in [sym, *aliases]:
         q = str(raw or "").strip()
         if not q:
@@ -1335,6 +1432,7 @@ def _finalize_stock_news_batch(
     aliases: list[str],
     now: datetime,
     max_items: int,
+    strict_identity: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
     normalized = _dedupe_recent_news_items(raw_items, now_utc=now, limit=max_items)
     filter_input: list[dict[str, Any]] = []
@@ -1351,6 +1449,7 @@ def _finalize_stock_news_batch(
         symbol=symbol,
         aliases=aliases,
         items=filter_input,
+        strict_identity=strict_identity,
     )
     final_items: list[dict[str, Any]] = []
     for item in filtered_items[:max_items]:
@@ -1438,12 +1537,14 @@ def fetch_stock_news_for_symbol(
             last_error = ""
         elif fb_error:
             last_error = fb_error
+    strict_identity = not _stock_news_query_is_specific(query=used_query, symbol=sym, aliases=aliases)
     final_items, filter_meta, filter_input = _finalize_stock_news_batch(
         raw_items,
         symbol=sym,
         aliases=aliases,
         now=now,
         max_items=max_items,
+        strict_identity=strict_identity,
     )
     if (
         not final_items
@@ -1470,12 +1571,16 @@ def fetch_stock_news_for_symbol(
             if fb_alias:
                 used_alias = fb_alias
             last_error = ""
+            strict_identity = not _stock_news_query_is_specific(
+                query=used_query, symbol=sym, aliases=aliases
+            )
             final_items, filter_meta, filter_input = _finalize_stock_news_batch(
                 raw_items,
                 symbol=sym,
                 aliases=aliases,
                 now=now,
                 max_items=max_items,
+                strict_identity=strict_identity,
             )
         elif fb_error and not last_error:
             last_error = fb_error
@@ -1619,19 +1724,26 @@ def resolve_stock_news_batch(
     pairs: list[tuple[str, str]],
     allow_live_fetch_for: set[tuple[str, str]] | None = None,
 ) -> dict[tuple[str, str], dict[str, Any]]:
-    allow = allow_live_fetch_for or set()
+    allow = allow_live_fetch_for if allow_live_fetch_for is not None else _select_live_fetch_pairs(pairs)
+    delay_seconds = _stock_news_fetch_delay_seconds()
     out: dict[tuple[str, str], dict[str, Any]] = {}
+    live_fetch_count = 0
     for symbol, exchange in pairs:
         sym = str(symbol).strip().upper()
         ex = str(exchange).strip().upper()
         if not sym or ex not in ("NSE", "BSE"):
             continue
+        allow_live = (sym, ex) in allow
+        if allow_live and live_fetch_count > 0 and delay_seconds > 0:
+            time.sleep(delay_seconds)
         out[(sym, ex)] = resolve_stock_news_for_symbol(
             cfg,
             symbol=sym,
             exchange=ex,
-            allow_live_fetch=(sym, ex) in allow,
+            allow_live_fetch=allow_live,
         )
+        if allow_live:
+            live_fetch_count += 1
     return out
 
 
@@ -1713,11 +1825,28 @@ def _news_confidence_score(item: dict[str, Any]) -> float:
     return round(_clamp(conf, 0.2, 1.0), 4)
 
 
+def _theme_term_in_text(text: str, term: str, *, word_boundary: bool) -> bool:
+    if not term:
+        return False
+    if word_boundary:
+        return re.search(rf"\b{re.escape(term)}\b", text) is not None
+    return term in text
+
+
 def _theme_hits_for_sector(text: str, sector_key: str) -> float:
-    terms = _SECTOR_THEME_KEYWORDS.get(sector_key.strip().lower(), ())
+    sector = sector_key.strip().lower()
+    negatives = _SECTOR_THEME_NEGATIVE_PATTERNS.get(sector, ())
+    if negatives and any(term in text for term in negatives):
+        return 0.0
+    terms = _SECTOR_THEME_KEYWORDS.get(sector, ())
     if not terms:
         return 0.0
-    hits = sum(1 for t in terms if t in text)
+    boundary_terms = set(_SECTOR_THEME_WORD_BOUNDARY_TERMS.get(sector, ()))
+    hits = sum(
+        1
+        for t in terms
+        if _theme_term_in_text(text, t, word_boundary=t in boundary_terms)
+    )
     if hits <= 0:
         return 0.0
     return round(min(2.0, 1.0 + (hits - 1) * 0.25), 4)
@@ -1828,14 +1957,19 @@ def _macro_news_scope(*, title: str, source: str) -> str:
     return "global"
 
 
-def build_macro_news_layers(snapshot: dict[str, Any], *, sector_key: str) -> dict[str, list[dict[str, Any]]]:
+def build_macro_news_layers(
+    snapshot: dict[str, Any],
+    *,
+    sector_key: str,
+    allow_cross_sector_fallback: bool = True,
+) -> dict[str, list[dict[str, Any]]]:
     layers: dict[str, list[dict[str, Any]]] = {"global": [], "local": [], "market": []}
     scores = snapshot.get("sector_scores")
     score_map = scores if isinstance(scores, dict) else {}
     sector = str(sector_key or "").strip().lower()
     sector_row = score_map.get(sector) if isinstance(score_map.get(sector), dict) else {}
     drivers = sector_row.get("drivers_top") if isinstance(sector_row.get("drivers_top"), list) else []
-    if not drivers:
+    if not drivers and allow_cross_sector_fallback:
         fallback_drivers: list[dict[str, Any]] = []
         for row in score_map.values():
             if not isinstance(row, dict):
@@ -1876,9 +2010,12 @@ def correlate_stock_news_with_macro(
     stock_news_items: list[dict[str, Any]],
     snapshot: dict[str, Any],
     aliases: list[str] | None = None,
+    stock_news_fetch_error: str | None = None,
 ) -> dict[str, Any]:
     alias_list = aliases if isinstance(aliases, list) else []
     sector = str(sector_key or "").strip().lower()
+    sym = str(symbol or "").strip().upper()
+    fetch_error = str(stock_news_fetch_error or "").strip()
     filtered_items, filter_meta = _filter_stock_news_items(
         symbol=symbol,
         aliases=alias_list,
@@ -1949,25 +2086,36 @@ def correlate_stock_news_with_macro(
         direction = "headwind"
     else:
         direction = "neutral"
-    macro_layers = build_macro_news_layers(snapshot, sector_key=sector)
+    macro_layers = build_macro_news_layers(
+        snapshot,
+        sector_key=sector,
+        allow_cross_sector_fallback=False,
+    )
+    stock_news_no_relevant = bool(stock_news_items) and not stock_rows
+    stock_news_all_filtered = not stock_news_items and fetch_error == "all_filtered"
+    suppress_macro_driver = stock_news_no_relevant or stock_news_all_filtered
     evidence_layers = {
-        "global": macro_layers.get("global", [])[:2],
-        "local": macro_layers.get("local", [])[:2],
-        "market": macro_layers.get("market", [])[:2],
+        "global": [] if suppress_macro_driver else macro_layers.get("global", [])[:2],
+        "local": [] if suppress_macro_driver else macro_layers.get("local", [])[:2],
+        "market": [] if suppress_macro_driver else macro_layers.get("market", [])[:2],
         "stock": stock_rows[:2],
     }
     stock_driver = stock_rows[0] if stock_rows else {}
     if stock_driver:
         driver = f"{stock_driver.get('headline')} ({stock_driver.get('source')})"
         fallback_label = ""
+    elif suppress_macro_driver:
+        driver = f"No relevant news for {sym or 'symbol'}"
+        if stock_news_no_relevant:
+            fallback_label = "stock_news_no_relevant_items"
+        else:
+            fallback_label = "stock_news_all_filtered"
     else:
         macro_driver = (macro_layers.get("market") or macro_layers.get("local") or macro_layers.get("global") or [{}])[0]
         driver_headline = str(macro_driver.get("headline") or "No recent market driver available").strip()
         driver_source = str(macro_driver.get("source") or "snapshot_unavailable").strip()
         driver = f"{driver_headline} ({driver_source})"
-        if stock_news_items and not stock_rows:
-            fallback_label = "stock_news_no_relevant_items"
-        elif driver_headline == "No recent market driver available":
+        if driver_headline == "No recent market driver available":
             fallback_label = "sector_specific_match_missing_no_market_driver"
         else:
             scope = _macro_news_scope(title=driver_headline, source=driver_source)
@@ -3809,7 +3957,7 @@ def build_sector_rankings(
             if str(inst.symbol).strip() and str(inst.exchange).strip().upper() in ("NSE", "BSE")
         }
     )
-    live_fetch_pairs = set(coverage_pairs[: _stock_news_coverage_top_n()])
+    live_fetch_pairs = _select_live_fetch_pairs(coverage_pairs)
     stock_news_by_symbol = resolve_stock_news_batch(
         cfg,
         pairs=coverage_pairs,
@@ -3993,6 +4141,7 @@ def build_sector_rankings(
             stock_news_items=stock_items,
             snapshot=snapshot,
             aliases=stock_aliases,
+            stock_news_fetch_error=str(stock_news_meta.get("error") or "").strip(),
         )
         stock_news_score = _safe_float(stock_corr.get("stock_news_score"))
         if math.isnan(stock_news_score):
