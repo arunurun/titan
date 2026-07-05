@@ -6,7 +6,7 @@ Evidence layer: `src/breakout_evidence.py`.
 SETUP (PRE_BREAKOUT): `evaluate_setup_as_of` in `src/breakout_setup.py`.  
 Historical replay / backtest: `src/breakout_backtest.py` (same `evaluate_bars_as_of`).
 
-Reflects **PR #36** scanner refactor on `main` (ATR/swing stop, RSI cap removal, fail-closed liquidity, survivorship haircut in backtest, and related gates). For a shorter operational summary see `docs/breakout_logic.md`.
+Reflects **PR #36** scanner refactor and **PR #39** VPCS volume path on `main` (ATR/swing stop, RSI cap removal, fail-closed liquidity, survivorship haircut in backtest, VPCS compressed-accumulation volume, ADX momentum ignition, and related gates). For a shorter operational summary see `docs/breakout_logic.md`.
 
 ---
 
@@ -84,20 +84,28 @@ Filters run in sequence; first failure sets `fail_reason`. Alternate paths accum
 | 1 | Min price | `close[T] ≥` tier min | `min_price` |
 | 2 | Daily change | 3% ≤ pct ≤ 20% | `pct_change` |
 | 3 | SMA50 trend | above SMA50 **or** `sma20_reclaim` | `SMA50` |
-| 4 | Volume | standard, cum-3d, or micro continuation | `vol` |
-| 5 | Close position | `(close − low) / range ≥ 0.5` (no upper-wick rejection) | `upper_wick_rejection` |
-| 6 | RSI | RSI ≥ 50 (no upper cap; stage 3 handles exhaustion) | `RSI` |
-| 7 | ADX | ≥ 25 **or** `adx_soft` | `ADX` |
-| 8 | Target R:R | stop = max(20d swing low, price − 2.5×ATR14); target = price + 2×risk; gain ≥ 8% | `target_gain` |
-| 9 | Pre-signal validation | T−10 cum return ≤ 30%; ≤ 4 vol-spike days in T−15..T−1 | `pre_filter_cum_return`, `pre_filter_vol_spike` |
-| 10 | ADX trajectory | rising ADX T−1 vs T−10 (path-specific); standard allows vol ≥ 7× exception | `pre_filter_standard_adx_trajectory`, `pre_filter_adx_trajectory` |
-| 11 | Signal cooldown | no repeat PASS within **10** sessions (unless consolidation exempt) | `pre_filter_signal_cooldown` |
-| 12 | ADX-soft chase | if `adx_soft`: T−10..T−1 cum return ≤ 20% | `pre_filter_adx_soft_chase` |
-| 13 | Power-gap / adx_soft tiering | may set WATCH — see §7 | — |
-| 14 | Liquidity gate | median turnover ≥ tier floor (session notional fallback) | `pre_filter_liquidity`, `missing_liquidity_data` |
-| 15 | Micro participation | VPR/CMF/delivery rules | `pre_filter_micro_participation` |
-| 16 | v7 PASS gates | persistence min; stage ≠ 3 → WATCH | `v7_low_volume_persistence`, `v7_breakout_stage_3` |
-| 17 | Post-evidence WATCH | upper circuit, >1 alternate path, RISK_OFF regime, imminent earnings — see §7 | — |
+| 3b | Close position | Computed before volume for VPCS: `(close − low) / range` | — |
+| 4 | Volume | Standard, cum-3d, micro continuation, or VPCS via `_volume_filter_passes` (uses `close_position` from 3b) | `vol` |
+| 4b | Upper wick | `close_position ≥ 0.5` (hard fail after volume) | `upper_wick_rejection` |
+| 5 | RSI | RSI ≥ 50 (no upper cap; stage 3 handles exhaustion) | `RSI` |
+| 6 | ADX | ≥ 25 **or** `adx_soft` (20–25 with vol bonus) **or** ADX momentum ignition (18–20 when pct ≥ 8%, vol ≥ 4×, close_position ≥ 0.7) | `ADX` |
+| 7 | Target R:R | stop = max(20d swing low, price − 2.5×ATR14); target = price + 2×risk; gain ≥ 8% | `target_gain` |
+| 8 | Pre-signal validation | T−10 cum return ≤ 30%; ≤ 4 vol-spike days in T−15..T−1 | `pre_filter_cum_return`, `pre_filter_vol_spike` |
+| 8b | Base accumulation | Up-day volume ≥ down-day volume × 1.05 over T−30..T−1 | `distribution_base` |
+| 9 | ADX trajectory | rising ADX T−1 vs T−10 (path-specific); standard allows vol ≥ 7× exception | `pre_filter_standard_adx_trajectory`, `pre_filter_adx_trajectory` |
+| 10 | Signal cooldown | no repeat PASS within **10** sessions (unless consolidation exempt) | `pre_filter_signal_cooldown` |
+| 11 | ADX-soft chase | if `adx_soft`: T−10..T−1 cum return ≤ 20% | `pre_filter_adx_soft_chase` |
+| 12 | Power-gap / adx_soft / VPCS tiering | may set WATCH — see §6–§7 | — |
+| 13 | Liquidity gate | median turnover ≥ tier floor (session notional fallback) | `pre_filter_liquidity`, `missing_liquidity_data` |
+| 14 | Micro participation | VPR/CMF/delivery rules | `pre_filter_micro_participation` |
+| 15 | v7 PASS gates | persistence min; stage ≠ 3 → WATCH | `v7_low_volume_persistence`, `v7_breakout_stage_3` |
+| 16 | Post-evidence WATCH | upper circuit, >1 alternate path, RISK_OFF regime, imminent earnings — see §7 | — |
+
+**VPCS volume path (`_volume_filter_passes`)** — evaluated after standard spike, cum-3d, and micro prior-spike checks fail:
+
+1. Compute tier-attenuated floor: `max(VPCS_VOL_FLOOR, tier_vol_thresh × attenuation)` — SC100 ×0.70, MC250 ×0.75 (never below 2.5×).
+2. Pass when `pct_change ≥ 5%`, `close_position ≥ 0.65`, and `vol_mult ≥` attenuated floor.
+3. Records path `vpcs_price_compressed_accumulation`. If `vol_mult` is still below the **tier** threshold (only cleared via VPCS), sets `vpcs_marginal_volume` → **WATCH** (`vpcs_marginal_volume`).
 
 ### Threshold constants (`breakout_scanner.py`)
 
@@ -111,7 +119,15 @@ Filters run in sequence; first failure sets `fail_reason`. Alternate paths accum
 | `RSI_MIN` | 50 (no upper RSI cap) |
 | `HOT_VOL_THRESHOLD` | 5.0× (power-gap vol recovery only) |
 | `SMA20_RECLAIM_VOL_THRESHOLD` | 5.0× |
-| `CLOSE_POSITION_MIN` | 0.5 |
+| `VPCS_PCT_CHANGE_MIN` | 5.0% |
+| `VPCS_CLOSE_POSITION_MIN` | 0.65 |
+| `VPCS_VOL_FLOOR` | 2.5× |
+| `VPCS_VOL_ATTENUATION` | SC100 ×0.70, MC250 ×0.75 |
+| `ADX_MOMENTUM_IGNITION_FLOOR` / `CEILING` | 18 / 20 |
+| `ADX_MOMENTUM_IGNITION_PCT_MIN` | 8.0% |
+| `ADX_MOMENTUM_IGNITION_VOL_MIN` | 4.0× |
+| `ADX_MOMENTUM_IGNITION_CLOSE_POS_MIN` | 0.7 |
+| `CLOSE_POSITION_MIN` | 0.5 (upper-wick hard fail at step 4b) |
 | `PRE_SIGNAL_FULL_LOOKBACK` | 15 sessions |
 | `PRE_SIGNAL_CUM_RETURN_LOOKBACK` | 10 sessions |
 | `PRE_SIGNAL_CUM_RETURN_MAX` | 30% (T−10→T−1) |
@@ -137,13 +153,21 @@ Recorded in `pass_paths` and echoed in `risk_flags`.
 
 | Path key | Trigger |
 |----------|---------|
-| `power_gap` | pct_change in (12%, 20%] |
+| `power_gap` | pct_change in (12%, 20%] — flags circuit risk |
 | `vol_continuation_cum3d` | 3-session cumulative vol ≥ tier threshold |
 | `vol_continuation_prior_spike` | Micro: prior spike + vol ≥ 2.5× |
+| `vpcs_price_compressed_accumulation` | pct ≥ 5%, close_position ≥ 0.65, vol ≥ max(2.5×, tier×attenuation); marginal vs tier → WATCH |
 | `sma20_reclaim` | Below SMA50 but ≥ SMA20 with vol ≥ 5× |
-| `adx_soft` | ADX 20–25, vol ≥ tier+0.5, above SMA50, positive day |
+| `adx_soft` | ADX 20–25, vol ≥ tier+0.5, above SMA50, positive day; **or** ADX 18–20 momentum ignition (pct ≥ 8%, vol ≥ 4×, close_position ≥ 0.7, above SMA50) |
 
-Helper functions: `_volume_filter_passes`, `_power_gap_confirmation_gate`, `_adx_trajectory_gate`, `_signal_cooldown_gate`, `_adx_soft_chase_gate`.
+**Path-specific post-rules**
+
+- `power_gap` unconfirmed → **WATCH** (`v6_power_gap_unconfirmed`). Confirmed if ADX rising T−1 vs T−10, pre-trend cum return ≤ 15%, or vol ≥ 5.5×.
+- `adx_soft` as **only** path → **WATCH** (`v6_adx_soft_solo`).
+- `vpcs_price_compressed_accumulation` when vol still below tier threshold → **WATCH** (`vpcs_marginal_volume`).
+- Exception cap (>1 alternate bypass) excludes `power_gap` and `vpcs_price_compressed_accumulation`.
+
+Helper functions: `_volume_filter_passes` (standard → cum-3d → micro prior-spike → VPCS), `_vpcs_applied_threshold`, `_power_gap_confirmation_gate`, `_adx_trajectory_gate`, `_signal_cooldown_gate`, `_adx_soft_chase_gate`.
 
 ---
 
@@ -153,10 +177,11 @@ Helper functions: `_volume_filter_passes`, `_power_gap_confirmation_gate`, `_adx
 |-------------|-----------|
 | `v6_power_gap_unconfirmed` | `power_gap` without ADX/cum-return/vol recovery |
 | `v6_adx_soft_solo` | Only alternate path is `adx_soft` |
+| `vpcs_marginal_volume` | Volume passed only via VPCS below tier threshold |
 | `v7_low_volume_persistence` | `persistence_score` below tier minimum |
 | `v7_breakout_stage_3` | Parabolic stretch > 4 ATR |
 | `circuit_locked` | Upper circuit lock (close pins high, pct ≥ 4.9%) |
-| `excessive_alternate_paths` | More than one non–power-gap alternate path |
+| `excessive_alternate_paths` | More than one alternate bypass (excludes `power_gap` and `vpcs_price_compressed_accumulation`) |
 | `market_regime_risk_off` | `NIFTY_SMALLCAP_100` close below 20d SMA |
 | `imminent_earnings` | Next earnings within 3 sessions |
 
@@ -313,7 +338,7 @@ Key functions:
 | Rate limits | 120s sleep every 50 tickers | Throttled fetch in `fetch_universe_history_throttled` |
 | Forward validation | N/A live | `validate_forward_path` — T+5/10/15 stop/target path |
 | Universe | Current NSE index CSVs | Same; **survivorship bias** when replaying deep history |
-| Branch | Production `main` | Same evaluator as live after PR #36 |
+| Branch | Production `main` | Same evaluator as live after PR #36 / PR #39 |
 
 **Survivorship adjustment:** when backtests use today's index membership for historical dates, reports include a **15% haircut** on hit rates (`survivorship_haircut.expected_hit_rate_*`) and a warning to prefer point-in-time constituents when available.
 
