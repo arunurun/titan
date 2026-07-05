@@ -609,6 +609,10 @@ def _v7_evidence_defaults(monkeypatch, request):
 
     monkeypatch.setattr("breakout_scanner.compute_evidence_metrics", _fake_evidence)
     monkeypatch.setattr(
+        "breakout_scanner.base_accumulation_pass",
+        lambda *args, **kwargs: (True, {"passed": True}),
+    )
+    monkeypatch.setattr(
         "breakout_scanner.composite_rank_score",
         lambda metrics, **kw: 55.0,
     )
@@ -1682,3 +1686,57 @@ def test_evaluate_bars_as_of_relative_strength_in_rank(monkeypatch):
         weak_bench.get("rel_return_5d_vs_benchmark") or 0
     )
     assert flat_bench["composite_rank"] > weak_bench["composite_rank"]
+
+
+def test_validate_forward_path_close_basis_stop_not_intraday_low():
+    from breakout_backtest import validate_forward_path
+
+    df = {
+        "open": [100.0, 100.0, 100.0, 100.0],
+        "high": [101.0, 102.0, 103.0, 104.0],
+        "low": [99.0, 94.0, 96.0, 97.0],
+        "close": [100.0, 96.0, 97.0, 98.0],
+    }
+    outcome = validate_forward_path(
+        df, 0, entry=100.0, stop=95.0, target=110.0, horizons=(1, 2, 3),
+    )
+    assert outcome["horizons"]["t1"]["result"] != "loss"
+    assert outcome["first_exit"] != "loss"
+
+
+def test_evaluate_market_regime_point_in_time_signal_date():
+    from breakout_scanner import bar_dates_from_df, evaluate_market_regime
+
+    n = 40
+    closes = [100.0 + i * 0.1 for i in range(n)]
+    df = {
+        "open": closes[:],
+        "high": [c + 0.5 for c in closes],
+        "low": [c - 0.5 for c in closes],
+        "close": closes,
+        "volume": [1000.0] * n,
+        "timestamp": [1_700_000_000 + i * 86_400 for i in range(n)],
+    }
+    dates = bar_dates_from_df(df)
+    early = evaluate_market_regime(df, signal_date=dates[25])
+    live = evaluate_market_regime(df)
+    assert early["signal_date"] == dates[25]
+    assert early["benchmark_as_of_idx"] == 25
+    assert early["benchmark_close"] != live["benchmark_close"]
+
+
+def test_evaluate_bars_as_of_distribution_base_fail(monkeypatch):
+    from breakout_scanner import evaluate_bars_as_of
+
+    def _fail_accum(*args, **kwargs):
+        return False, {"passed": False, "up_volume": 100.0, "down_volume": 200.0}
+
+    monkeypatch.setattr("breakout_scanner.base_accumulation_pass", _fail_accum)
+    n = 80
+    close = _uptrend_closes(n, start=40.0, step=0.3)
+    close[-1] = close[-2] * 1.05
+    volume = [40000.0] * (n - 1) + [350000.0]
+    monkeypatch.setattr("breakout_scanner.calculate_rsi", lambda prices, period=14: [60.0] * len(prices))
+    monkeypatch.setattr("breakout_scanner.calculate_adx", _rising_adx_mock(28.0, 0.15))
+    result = evaluate_bars_as_of(_synthetic_df(close, volume), n - 1, "SMALL_CAP_100")
+    assert result["fail_reason"] == "distribution_base"

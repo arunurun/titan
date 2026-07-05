@@ -10,6 +10,8 @@ if str(ROOT / "src") not in sys.path:
 from breakout_evidence import (  # noqa: E402
     MICRO_CAP_MIN_MEDIAN_TURNOVER_INR,
     SMALL_CAP_MIN_MEDIAN_TURNOVER_INR,
+    base_accumulation_pass,
+    base_accumulation_ratio,
     base_quality_score,
     breakout_stage,
     composite_rank_score,
@@ -213,3 +215,24 @@ def test_compute_evidence_inputs_excludes_day_t_from_base_metrics():
     inputs = compute_evidence_inputs(df, n - 1)
     assert inputs["pivot_proximity"] is not None
     assert inputs["pivot_proximity"] > 90.0
+
+
+def test_base_accumulation_ratio_up_vs_down_volume():
+    n = 35
+    opens = [100.0] * n
+    closes = [101.0 if i % 2 == 0 else 99.0 for i in range(n)]
+    volumes = [1000.0 if i % 2 == 0 else 500.0 for i in range(n)]
+    stats = base_accumulation_ratio(opens, closes, volumes, n - 1)
+    assert stats["up_volume"] > stats["down_volume"]
+    passed, metrics = base_accumulation_pass(opens, closes, volumes, n - 1)
+    assert passed is True
+    assert metrics["passed"] is True
+
+
+def test_base_accumulation_fails_distribution_base():
+    n = 35
+    opens = [100.0] * n
+    closes = [99.0 if i % 2 == 0 else 101.0 for i in range(n)]
+    volumes = [2000.0 if i % 2 == 0 else 500.0 for i in range(n)]
+    passed, _ = base_accumulation_pass(opens, closes, volumes, n - 1)
+    assert passed is False

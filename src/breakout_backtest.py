@@ -14,6 +14,7 @@ from typing import Any
 from breakout_scanner import (
     FILTERS,
     INDEX_URLS,
+    MARKET_REGIME_BENCHMARK,
     PCT_CHANGE_MIN,
     SIGNAL_TIER_PASS,
     SIGNAL_TIER_WATCH,
@@ -21,13 +22,14 @@ from breakout_scanner import (
     collect_filter_failures,
     download_nse_tickers,
     evaluate_bars_as_of,
+    evaluate_market_regime,
     fetch_yahoo_history,
     is_upper_circuit_locked,
     warm_yahoo_session,
 )
 from breakout_setup import SIGNAL_TIER_PRE_BREAKOUT, evaluate_setup_as_of, setup_trigger_hit
 
-FORWARD_HORIZONS: tuple[int, ...] = (5, 10, 15)
+FORWARD_HORIZONS: tuple[int, ...] = (10, 20, 30)
 CLOSE_RETURN_THRESHOLDS: tuple[float, ...] = (8.0, 15.0)
 MFE_THRESHOLDS: tuple[float, ...] = (8.0, 15.0)
 MIN_HISTORY_BARS = 50
@@ -655,14 +657,18 @@ def _path_outcome_for_bar(
     open_p: float,
     high: float,
     low: float,
+    close: float,
     stop: float,
     target: float,
 ) -> str | None:
-    """Intraday path: stop checked before target on same bar (conservative)."""
-    stop_hit = low <= stop
+    """Intraday path: target on high; stop on EOD close (T+n risk management).
+
+    Stop triggers only when session close breaches the stop level — not on
+    intraday lows — matching end-of-day risk management discipline.
+    """
+    stop_hit = close < stop
     target_hit = high >= target
     if stop_hit and target_hit:
-        # Open-distance heuristic when both levels trade on same bar.
         dist_stop = abs(open_p - stop)
         dist_target = abs(target - open_p)
         if dist_target < dist_stop:
@@ -715,7 +721,8 @@ def validate_forward_path(
         mae_pct = min(mae_pct, (lo / effective_entry - 1.0) * 100.0)
 
         bar_outcome = _path_outcome_for_bar(
-            open_p=op, high=hi, low=lo, stop=stop, target=target,
+            open_p=op, high=hi, low=lo, close=float(df["close"][j]),
+            stop=stop, target=target,
         )
         if bar_outcome in ("win", "loss"):
             first_exit = bar_outcome
@@ -745,6 +752,7 @@ def validate_forward_path(
                 open_p=df["open"][j],
                 high=df["high"][j],
                 low=df["low"][j],
+                close=float(df["close"][j]),
                 stop=stop,
                 target=target,
             )
@@ -836,6 +844,8 @@ def _classify_mismatch(
 def replay_stock(
     sym: str,
     stock_data: dict[str, Any],
+    *,
+    benchmark_df: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Daily replay of production filters; forward-validate each passing signal."""
     df = stock_data["df"]
@@ -849,14 +859,21 @@ def replay_stock(
     last_pass_idx: int | None = None
 
     for idx in range(MIN_HISTORY_BARS - 1, n):
+        signal_date = dates[idx] if idx < len(dates) else ""
+        regime_info = (
+            evaluate_market_regime(benchmark_df, signal_date=signal_date or None)
+            if benchmark_df
+            else {"market_regime": None, "benchmark_5d_return": None}
+        )
         eval_result = evaluate_bars_as_of(
             df,
             idx,
             tier_key,
             last_pass_idx=last_pass_idx,
             bhav_turnover_lacs=stock_data.get("liquidity_turnover_lacs_avg"),
+            market_regime=regime_info.get("market_regime"),
+            benchmark_5d_return=regime_info.get("benchmark_5d_return"),
         )
-        signal_date = dates[idx] if idx < len(dates) else ""
         row = {
             "signal_date": signal_date,
             "bar_idx": idx,
@@ -880,9 +897,10 @@ def replay_stock(
             )
             signals.append({
                 **row,
+                "signal_tier": SIGNAL_TIER_PASS,
                 "outcome": outcome,
             })
-        elif eval_result.get("signal_tier") == "WATCH":
+        elif eval_result.get("signal_tier") == SIGNAL_TIER_WATCH:
             outcome = validate_forward_path(
                 df,
                 idx,
@@ -893,6 +911,7 @@ def replay_stock(
             )
             watch_signals.append({
                 **row,
+                "signal_tier": SIGNAL_TIER_WATCH,
                 "outcome": outcome,
             })
 
@@ -1101,7 +1120,13 @@ def run_backtest(
         )
 
     per_stock: dict[str, Any] = {}
-    all_signals: list[dict[str, Any]] = []
+    all_pass_signals: list[dict[str, Any]] = []
+    all_watch_signals: list[dict[str, Any]] = []
+    benchmark_df, _ = fetch_yahoo_history(
+        MARKET_REGIME_BENCHMARK,
+        range_str=range_str,
+        min_bars=MIN_HISTORY_BARS,
+    )
     for entry in universe:
         sym = entry["symbol"]
         if sym not in data_by_symbol:
@@ -1110,24 +1135,37 @@ def run_backtest(
                 "tier_label": entry.get("tier_label"),
                 "error": "fetch_failed",
                 "signal_count": 0,
+                "watch_signal_count": 0,
                 "signals": [],
+                "watch_signals": [],
             }
             continue
-        stock_report = replay_stock(sym, data_by_symbol[sym])
+        stock_report = replay_stock(
+            sym, data_by_symbol[sym], benchmark_df=benchmark_df,
+        )
         per_stock[sym] = stock_report
         for sig in stock_report.get("signals") or []:
-            all_signals.append({**sig, "symbol": sym, "tier_label": entry.get("tier_label")})
+            all_pass_signals.append({**sig, "symbol": sym, "tier_label": entry.get("tier_label")})
+        for sig in stock_report.get("watch_signals") or []:
+            all_watch_signals.append({**sig, "symbol": sym, "tier_label": entry.get("tier_label")})
 
     finished = dt.now()
-    summary = _aggregate_hit_rates(all_signals)
-    summary["stocks_fetched"] = len(fetch_manifest.get("success") or [])
-    summary["stocks_failed"] = len(fetch_manifest.get("failed") or [])
-    summary["stocks_replayed"] = len([s for s in per_stock.values() if not s.get("error")])
+    summary_pass = _aggregate_hit_rates(all_pass_signals)
+    summary_watch = _aggregate_hit_rates(all_watch_signals)
+    summary = {
+        "pass": summary_pass,
+        "watch": summary_watch,
+        "total_pass_signals": summary_pass["total_signals"],
+        "total_watch_signals": summary_watch["total_signals"],
+        "stocks_fetched": len(fetch_manifest.get("success") or []),
+        "stocks_failed": len(fetch_manifest.get("failed") or []),
+        "stocks_replayed": len([s for s in per_stock.values() if not s.get("error")]),
+    }
     ohlcv_stats = fetch_manifest.get("ohlcv_stats") or {}
     summary["supabase_hits"] = ohlcv_stats.get("supabase_hits", 0)
     summary["yahoo_fetches"] = ohlcv_stats.get("yahoo_fetches", 0)
     if range_months is not None and range_months > SURVIVORSHIP_WARN_MONTHS:
-        summary["survivorship_haircut"] = _apply_survivorship_haircut(summary)
+        summary["survivorship_haircut"] = _apply_survivorship_haircut(summary_pass)
         summary["survivorship_warning"] = survivorship_warning
 
     report = {
@@ -1173,9 +1211,54 @@ def run_backtest(
     return report
 
 
+def _append_tier_summary_lines(
+    lines: list[str],
+    tier_summary: dict[str, Any],
+    *,
+    tier_label: str,
+) -> None:
+    """Append cohort efficacy table rows for one signal tier (PASS or WATCH)."""
+    lines.extend([
+        f"### {tier_label} signals",
+        "",
+        f"| Metric | Value |",
+        f"| :--- | ---: |",
+        f"| Total signals | {tier_summary.get('total_signals', 0)} |",
+    ])
+    for h in FORWARD_HORIZONS:
+        key = f"t{h}"
+        hr = tier_summary.get(f"hit_rate_{key}")
+        cov = tier_summary.get(f"coverage_{key}")
+        wins = tier_summary.get(f"wins_{key}")
+        hr_s = f"{hr}%" if hr is not None else "n/a"
+        lines.append(f"| Hit rate T+{h} target ({wins}/{cov}) | {hr_s} |")
+    lines.append(
+        f"| MFE ≥8% / ≥15% ({tier_summary.get('mfe_hit_8_count', 0)}/"
+        f"{tier_summary.get('mfe_hit_15_count', 0)} "
+        f"of {tier_summary.get('total_signals', 0)}) | "
+        f"{tier_summary.get('mfe_hit_8_rate', 'n/a')}% / "
+        f"{tier_summary.get('mfe_hit_15_rate', 'n/a')}% |"
+    )
+    lines.append(
+        f"| Close return ≥8% / ≥15% ({tier_summary.get('close_hit_8pct_count', 0)}/"
+        f"{tier_summary.get('close_hit_15pct_count', 0)} "
+        f"of {tier_summary.get('total_signals', 0)}) | "
+        f"{tier_summary.get('close_hit_8pct_rate', 'n/a')}% / "
+        f"{tier_summary.get('close_hit_15pct_rate', 'n/a')}% |"
+    )
+    taxonomy = tier_summary.get("mismatch_taxonomy") or {}
+    if taxonomy:
+        lines.extend(["", f"**{tier_label} mismatch taxonomy**", ""])
+        for reason, count in taxonomy.items():
+            lines.append(f"- **{reason}**: {count}")
+    lines.append("")
+
+
 def build_report_markdown(report: dict[str, Any]) -> str:
     meta = report.get("meta") or {}
     summary = report.get("summary") or {}
+    pass_summary = summary.get("pass") or summary
+    watch_summary = summary.get("watch") or {}
     lines: list[str] = [
         "# Breakout Scanner Backtest Report",
         "",
@@ -1188,36 +1271,25 @@ def build_report_markdown(report: dict[str, Any]) -> str:
         "",
         f"| Metric | Value |",
         f"| :--- | ---: |",
-        f"| Total signals | {summary.get('total_signals', 0)} |",
+        f"| PASS signals | {summary.get('total_pass_signals', pass_summary.get('total_signals', 0))} |",
+        f"| WATCH signals | {summary.get('total_watch_signals', watch_summary.get('total_signals', 0))} |",
+        f"| Stocks fetched | {summary.get('stocks_fetched', 0)} |",
+        f"| Fetch failures | {summary.get('stocks_failed', 0)} |",
     ]
-    for h in FORWARD_HORIZONS:
-        key = f"t{h}"
-        hr = summary.get(f"hit_rate_{key}")
-        cov = summary.get(f"coverage_{key}")
-        wins = summary.get(f"wins_{key}")
-        hr_s = f"{hr}%" if hr is not None else "n/a"
-        lines.append(f"| Hit rate T+{h} target ({wins}/{cov}) | {hr_s} |")
-    lines.append(
-        f"| MFE ≥8% / ≥15% ({summary.get('mfe_hit_8_count', 0)}/{summary.get('mfe_hit_15_count', 0)} "
-        f"of {summary.get('total_signals', 0)}) | "
-        f"{summary.get('mfe_hit_8_rate', 'n/a')}% / {summary.get('mfe_hit_15_rate', 'n/a')}% |"
-    )
-    lines.append(
-        f"| Close return ≥8% / ≥15% ({summary.get('close_hit_8pct_count', 0)}/"
-        f"{summary.get('close_hit_15pct_count', 0)} of {summary.get('total_signals', 0)}) | "
-        f"{summary.get('close_hit_8pct_rate', 'n/a')}% / {summary.get('close_hit_15pct_rate', 'n/a')}% |"
-    )
-    lines.append(f"| Stocks fetched | {summary.get('stocks_fetched', 0)} |")
-    lines.append(f"| Fetch failures | {summary.get('stocks_failed', 0)} |")
     if summary.get("supabase_hits") is not None:
         lines.append(f"| Supabase OHLCV hits | {summary.get('supabase_hits', 0)} |")
         lines.append(f"| Yahoo fetches | {summary.get('yahoo_fetches', 0)} |")
+
+    lines.extend(["", "## Efficacy by tier", ""])
+    _append_tier_summary_lines(lines, pass_summary, tier_label="PASS")
+    if watch_summary:
+        _append_tier_summary_lines(lines, watch_summary, tier_label="WATCH")
 
     survivorship = summary.get("survivorship_haircut")
     if survivorship:
         lines.extend([
             "",
-            "## Survivorship Haircut",
+            "## Survivorship Haircut (PASS tier)",
             "",
             "Universe built from **current** NSE index CSVs; deep historical runs "
             f"overstate hit rates. Apply **{survivorship.get('haircut_pct')}%** haircut "
@@ -1228,7 +1300,7 @@ def build_report_markdown(report: dict[str, Any]) -> str:
         ])
         for h in FORWARD_HORIZONS:
             key = f"t{h}"
-            raw = summary.get(f"hit_rate_{key}")
+            raw = pass_summary.get(f"hit_rate_{key}")
             expected = survivorship.get(f"expected_hit_rate_{key}")
             raw_s = f"{raw}%" if raw is not None else "n/a"
             exp_s = f"{expected}%" if expected is not None else "n/a"
@@ -1237,8 +1309,8 @@ def build_report_markdown(report: dict[str, Any]) -> str:
         if warn:
             lines.extend(["", f"> {warn}"])
 
-    taxonomy = summary.get("mismatch_taxonomy") or {}
-    if taxonomy:
+    taxonomy = pass_summary.get("mismatch_taxonomy") or {}
+    if taxonomy and not summary.get("watch"):
         lines.extend(["", "## Mismatch Taxonomy", ""])
         for reason, count in taxonomy.items():
             lines.append(f"- **{reason}**: {count}")
@@ -1262,20 +1334,24 @@ def build_report_markdown(report: dict[str, Any]) -> str:
             f"- **Bars**: {stock.get('bar_count')} ({dr.get('first')} .. {dr.get('last')})"
         )
         lines.append(f"- **Evaluation days**: {stock.get('evaluation_days')}")
-        lines.append(f"- **Signals**: {stock.get('signal_count')}")
+        lines.append(
+            f"- **Signals**: PASS {stock.get('signal_count')} / "
+            f"WATCH {stock.get('watch_signal_count', 0)}"
+        )
         near = stock.get("near_miss_top_failures") or []
         if near:
             fail_s = ", ".join(f"{x['fail_reason']}={x['count']}" for x in near)
             lines.append(f"- **Top filter failures**: {fail_s}")
 
-        for sig in stock.get("signals") or []:
+        for sig in (stock.get("signals") or []) + (stock.get("watch_signals") or []):
             pred = sig.get("prediction") or {}
             metrics = pred.get("metrics") or {}
             outcome = sig.get("outcome") or {}
+            tier = sig.get("signal_tier") or pred.get("signal_tier") or "PASS"
             lines.append("")
-            lines.append(f"#### Signal {sig.get('signal_date')}")
+            lines.append(f"#### Signal {sig.get('signal_date')} ({tier})")
             lines.append(
-                f"- **Prediction**: PASS @ {metrics.get('latest_price')} "
+                f"- **Prediction**: {tier} @ {metrics.get('latest_price')} "
                 f"(chg {metrics.get('pct_change')}%, vol {metrics.get('vol_mult')}x, "
                 f"RSI {metrics.get('rsi_val')}, ADX {metrics.get('adx_val')})"
             )
@@ -1309,7 +1385,8 @@ def build_report_markdown(report: dict[str, Any]) -> str:
         "## Methodology",
         "",
         "Daily replay applies production breakout filters point-in-time (no look-ahead). "
-        "Forward validation walks T+1..T+N sessions; target hit before stop = win. "
+        "Forward validation walks T+1..T+N sessions; target hit on high before EOD "
+        "close stop = win. Stop triggers on session close only (EOD risk management). "
         "Same-bar ambiguity uses open-distance heuristic.",
         "",
         "*Educational backtest only; not investment advice.*",
@@ -1425,13 +1502,15 @@ def setup_to_breakout_rate(all_setups: list[dict[str, Any]]) -> dict[str, Any]:
         summary[f"hits_t{h}"] = hits
         summary[f"precision_t{h}"] = round(100.0 * hits / total, 2)
 
+    max_h = max(FORWARD_HORIZONS)
+    lead_key = f"t{max_h}"
     lead_times = [
-        ((row.get("horizons") or {}).get("t15") or {}).get("forward_breakout_session")
+        ((row.get("horizons") or {}).get(lead_key) or {}).get("forward_breakout_session")
         for row in all_setups
-        if ((row.get("horizons") or {}).get("t15") or {}).get("breakout_hit")
+        if ((row.get("horizons") or {}).get(lead_key) or {}).get("breakout_hit")
     ]
     lead_clean = [int(x) for x in lead_times if x is not None]
-    summary["median_lead_sessions_t15"] = (
+    summary[f"median_lead_sessions_{lead_key}"] = (
         sorted(lead_clean)[len(lead_clean) // 2] if lead_clean else None
     )
     return summary
@@ -1457,10 +1536,10 @@ def build_setup_backtest_markdown(report: dict[str, Any]) -> str:
             f"| T+{h} | {summary.get(f'hits_t{h}', 0)} | "
             f"{summary.get(f'precision_t{h}', 'n/a')}% |"
         )
-    med = summary.get("median_lead_sessions_t15")
+    med = summary.get(f"median_lead_sessions_t{max(FORWARD_HORIZONS)}")
     lines.extend([
         "",
-        f"**Median lead time (T+15 hits):** {med if med is not None else 'n/a'} sessions",
+        f"**Median lead time (T+{max(FORWARD_HORIZONS)} hits):** {med if med is not None else 'n/a'} sessions",
         "",
         "## Methodology",
         "",
