@@ -23,6 +23,8 @@ from config_loader import load_config  # noqa: E402
 MIGRATIONS = [
     ROOT / "sql" / "create_breakout_stock_analysis.sql",
     ROOT / "sql" / "add_breakout_v7_columns.sql",
+    ROOT / "sql" / "migrations" / "add_breeze_stock_code_to_breakout_stock_analysis.sql",
+    ROOT / "sql" / "migrations" / "add_setup_columns_to_breakout_stock_analysis.sql",
 ]
 
 VERIFY_TABLES_SQL = """
@@ -32,9 +34,28 @@ where table_schema = 'public'
   and table_name = 'breakout_stock_analysis';
 """
 
+VERIFY_COLUMNS_SQL = """
+select column_name
+from information_schema.columns
+where table_schema = 'public'
+  and table_name = 'breakout_stock_analysis'
+  and column_name in (
+    'breeze_stock_code',
+    'setup_trigger_price',
+    'setup_rank'
+  )
+order by column_name;
+"""
+
 VERIFY_COUNT_SQL = """
 select count(*)::int as row_count
 from public.breakout_stock_analysis;
+"""
+
+_MANUAL_SQL_HINT = """
+-- Run in Supabase SQL editor if SUPABASE_ACCESS_TOKEN is unavailable:
+-- 1) sql/migrations/add_breeze_stock_code_to_breakout_stock_analysis.sql
+-- 2) sql/migrations/add_setup_columns_to_breakout_stock_analysis.sql
 """
 
 
@@ -71,10 +92,12 @@ def main() -> int:
     if not access_token:
         print(
             "Missing SUPABASE_ACCESS_TOKEN — DDL cannot run via PostgREST. "
-            "Set a Supabase management token (or run sql/create_breakout_stock_analysis.sql in "
-            "the Supabase SQL editor) then re-run this script.",
+            "Set a Supabase management token, or run these files in the Supabase SQL editor:",
             file=sys.stderr,
         )
+        for migration in MIGRATIONS:
+            print(f"  - {migration.relative_to(ROOT)}", file=sys.stderr)
+        print(_MANUAL_SQL_HINT.strip(), file=sys.stderr)
         return 1
 
     match = re.search(r"https://([^.]+)\.supabase\.co", cfg.supabase_url)
@@ -102,6 +125,20 @@ def main() -> int:
     print(f"Verified table: {json.dumps(rows, default=str)}")
     if len(rows) < 1:
         print("Expected public.breakout_stock_analysis; table not found after migration.", file=sys.stderr)
+        return 1
+
+    columns = _run_management_query(project_ref, access_token, VERIFY_COLUMNS_SQL)
+    col_rows = columns if isinstance(columns, list) else []
+    found = {r.get("column_name") for r in col_rows if isinstance(r, dict)}
+    expected = {"breeze_stock_code", "setup_trigger_price", "setup_rank"}
+    missing = sorted(expected - found)
+    print(f"Verified columns: {json.dumps(col_rows, default=str)}")
+    if missing:
+        print(
+            f"Expected columns missing after migration: {missing}. "
+            "Re-run or apply sql/migrations/*.sql manually.",
+            file=sys.stderr,
+        )
         return 1
 
     count = _run_management_query(project_ref, access_token, VERIFY_COUNT_SQL)
