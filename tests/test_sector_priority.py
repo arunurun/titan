@@ -966,6 +966,23 @@ def test_build_sector_rankings_news_blend_bounded(monkeypatch):
 
     monkeypatch.setenv("TITAN_NEWS_BLEND_WEIGHT", "10")
     monkeypatch.setenv("TITAN_NEWS_BLEND_CAP", "1.5")
+    monkeypatch.setattr(
+        "sector_priority.resolve_stock_news_batch",
+        lambda _cfg, *, pairs, allow_live_fetch_for=None: {
+            pair: {
+                "symbol": pair[0],
+                "exchange": pair[1],
+                "items": [],
+                "aliases": [pair[0]],
+                "query_used": "",
+                "alias_used": "",
+                "fallback_used": False,
+                "error": "cache_empty_live_skipped",
+                "data_source": "none",
+            }
+            for pair in pairs
+        },
+    )
     monkeypatch.setattr("breeze_client.create_breeze_session", lambda _cfg: object())
     monkeypatch.setattr(
         "sector_priority.fetch_equity_data",
@@ -1021,6 +1038,23 @@ def test_build_sector_rankings_news_fallback_when_unavailable(monkeypatch):
     from sector_priority import build_sector_rankings
     from sector_registry import SectorInstrument
 
+    monkeypatch.setattr(
+        "sector_priority.resolve_stock_news_batch",
+        lambda _cfg, *, pairs, allow_live_fetch_for=None: {
+            pair: {
+                "symbol": pair[0],
+                "exchange": pair[1],
+                "items": [],
+                "aliases": [pair[0]],
+                "query_used": "",
+                "alias_used": "",
+                "fallback_used": False,
+                "error": "cache_empty_live_skipped",
+                "data_source": "none",
+            }
+            for pair in pairs
+        },
+    )
     monkeypatch.setattr("breeze_client.create_breeze_session", lambda _cfg: object())
     monkeypatch.setattr(
         "sector_priority.fetch_equity_data",
@@ -1041,6 +1075,142 @@ def test_build_sector_rankings_news_fallback_when_unavailable(monkeypatch):
     news = rows[0]["meta"]["news"]
     assert news["blend_points"] == 0.0
     assert news["reason"] == "news_unavailable"
+
+
+def test_build_sector_rankings_attaches_per_symbol_stock_news(monkeypatch):
+    from sector_priority import build_sector_rankings
+    from sector_registry import SectorInstrument
+
+    monkeypatch.setattr("breeze_client.create_breeze_session", lambda _cfg: object())
+    monkeypatch.setattr(
+        "sector_priority.fetch_equity_data",
+        lambda *_args, **_kwargs: pd.DataFrame({"close": [10, 11, 12, 13, 14, 15], "volume": [100] * 6}),
+    )
+    monkeypatch.setattr("sector_priority.fetch_nse_market_cap_inr_cr", lambda _sym: (12000.0, "nse_quote_rupees"))
+    monkeypatch.setattr("sector_priority.fetch_moneycontrol_market_cap_inr_cr", lambda _sym: (None, "x"))
+    monkeypatch.setattr("sector_priority.fetch_screener_market_cap_inr_cr", lambda _sym: (None, "x"))
+    monkeypatch.setattr("sector_priority.fetch_yahoo_market_cap_inr_cr", lambda _s, _e: (None, "x"))
+    monkeypatch.setattr("sector_priority._load_previous_market_caps", lambda cfg, sector_key: {})
+    monkeypatch.setattr(
+        "sector_priority.resolve_global_news_snapshot",
+        lambda _cfg: {
+            "source": "cached",
+            "news_items": [],
+            "sector_scores": {
+                "defence": {
+                    "score": 0.1,
+                    "confidence": 0.7,
+                    "matched_items": 0,
+                    "drivers_top": [],
+                    "drivers_boosting": [],
+                    "drivers_dragging": [],
+                }
+            },
+        },
+    )
+
+    def _fake_batch(_cfg, *, pairs, allow_live_fetch_for=None):
+        out = {}
+        for sym, ex in pairs:
+            if sym == "HAL":
+                items = [
+                    {
+                        "title": "HAL wins engine maintenance contract",
+                        "summary": "Defence order pipeline expands",
+                        "source": "ET Markets",
+                        "url": "https://x/hal",
+                        "published_at": "2026-05-30T10:00:00+00:00",
+                    }
+                ]
+            else:
+                items = []
+            out[(sym, ex)] = {
+                "symbol": sym,
+                "exchange": ex,
+                "items": items,
+                "aliases": ["Hindustan Aeronautics"] if sym == "HAL" else [sym],
+                "query_used": sym,
+                "alias_used": "",
+                "fallback_used": False,
+                "error": "",
+                "data_source": "google_rss_live",
+            }
+        return out
+
+    monkeypatch.setattr("sector_priority.resolve_stock_news_batch", _fake_batch)
+    rows = build_sector_rankings(
+        make_cfg(),
+        sector_key="defence",
+        instruments=[SectorInstrument("HAL", "NSE"), SectorInstrument("BEL", "NSE")],
+        top_n=2,
+    )
+    hal = next(r for r in rows if r["symbol"] == "HAL")
+    bel = next(r for r in rows if r["symbol"] == "BEL")
+    hal_news = hal["meta"]["news"]
+    bel_news = bel["meta"]["news"]
+    assert hal_news["stock_news_fetched_count"] == 1
+    assert bel_news["stock_news_fetched_count"] == 0
+    assert hal_news["stock_news_score"] > bel_news["stock_news_score"]
+    assert "HAL wins engine maintenance contract" in hal_news["stock_news_driver"]
+    assert hal_news["stock_news_coverage"] == "fetched"
+
+
+def test_stock_news_relevance_boosts_sector_theme_match():
+    from sector_priority import _stock_news_relevance_score
+
+    base = _stock_news_relevance_score(
+        symbol="HAL",
+        aliases=["Hindustan Aeronautics"],
+        item={
+            "title": "Hindustan Aeronautics maintenance pact signed",
+            "summary": "Routine update",
+            "source": "Moneycontrol",
+            "url": "https://x/hal",
+        },
+        sector_key="",
+    )
+    themed = _stock_news_relevance_score(
+        symbol="HAL",
+        aliases=["Hindustan Aeronautics"],
+        item={
+            "title": "Hindustan Aeronautics maintenance pact signed",
+            "summary": "Defence procurement pipeline expands",
+            "source": "Moneycontrol",
+            "url": "https://x/hal",
+        },
+        sector_key="defence",
+    )
+    assert themed > base
+
+
+def test_resolve_stock_news_for_symbol_includes_aliases_on_cache_hit(monkeypatch):
+    from sector_priority import resolve_stock_news_for_symbol
+
+    monkeypatch.setattr(
+        "sector_priority._instrument_alias_candidates",
+        lambda cfg, symbol, exchange: ["Hindustan Aeronautics"],
+    )
+    monkeypatch.setattr(
+        "news_store.get_recent_news_for_symbol",
+        lambda _cfg, symbol, exchange, lookback_hours=None, limit=20: [
+            {
+                "title": f"{symbol} cached headline",
+                "summary": "",
+                "source": "Moneycontrol",
+                "url": "https://x",
+                "published_at": "2026-05-30T10:00:00+00:00",
+            }
+        ],
+    )
+    out = resolve_stock_news_for_symbol(
+        make_cfg(),
+        symbol="HAL",
+        exchange="NSE",
+        allow_live_fetch=False,
+    )
+    assert out["items"]
+    assert out["aliases"] == ["Hindustan Aeronautics"]
+    assert out["data_source"] == "news_feed_cache"
 
 
 def test_score_sector_news_exposes_correlation_fields():
