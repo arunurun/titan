@@ -1037,6 +1037,61 @@ def test_adx_soft_chase_blocks_extended_runup(monkeypatch):
     assert result["passed"] is False
     assert result["fail_reason"] == "pre_filter_adx_soft_chase"
     assert "adx_soft" in result["pass_paths"]
+    assert result.get("pre_filter_cum_return_10d") == 22.0
+
+
+def test_adx_momentum_ignition_bypasses_chase_gate(monkeypatch):
+    """Momentum ignition (adx_momentum_ignition) exempts low-ADX chase when cum return > 20%."""
+    from breakout_scanner import evaluate_bars_as_of
+
+    n = 80
+    close = _uptrend_closes(n, start=8.0, step=0.05)
+    close[-2] = close[-3]
+    close[-1] = close[-2] * 1.1005
+    volume = [50000.0] * (n - 1) + [280000.0]
+    df = _synthetic_df(close, volume)
+    df["high"][-1] = close[-1]
+    df["low"][-1] = close[-1] * 0.88
+    _passing_eval_mocks(monkeypatch)
+    monkeypatch.setattr("breakout_scanner.calculate_adx", _flat_adx_mock(19.0))
+    monkeypatch.setattr(
+        "breakout_scanner.pre_signal_validation",
+        lambda df, idx: (True, None, {"full_window": True, "cum_return_t10_t1": 22.0}),
+    )
+    monkeypatch.setattr(
+        "breakout_scanner._atr_simple",
+        lambda high, low, close, period=14: [0.35] * len(close),
+    )
+
+    result = evaluate_bars_as_of(df, n - 1, "MICRO_CAP_250")
+    assert result["fail_reason"] != "pre_filter_adx_soft_chase"
+    assert "adx_soft" in result["pass_paths"]
+    assert "adx_momentum_ignition" in result["pass_paths"]
+
+
+def test_low_adx_chase_gate_fresh_base_reversal():
+    from breakout_scanner import _low_adx_chase_gate
+
+    ok, fail, metrics = _low_adx_chase_gate(16.0, ["fresh_base_reversal"], "SMALL_CAP_100")
+    assert ok is False
+    assert fail == "pre_filter_fresh_base_chase"
+    assert metrics["chase_cap"] == 15.0
+    assert metrics["pre_filter_cum_return_10d"] == 16.0
+
+    ok, fail, _ = _low_adx_chase_gate(14.0, ["fresh_base_reversal"], "SMALL_CAP_100")
+    assert ok is True
+    assert fail is None
+
+
+def test_low_adx_chase_gate_adx_momentum_ignition_exempt():
+    from breakout_scanner import _low_adx_chase_gate
+
+    ok, fail, metrics = _low_adx_chase_gate(
+        25.0, ["adx_soft", "adx_momentum_ignition"], "SMALL_CAP_100",
+    )
+    assert ok is True
+    assert fail is None
+    assert metrics["adx_momentum_ignition_exempt"] is True
 
 
 def test_power_gap_downgrades_to_watch_without_adx_rising(monkeypatch):
@@ -1941,6 +1996,7 @@ def test_jul3_pcjeweller_adx_momentum_ignition(monkeypatch):
     result = evaluate_bars_as_of(df, n - 1, "MICRO_CAP_250")
     assert result["fail_reason"] is None
     assert "adx_soft" in result["pass_paths"]
+    assert "adx_momentum_ignition" in result["pass_paths"]
     assert result["adx_val"] == 19.0
 
 

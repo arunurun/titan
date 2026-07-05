@@ -87,7 +87,7 @@ Filters run in sequence; first failure sets `fail_reason` and stops the primary 
 | 8b | Base accumulation | Up-day volume ≥ down-day volume × 1.05 over T−30..T−1 | `distribution_base` |
 | 9 | ADX trajectory | Rising ADX T−1 vs T−10 (path-specific); standard allows vol ≥ 7× exception | `pre_filter_standard_adx_trajectory`, `pre_filter_adx_trajectory` |
 | 10 | Signal cooldown | No repeat PASS within 10 sessions unless consolidation exempt | `pre_filter_signal_cooldown` |
-| 11 | ADX-soft chase | If `adx_soft`: T−10..T−1 cum return ≤ 20% | `pre_filter_adx_soft_chase` |
+| 11 | Low-ADX chase | If `adx_soft` or `fresh_base_reversal`: T−10..T−1 cum return ≤ path cap (20% / 15%); `adx_momentum_ignition` exempt | `pre_filter_adx_soft_chase`, `pre_filter_fresh_base_chase` |
 | 12 | Power-gap / adx_soft tiering | May set WATCH (not fail) — see below | — |
 | 13 | Evidence: liquidity gate | Median turnover ≥ tier floor | `pre_filter_liquidity` |
 | 14 | Evidence: micro participation | Tier VPR/CMF/delivery rules; **False** fails | `pre_filter_micro_participation` |
@@ -137,7 +137,9 @@ Paths are recorded in `pass_paths` and echoed in `risk_flags`.
 | `vol_continuation_prior_spike` | Micro-cap: prior spike + vol ≥ 2.5× |
 | `vpcs_price_compressed_accumulation` | pct ≥ 5%, close_position ≥ 0.65, vol ≥ max(2.5×, tier×attenuation); marginal vs tier → WATCH |
 | `sma20_reclaim` | Below SMA50 but ≥ SMA20 with vol ≥ 5× |
-| `adx_soft` | ADX 20–25, vol ≥ tier+0.5, above SMA50, positive day; **or** ADX 18–20 with pct ≥ 8%, vol ≥ 4×, close_position ≥ 0.7 |
+| `adx_soft` | ADX 20–25, vol ≥ tier+0.5, above SMA50, positive day |
+| `adx_momentum_ignition` | ADX 18–20, pct ≥ 8%, vol ≥ 4×, close_position ≥ 0.7 (also records `adx_soft`; exempt from step 11 chase) |
+| `fresh_base_reversal` | *Not yet triggered* — chase guard wired at 15% cap when path is added |
 
 **Path-specific post-rules**
 
