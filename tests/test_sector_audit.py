@@ -287,8 +287,9 @@ def test_apply_global_news_correlation_uses_explicit_fallback_when_sector_missin
     corr = ok_results[0]["audit"]["news_correlation"]
     assert meta["applied"] is True
     assert "fallback_label" in corr
-    assert "sector_specific_match_missing_using_global_market_driver" == corr["fallback_label"]
+    assert corr["fallback_label"] == "sector_specific_match_missing_no_market_driver"
     assert corr["driver_source"] == "macro"
+    assert "No recent market driver" in corr["driver"] or "Global macro" in corr["driver"]
     assert corr["stock_news_fetched_count"] == 0
     assert corr["stock_news_coverage"] == "not_covered"
     assert corr["used_macro_fallback"] is True
@@ -324,6 +325,49 @@ def test_symbol_digest_news_line_present_with_fallback_label(monkeypatch):
     text = _format_symbol_metrics_line({"symbol": "HAL", "exchange": "NSE", "audit": audit})
     assert "Macro:" in text
     assert "fallback=using_global_market_driver" in text
+
+
+def test_symbol_digest_no_relevant_stock_news_skips_unrelated_macro(monkeypatch):
+    monkeypatch.delenv("TITAN_DIGEST_VERBOSE_SYMBOLS", raising=False)
+    from sector_audit import _format_symbol_metrics_line, _news_correlation_line, _news_evidence_line
+
+    audit = {
+        "effective_intent_score": 48.0,
+        "z_score": -0.5,
+        "volume_participation_ratio": 0.9,
+        "return_1d_pct": -0.2,
+        "atr_14_pct": 2.4,
+        "next_week_score": 47.1,
+        "sell_signal": "hold",
+        "sell_signal_reasons": ["monitor trend"],
+        "prediction_breakdown": {"week": {}, "day": {}, "penalties": []},
+        "news_correlation": {
+            "driver": "No relevant news for ANANTRAJ",
+            "affected_metric": "trend",
+            "affected_theme": "data_centre",
+            "direction": "neutral",
+            "confidence": 0.35,
+            "driver_source": "none",
+            "stock_news_fetched_count": 3,
+            "stock_news_coverage": "fetched",
+            "fallback_label": "stock_news_no_relevant_items",
+            "evidence": {
+                "net_news_impact_score": 0.0,
+                "net_news_impact_direction": "neutral",
+                "top_headlines": {"global": [], "local": [], "market": [], "stock": []},
+            },
+            "stock_news": {"fetch_error": "", "filtered_count": 3},
+        },
+    }
+    corr_line = _news_correlation_line(audit, compact=True)
+    evidence_line = _news_evidence_line(audit, compact=True)
+    text = _format_symbol_metrics_line({"symbol": "ANANTRAJ", "exchange": "NSE", "audit": audit})
+    assert "No relevant stock news" in corr_line
+    assert "immigration" not in corr_line.lower()
+    assert "fallback=stock_news_no_relevant_items" in corr_line
+    assert "global=none" in evidence_line or "global:" not in evidence_line
+    assert "No relevant stock news" in text
+    assert "immigration" not in text.lower()
 
 
 def test_apply_global_news_correlation_sets_line_for_all_audits_when_snapshot_empty(monkeypatch):
@@ -1028,6 +1072,42 @@ def test_apply_global_news_correlation_skips_live_fetch_beyond_top_n(monkeypatch
     _apply_global_news_correlation(make_cfg(), sector_id="defence", ok_results=ok_results)
     assert live_calls == ["BEL"]
     assert ok_results[1]["audit"]["news_correlation"]["stock_news_coverage"] == "empty:cache_miss_live_skipped"
+
+
+@pytest.mark.uses_news_cache
+def test_apply_global_news_correlation_live_fetches_all_symbols_by_default(monkeypatch):
+    from sector_audit import _apply_global_news_correlation
+
+    snapshot = {
+        "source": "cached",
+        "sector_scores": {
+            "defence": {"score": 0.05, "confidence": 0.6, "drivers_top": []},
+        },
+    }
+    monkeypatch.delenv("TITAN_STOCK_NEWS_COVERAGE_TOP_N", raising=False)
+    monkeypatch.setattr("sector_priority.resolve_global_news_snapshot", lambda _cfg: snapshot)
+    monkeypatch.setattr("news_store.get_recent_news_for_symbol", lambda *a, **k: [])
+    live_calls: list[str] = []
+
+    def _live_fetch(_cfg, symbol, exchange, timeout_seconds=10.0, now_utc=None):
+        live_calls.append(symbol)
+        return {
+            "symbol": symbol,
+            "exchange": exchange,
+            "items": [],
+            "query_used": symbol,
+            "alias_used": "",
+            "fallback_used": False,
+            "error": "empty_feed",
+        }
+
+    monkeypatch.setattr("sector_priority.fetch_stock_news_for_symbol", _live_fetch)
+    ok_results = [
+        {"symbol": "BEL", "exchange": "NSE", "audit": {"symbol": "BEL", "exchange": "NSE"}},
+        {"symbol": "HAL", "exchange": "NSE", "audit": {"symbol": "HAL", "exchange": "NSE"}},
+    ]
+    _apply_global_news_correlation(make_cfg(), sector_id="defence", ok_results=ok_results)
+    assert live_calls == ["BEL", "HAL"]
 
 
 def test_build_equity_live_audit_records_exchange_fallback_metadata(monkeypatch):

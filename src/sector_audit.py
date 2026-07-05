@@ -1541,8 +1541,12 @@ def _news_evidence_line(audit: dict[str, Any], *, compact: bool = False) -> str:
     stock_meta = corr.get("stock_news")
     if isinstance(stock_meta, dict):
         stock_query_used = str(stock_meta.get("query_used") or "").strip()
+    fallback_label = str(corr.get("fallback_label") or "").strip()
+    suppress_macro_evidence = fallback_label in ("stock_news_no_relevant_items", "stock_news_all_filtered")
 
     def _headline_snippet(name: str) -> str:
+        if suppress_macro_evidence and name in ("global", "local", "market"):
+            return f"{name}=none"
         rows = top_headlines.get(name)
         if not isinstance(rows, list) or not rows:
             if name == "stock":
@@ -1580,6 +1584,8 @@ def _news_evidence_line(audit: dict[str, Any], *, compact: bool = False) -> str:
         return " · ".join(parts)
 
     def _bucket_txt(name: str) -> str:
+        if suppress_macro_evidence and name in ("global", "local", "market"):
+            return f"{name}=none"
         rows = top_headlines.get(name)
         if not isinstance(rows, list) or not rows:
             if name == "stock":
@@ -1657,6 +1663,7 @@ def _news_correlation_line(audit: dict[str, Any], *, compact: bool = False) -> s
     else:
         conf_band = "low"
     theme_txt = theme if theme else "global macro"
+    no_relevant_stock_news = fallback_label in ("stock_news_no_relevant_items", "stock_news_all_filtered")
     if driver_source == "stock":
         if compact:
             return (
@@ -1668,6 +1675,25 @@ def _news_correlation_line(audit: dict[str, Any], *, compact: bool = False) -> s
             f"affected_metric={metric} · direction={dir_label} · confidence={conf_txt} "
             f"({conf_band}; bands: >=0.75 high, 0.50-0.74 medium, <0.50 low) · "
             f"stock_news_fetched_count={stock_news_fetched_count} · coverage={coverage_status}"
+        )
+    if driver_source == "none" or no_relevant_stock_news:
+        stock_meta = corr.get("stock_news")
+        fetch_error = ""
+        if isinstance(stock_meta, dict):
+            fetch_error = str(stock_meta.get("fetch_error") or "").strip()
+        fetch_error_txt = f" · stock_fetch_error={fetch_error}" if fetch_error else ""
+        fb = fallback_label.replace("sector_specific_match_missing_", "") if fallback_label else "no_relevant_stock_news"
+        if compact:
+            return (
+                f"No relevant stock news · {dir_label} · conf {conf_txt} ({conf_band}) · {metric}"
+                f" · fetched={stock_news_fetched_count} · fallback={fb}{fetch_error_txt}"
+            )
+        return (
+            f"Stock news relation: no_relevant_news · theme={theme_txt} · "
+            f"affected_metric={metric} · direction={dir_label} · confidence={conf_txt} "
+            f"({conf_band}; bands: >=0.75 high, 0.50-0.74 medium, <0.50 low) · "
+            f"stock_news_fetched_count={stock_news_fetched_count} · coverage={coverage_status} · "
+            f"fallback_reason={fb}{fetch_error_txt}"
         )
     fallback_reason = "stock_headlines_missing_using_macro_context"
     if coverage_status == "not_covered":
@@ -2859,6 +2885,7 @@ def _apply_global_news_correlation(
     resolve_stock_news_for_symbol_fn = None
     correlate_stock_news_with_macro = None
     stock_news_coverage_top_n = None
+    select_live_fetch_pairs_fn = None
     helper_unavailable: list[str] = []
     try:
         from sector_priority import resolve_global_news_snapshot as _resolver
@@ -2883,8 +2910,10 @@ def _apply_global_news_correlation(
         logger.warning("News correlation correlator helper unavailable: %s", exc)
     try:
         from sector_priority import _stock_news_coverage_top_n as _coverage_top_n
+        from sector_priority import _select_live_fetch_pairs as _select_live_pairs
 
         stock_news_coverage_top_n = _coverage_top_n
+        select_live_fetch_pairs_fn = _select_live_pairs
     except Exception as exc:
         helper_unavailable.append("_stock_news_coverage_top_n")
         logger.warning("News correlation coverage limit helper unavailable: %s", exc)
@@ -2940,8 +2969,12 @@ def _apply_global_news_correlation(
         if symbol and exchange in ("NSE", "BSE"):
             coverage_pairs.add((symbol, exchange))
     stock_news_by_symbol: dict[tuple[str, str], dict[str, Any]] = {}
-    coverage_top_n = stock_news_coverage_top_n() if callable(stock_news_coverage_top_n) else 5
-    live_fetch_pairs = set(sorted(coverage_pairs)[:coverage_top_n])
+    coverage_top_n = stock_news_coverage_top_n() if callable(stock_news_coverage_top_n) else 0
+    if callable(select_live_fetch_pairs_fn):
+        live_fetch_pairs = select_live_fetch_pairs_fn(coverage_pairs)
+    else:
+        pairs_sorted = sorted(coverage_pairs)
+        live_fetch_pairs = set(pairs_sorted if coverage_top_n <= 0 else pairs_sorted[:coverage_top_n])
     for symbol, exchange in coverage_pairs:
         if not symbol or exchange not in ("NSE", "BSE"):
             continue
@@ -3018,6 +3051,7 @@ def _apply_global_news_correlation(
                     stock_news_items=stock_news_items,
                     snapshot=snapshot,
                     aliases=stock_aliases,
+                    stock_news_fetch_error=stock_fetch_error,
                 )
                 corr = corr if isinstance(corr, dict) else {}
             except Exception as exc:
@@ -3055,7 +3089,12 @@ def _apply_global_news_correlation(
         fallback_label = str(corr.get("fallback_label") or "").strip()
         if fallback_label:
             fallback_count += 1
-        driver_source = "stock" if stock_news_items and not fallback_label else "macro"
+        if fallback_label in ("stock_news_no_relevant_items", "stock_news_all_filtered"):
+            driver_source = "none"
+        elif stock_news_items and not fallback_label:
+            driver_source = "stock"
+        else:
+            driver_source = "macro"
         evidence = corr.get("evidence") if isinstance(corr.get("evidence"), dict) else {}
         if stock_fetch_error and not stock_news_items:
             evidence = {**evidence, "stock_fetch_error": stock_fetch_error}
