@@ -22,9 +22,10 @@ from breakout_scanner import (
     download_nse_tickers,
     evaluate_bars_as_of,
     fetch_yahoo_history,
+    is_upper_circuit_locked,
     warm_yahoo_session,
 )
-from breakout_setup import SIGNAL_TIER_PRE_BREAKOUT, evaluate_setup_as_of
+from breakout_setup import SIGNAL_TIER_PRE_BREAKOUT, evaluate_setup_as_of, setup_trigger_hit
 
 FORWARD_HORIZONS: tuple[int, ...] = (5, 10, 15)
 CLOSE_RETURN_THRESHOLDS: tuple[float, ...] = (8.0, 15.0)
@@ -34,6 +35,66 @@ MISSED_BREAKOUT_FORWARD_H = 15
 MISSED_BREAKOUT_MIN_RETURN_PCT = 8.0
 FETCH_CHUNK_SIZE = 50
 FETCH_CHUNK_COOLDOWN_SEC = 120
+SURVIVORSHIP_HAIRCUT_PCT = 15.0
+SURVIVORSHIP_WARN_MONTHS = 3
+
+
+def _range_to_months(range_str: str) -> float | None:
+    """Parse Yahoo-style range tokens (e.g. 3m, 6m, 1y) to approximate months."""
+    token = str(range_str or "").strip().lower()
+    if not token:
+        return None
+    if token.endswith("mo"):
+        return float(token[:-2])
+    if token.endswith("m"):
+        return float(token[:-1])
+    if token.endswith("y"):
+        return float(token[:-1]) * 12.0
+    if token.endswith("d"):
+        return float(token[:-1]) / 30.0
+    return None
+
+
+def load_historical_constituents(
+    as_of_date: date | str,
+    tier_key: str,
+) -> list[str]:
+    """Placeholder for point-in-time index membership (survivorship-safe backtests).
+
+    Until historical constituent snapshots are ingested, callers fall back to
+    ``download_nse_tickers(INDEX_URLS[tier_key])`` (current index = survivor bias).
+    """
+    _ = as_of_date, tier_key
+    return []
+
+
+def resolve_forward_entry(
+    df: dict[str, Any],
+    signal_idx: int,
+    *,
+    default_entry: float,
+    pct_change: float | None = None,
+) -> tuple[float, dict[str, Any]]:
+    """Shift entry to Open[T+1] when signal day closed at upper circuit."""
+    close_t = float(df["close"][signal_idx])
+    high_t = float(df["high"][signal_idx])
+    if pct_change is None and signal_idx > 0:
+        prev = float(df["close"][signal_idx - 1])
+        pct_change = ((close_t - prev) / prev) * 100.0 if prev > 0 else 0.0
+    pct = float(pct_change or 0.0)
+    meta: dict[str, Any] = {
+        "entry_source": "close_t",
+        "upper_circuit_locked": False,
+    }
+    if not is_upper_circuit_locked(close_t, high_t, pct):
+        return default_entry, meta
+    meta["upper_circuit_locked"] = True
+    next_idx = signal_idx + 1
+    if next_idx < len(df["close"]):
+        meta["entry_source"] = "open_t1"
+        return float(df["open"][next_idx]), meta
+    meta["entry_source"] = "close_t_unbuyable"
+    return default_entry, meta
 
 
 def _ohlcv_store():
@@ -624,8 +685,17 @@ def validate_forward_path(
     stop: float,
     target: float,
     horizons: tuple[int, ...] = FORWARD_HORIZONS,
+    pct_change: float | None = None,
+    apply_circuit_entry_shift: bool = True,
 ) -> dict[str, Any]:
     """Forward validation: target before stop = win; report MFE/MAE per horizon."""
+    entry_meta: dict[str, Any] = {"entry_source": "close_t", "upper_circuit_locked": False}
+    effective_entry = entry
+    if apply_circuit_entry_shift:
+        effective_entry, entry_meta = resolve_forward_entry(
+            df, signal_idx, default_entry=entry, pct_change=pct_change,
+        )
+
     max_h = max(horizons)
     n = len(df["close"])
     forward_end = min(signal_idx + max_h, n - 1)
@@ -641,8 +711,8 @@ def validate_forward_path(
         hi = df["high"][j]
         lo = df["low"][j]
         op = df["open"][j]
-        mfe_pct = max(mfe_pct, (hi / entry - 1.0) * 100.0)
-        mae_pct = min(mae_pct, (lo / entry - 1.0) * 100.0)
+        mfe_pct = max(mfe_pct, (hi / effective_entry - 1.0) * 100.0)
+        mae_pct = min(mae_pct, (lo / effective_entry - 1.0) * 100.0)
 
         bar_outcome = _path_outcome_for_bar(
             open_p=op, high=hi, low=lo, stop=stop, target=target,
@@ -693,7 +763,7 @@ def validate_forward_path(
 
         if h_outcome is None:
             close_h = df["close"][end_idx]
-            ret_pct = (close_h / entry - 1.0) * 100.0
+            ret_pct = (close_h / effective_entry - 1.0) * 100.0
             h_outcome = "open"
             h_reason = "neither_hit_timeout"
 
@@ -710,7 +780,7 @@ def validate_forward_path(
     for h in horizons:
         end_idx = signal_idx + h
         if end_idx < n:
-            close_returns[f"t{h}"] = round((df["close"][end_idx] / entry - 1.0) * 100.0, 4)
+            close_returns[f"t{h}"] = round((df["close"][end_idx] / effective_entry - 1.0) * 100.0, 4)
         else:
             close_returns[f"t{h}"] = None
 
@@ -728,7 +798,10 @@ def validate_forward_path(
     }
 
     return {
-        "entry": round(entry, 2),
+        "entry": round(effective_entry, 2),
+        "entry_requested": round(entry, 2),
+        "entry_source": entry_meta.get("entry_source"),
+        "upper_circuit_locked": entry_meta.get("upper_circuit_locked"),
         "stop": round(stop, 2),
         "target": round(target, 2),
         "sessions_available": sessions_available,
@@ -803,6 +876,7 @@ def replay_stock(
                 entry=eval_result["latest_price"],
                 stop=eval_result["sl_price"],
                 target=eval_result["target_price"],
+                pct_change=eval_result.get("pct_change"),
             )
             signals.append({
                 **row,
@@ -815,6 +889,7 @@ def replay_stock(
                 entry=eval_result["latest_price"],
                 stop=eval_result["sl_price"],
                 target=eval_result["target_price"],
+                pct_change=eval_result.get("pct_change"),
             )
             watch_signals.append({
                 **row,
@@ -849,6 +924,22 @@ def _top_fail_reasons(evaluations: list[dict[str, Any]], top_k: int = 5) -> list
             counts[reason] += 1
     ranked = sorted(counts.items(), key=lambda x: (-x[1], x[0]))
     return [{"fail_reason": r, "count": c} for r, c in ranked[:top_k]]
+
+
+def _apply_survivorship_haircut(summary: dict[str, Any]) -> dict[str, Any]:
+    """Reduce reported hit rates when using current index CSVs for deep historical runs."""
+    adjusted: dict[str, Any] = {"haircut_pct": SURVIVORSHIP_HAIRCUT_PCT}
+    for h in FORWARD_HORIZONS:
+        key = f"t{h}"
+        raw = summary.get(f"hit_rate_{key}")
+        if raw is not None:
+            adjusted[f"expected_hit_rate_{key}"] = round(
+                max(0.0, float(raw) * (1.0 - SURVIVORSHIP_HAIRCUT_PCT / 100.0)),
+                2,
+            )
+        else:
+            adjusted[f"expected_hit_rate_{key}"] = None
+    return adjusted
 
 
 def _aggregate_hit_rates(all_signals: list[dict[str, Any]]) -> dict[str, Any]:
@@ -966,6 +1057,16 @@ def run_backtest(
     out_dir = output_dir or default_output_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    range_months = _range_to_months(range_str)
+    survivorship_warning: str | None = None
+    if range_months is not None and range_months > SURVIVORSHIP_WARN_MONTHS:
+        survivorship_warning = (
+            f"Backtest range `{range_str}` (~{range_months:.0f} months) exceeds "
+            f"{SURVIVORSHIP_WARN_MONTHS}m — universe uses current NSE index CSVs "
+            f"(survivorship bias). Prefer `load_historical_constituents()` when available."
+        )
+        print(f"WARNING: {survivorship_warning}", flush=True)
+
     if universe is None:
         universe_payload = build_backtest_universe(nse_cache_dir=nse_cache_dir, top_n=top_n)
         universe = universe_payload["stocks"]
@@ -1025,6 +1126,9 @@ def run_backtest(
     ohlcv_stats = fetch_manifest.get("ohlcv_stats") or {}
     summary["supabase_hits"] = ohlcv_stats.get("supabase_hits", 0)
     summary["yahoo_fetches"] = ohlcv_stats.get("yahoo_fetches", 0)
+    if range_months is not None and range_months > SURVIVORSHIP_WARN_MONTHS:
+        summary["survivorship_haircut"] = _apply_survivorship_haircut(summary)
+        summary["survivorship_warning"] = survivorship_warning
 
     report = {
         "meta": {
@@ -1032,6 +1136,8 @@ def run_backtest(
             "finished_at": finished.isoformat(timespec="seconds"),
             "duration_sec": round((finished - started).total_seconds(), 2),
             "range": range_str,
+            "range_months_approx": range_months,
+            "survivorship_warning": survivorship_warning,
             "forward_horizons": list(FORWARD_HORIZONS),
             "min_history_bars": MIN_HISTORY_BARS,
             "output_dir": str(out_dir),
@@ -1106,6 +1212,30 @@ def build_report_markdown(report: dict[str, Any]) -> str:
     if summary.get("supabase_hits") is not None:
         lines.append(f"| Supabase OHLCV hits | {summary.get('supabase_hits', 0)} |")
         lines.append(f"| Yahoo fetches | {summary.get('yahoo_fetches', 0)} |")
+
+    survivorship = summary.get("survivorship_haircut")
+    if survivorship:
+        lines.extend([
+            "",
+            "## Survivorship Haircut",
+            "",
+            "Universe built from **current** NSE index CSVs; deep historical runs "
+            f"overstate hit rates. Apply **{survivorship.get('haircut_pct')}%** haircut "
+            "for expected real-world hit rate:",
+            "",
+            "| Horizon | Reported hit rate | Expected real-world hit rate |",
+            "| :--- | ---: | ---: |",
+        ])
+        for h in FORWARD_HORIZONS:
+            key = f"t{h}"
+            raw = summary.get(f"hit_rate_{key}")
+            expected = survivorship.get(f"expected_hit_rate_{key}")
+            raw_s = f"{raw}%" if raw is not None else "n/a"
+            exp_s = f"{expected}%" if expected is not None else "n/a"
+            lines.append(f"| T+{h} | {raw_s} | {exp_s} |")
+        warn = summary.get("survivorship_warning") or meta.get("survivorship_warning")
+        if warn:
+            lines.extend(["", f"> {warn}"])
 
     taxonomy = summary.get("mismatch_taxonomy") or {}
     if taxonomy:
@@ -1210,7 +1340,7 @@ def _setup_breakout_hit(
         pct = ((close_j - prev) / prev * 100.0) if prev > 0 else 0.0
         vol_20 = sum(float(v) for v in df["volume"][max(0, j - 19) : j + 1]) / min(20, j + 1)
         vol_mult = float(df["volume"][j]) / vol_20 if vol_20 > 0 else 0.0
-        pivot_ok = trigger_price is None or close_j > float(trigger_price)
+        pivot_ok = setup_trigger_hit(df, j, trigger_price)
         if pct >= PCT_CHANGE_MIN and vol_mult >= vol_thresh and pivot_ok:
             first_pass_idx = j
             break

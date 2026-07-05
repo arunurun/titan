@@ -25,6 +25,9 @@ SMALL_CAP_CMF_MIN = 0.0
 MICRO_CAP_VPR_MIN = 2.0
 MICRO_CAP_CMF_MIN = 0.05
 MICRO_CAP_DELIVERY_PCT_MIN = 40.0
+MICRO_CAP_DELIVERY_AVG_RATIO = 0.8
+DELIVERY_ANOMALY_LOOKBACK = 20
+RS_BENCHMARK_FLAT_BONUS = 10.0
 
 # Base quality weights (user spec)
 _BASE_W_COMPRESSION = 0.40
@@ -115,21 +118,56 @@ def liquidity_quality_score(
     return round(_weighted_mean(components), 2)
 
 
-def liquidity_gate_pass(tier: str | None, median_turnover_inr: float | None) -> bool:
+def _liquidity_turnover_inr(
+    median_turnover_inr: float | None,
+    *,
+    session_notional_inr: float | None = None,
+) -> float | None:
+    """Effective turnover for gate: median first, else session Volume(T)*Close(T)."""
+    if _is_finite(median_turnover_inr):
+        return float(median_turnover_inr)
+    if _is_finite(session_notional_inr):
+        return float(session_notional_inr)
+    return None
+
+
+def liquidity_gate_fail_reason(
+    tier: str | None,
+    median_turnover_inr: float | None,
+    *,
+    session_notional_inr: float | None = None,
+) -> str | None:
     """
-    Hard liquidity gate by tier.
+    Hard liquidity gate by tier (fail-closed).
 
     Small cap: median daily turnover >= 2 crore INR.
     Micro cap: median daily turnover >= 3 crore INR.
-    Missing turnover skips the gate (returns True).
+    Missing median falls back to session Volume(T)*Close(T); both missing fails.
     """
-    if not _is_finite(median_turnover_inr):
-        return True
+    turnover = _liquidity_turnover_inr(
+        median_turnover_inr, session_notional_inr=session_notional_inr,
+    )
+    if turnover is None:
+        return "missing_liquidity_data"
     tier_key = _normalize_tier(tier)
     floor = SMALL_CAP_MIN_MEDIAN_TURNOVER_INR
     if tier_key == TIER_MICRO_CAP:
         floor = MICRO_CAP_MIN_MEDIAN_TURNOVER_INR
-    return float(median_turnover_inr) >= floor
+    if turnover < floor:
+        return "pre_filter_liquidity"
+    return None
+
+
+def liquidity_gate_pass(
+    tier: str | None,
+    median_turnover_inr: float | None,
+    *,
+    session_notional_inr: float | None = None,
+) -> bool:
+    """Return True when liquidity gate passes; see liquidity_gate_fail_reason."""
+    return liquidity_gate_fail_reason(
+        tier, median_turnover_inr, session_notional_inr=session_notional_inr,
+    ) is None
 
 
 def volume_persistence_score(
@@ -271,17 +309,36 @@ def micro_cap_stricter_rules(tier: str | None = None) -> dict[str, Any]:
     }
 
 
+def delivery_anomaly_required_pct(
+    delivery_pct: float | None,
+    avg_delivery_pct: float | None,
+    *,
+    static_floor: float = MICRO_CAP_DELIVERY_PCT_MIN,
+    avg_ratio: float = MICRO_CAP_DELIVERY_AVG_RATIO,
+) -> float | None:
+    """Effective delivery floor: max(static floor, avg[T-20..T-1] × ratio)."""
+    floor = float(static_floor)
+    if _is_finite(avg_delivery_pct):
+        floor = max(floor, float(avg_delivery_pct) * float(avg_ratio))
+    return floor
+
+
 def micro_cap_participation_pass(
     tier: str | None,
     *,
     vpr: float | None = None,
     cmf: float | None = None,
     delivery_pct: float | None = None,
+    avg_delivery_pct: float | None = None,
 ) -> bool | None:
     """
     Check VPR/CMF/delivery against tier thresholds.
 
-    Returns None when required inputs are missing (skip check).
+    Micro-cap delivery uses day-T delivery vs trailing avg (T-20..T-1) × 0.8
+    with the static 40% floor. When day-T delivery is missing, the delivery leg
+    is bypassed (caller should set ``PENDING_DELIVERY_DATA`` risk flag).
+
+    Returns None when no participation inputs are available (skip check).
     """
     rules = micro_cap_stricter_rules(tier)
     checks: list[bool] = []
@@ -292,10 +349,12 @@ def micro_cap_participation_pass(
         checks.append(float(cmf) > float(rules["cmf_min"]))
 
     delivery_min = rules.get("delivery_pct_min")
-    if delivery_min is not None:
-        if not _is_finite(delivery_pct):
-            return None
-        checks.append(float(delivery_pct) > float(delivery_min))
+    if delivery_min is not None and _is_finite(delivery_pct):
+        required = delivery_anomaly_required_pct(
+            delivery_pct, avg_delivery_pct, static_floor=float(delivery_min),
+        )
+        if required is not None:
+            checks.append(float(delivery_pct) >= required)
 
     if not checks:
         return None
@@ -430,8 +489,17 @@ def compute_evidence_inputs(
     )
 
     atr_arr = _atr_simple(highs[:n], lows[:n], closes[:n])
-    atr_recent = sum(atr_arr[max(0, t - 5) : t]) / max(1, min(5, t))
-    atr_prior = sum(atr_arr[max(0, t - 15) : max(0, t - 5)]) / max(1, min(10, max(0, t - 5)))
+    # Base-quality compression: ATR windows strictly before signal day T.
+    atr_recent_end = t
+    atr_recent_start = max(0, t - 5)
+    atr_prior_end = max(0, t - 5)
+    atr_prior_start = max(0, t - 15)
+    atr_recent = sum(atr_arr[atr_recent_start:atr_recent_end]) / max(
+        1, atr_recent_end - atr_recent_start,
+    )
+    atr_prior = sum(atr_arr[atr_prior_start:atr_prior_end]) / max(
+        1, atr_prior_end - atr_prior_start,
+    )
     atr_compression = (
         _clamp(100.0 * (1.0 - (atr_recent / atr_prior)), 0.0, 100.0) if atr_prior > 0 else None
     )
@@ -445,8 +513,9 @@ def compute_evidence_inputs(
             consolidation_days += 1
 
     pivot = cons_high
+    pre_breakout_close = float(closes[t - 1]) if t >= 1 else float(closes[t])
     pivot_proximity = (
-        _clamp(100.0 * (1.0 - abs(float(closes[t]) - pivot) / pivot), 0.0, 100.0)
+        _clamp(100.0 * (1.0 - abs(pre_breakout_close - pivot) / pivot), 0.0, 100.0)
         if pivot > 0
         else None
     )
@@ -476,6 +545,53 @@ def compute_evidence_inputs(
     }
 
 
+def return_5d_pct(
+    closes: Sequence[float],
+    as_of_idx: int,
+) -> float | None:
+    """Close-to-close % return over five sessions ending at ``as_of_idx``."""
+    t = as_of_idx
+    if t < 5:
+        return None
+    c0 = float(closes[t - 5])
+    c1 = float(closes[t])
+    if c0 <= 0:
+        return None
+    return round((c1 / c0 - 1.0) * 100.0, 4)
+
+
+def relative_strength_vs_benchmark(
+    stock_5d_return: float | None,
+    benchmark_5d_return: float | None,
+) -> float | None:
+    """Stock minus benchmark 5d return (percentage points)."""
+    if not _is_finite(stock_5d_return) or not _is_finite(benchmark_5d_return):
+        return None
+    return round(float(stock_5d_return) - float(benchmark_5d_return), 4)
+
+
+def relative_strength_rank_subscore(
+    rel_return_5d: float | None,
+    *,
+    benchmark_5d_return: float | None = None,
+) -> float:
+    """
+    Map relative 5d return to 0-100 rank subscore.
+
+    Bonus when the benchmark is flat/negative and the stock is outperforming.
+    """
+    if not _is_finite(rel_return_5d):
+        return _NEUTRAL_SUBSCORE
+    rs = _clamp(50.0 + float(rel_return_5d) * 5.0, 0.0, 100.0)
+    if (
+        _is_finite(benchmark_5d_return)
+        and float(benchmark_5d_return) <= 0.0
+        and float(rel_return_5d) > 0.0
+    ):
+        rs = _clamp(rs + RS_BENCHMARK_FLAT_BONUS, 0.0, 100.0)
+    return rs
+
+
 def compute_evidence_metrics(
     df: dict[str, Any],
     as_of_idx: int,
@@ -484,6 +600,7 @@ def compute_evidence_metrics(
     *,
     bhav_turnover_lacs: float | None = None,
     delivery_pct: float | None = None,
+    avg_delivery_pct: float | None = None,
     free_float_pct: float | None = None,
 ) -> dict[str, Any]:
     """Evidence bundle for scanner integration at bar T."""
@@ -492,11 +609,26 @@ def compute_evidence_metrics(
     inputs = compute_evidence_inputs(df, as_of_idx, bhav_turnover_lacs=bhav_turnover_lacs)
     vpr, cmf = _flow_metrics_from_bars(df, as_of_idx)
     part_pass = micro_cap_participation_pass(
-        tier_name, vpr=vpr, cmf=cmf, delivery_pct=delivery_pct,
+        tier_name,
+        vpr=vpr,
+        cmf=cmf,
+        delivery_pct=delivery_pct,
+        avg_delivery_pct=avg_delivery_pct,
     )
+    participation_risk_flag: str | None = None
+    tier_key = _normalize_tier(tier_name)
+    if tier_key == TIER_MICRO_CAP and not _is_finite(delivery_pct):
+        participation_risk_flag = "PENDING_DELIVERY_DATA"
 
+    closes = df["close"]
     median_inr = inputs["median_turnover_inr"]
-    liq_ok = liquidity_gate_pass(tier_name, median_inr)
+    session_notional: float | None = None
+    if _is_finite(closes[t]) and _is_finite(volumes[t]):
+        session_notional = float(closes[t]) * float(volumes[t])
+    liq_fail = liquidity_gate_fail_reason(
+        tier_name, median_inr, session_notional_inr=session_notional,
+    )
+    liq_ok = liq_fail is None
     liq_quality = liquidity_quality_score(
         median_inr,
         delivery_pct,
@@ -524,7 +656,7 @@ def compute_evidence_metrics(
 
     return {
         "liquidity_gate_pass": liq_ok,
-        "liquidity_gate_fail": None if liq_ok else "pre_filter_liquidity",
+        "liquidity_gate_fail": liq_fail,
         "liquidity_quality": liq_quality,
         "median_turnover_inr": round(float(median_inr), 2) if _is_finite(median_inr) else None,
         "delivery_pct": round(float(delivery_pct), 4) if _is_finite(delivery_pct) else None,
@@ -532,6 +664,10 @@ def compute_evidence_metrics(
         "vpr": round(vpr, 4) if vpr is not None else None,
         "cmf": round(cmf, 4) if cmf is not None else None,
         "micro_participation_pass": part_pass,
+        "participation_risk_flag": participation_risk_flag,
+        "avg_delivery_pct": (
+            round(float(avg_delivery_pct), 4) if _is_finite(avg_delivery_pct) else None
+        ),
         "persistence_score": persist,
         "persistence_pass_min": persistence_pass_min(tier_name),
         "breakout_stage": stage,
@@ -580,8 +716,13 @@ def composite_rank_score(
     else:
         acceleration = _clamp(pct_change / 10.0 * 100.0, 0.0, 100.0)
 
-    rsi_val = float(metrics.get("rsi_val") or 50.0)
-    rs = _clamp((rsi_val - 30.0) / 40.0 * 100.0, 0.0, 100.0)
+    rel_5d = metrics.get("rel_return_5d_vs_benchmark")
+    bench_5d = metrics.get("benchmark_5d_return")
+    if _is_finite(rel_5d):
+        rs = relative_strength_rank_subscore(float(rel_5d), benchmark_5d_return=bench_5d)
+    else:
+        rsi_val = float(metrics.get("rsi_val") or 50.0)
+        rs = _clamp((rsi_val - 30.0) / 40.0 * 100.0, 0.0, 100.0)
 
     risk = 100.0
     if metrics.get("breakout_stage") == 3:

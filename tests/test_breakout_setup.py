@@ -98,6 +98,29 @@ def test_setup_to_breakout_rate_empty():
     assert summary["precision_t5"] is None
 
 
+def test_setup_trigger_hit_gap_up_high_only():
+    from breakout_setup import setup_trigger_hit
+
+    df = {
+        "close": [98.0, 99.5],
+        "high": [99.0, 101.0],
+        "low": [97.0, 99.0],
+    }
+    assert setup_trigger_hit(df, 1, 100.0) is True
+
+
+def test_setup_trigger_hit_requires_close_or_high():
+    from breakout_setup import setup_trigger_hit
+
+    df = {
+        "close": [98.0, 99.0],
+        "high": [99.0, 99.5],
+        "low": [97.0, 98.5],
+    }
+    assert setup_trigger_hit(df, 1, 100.0) is False
+    assert setup_trigger_hit(df, 1, 99.5) is True
+
+
 def test_setup_to_breakout_rate_precision():
     from breakout_backtest import setup_to_breakout_rate
 

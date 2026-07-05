@@ -214,6 +214,155 @@ def load_delivery_pct_by_symbol(
     return out
 
 
+_EARNINGS_PURPOSE_KEYWORDS = ("result", "earnings", "financial result")
+
+
+def _purpose_is_earnings_event(purpose: str) -> bool:
+    p = str(purpose or "").strip().lower()
+    return any(kw in p for kw in _EARNINGS_PURPOSE_KEYWORDS)
+
+
+def load_delivery_anomaly_by_symbol(
+    symbols: list[str],
+    as_of_date: str | date | None = None,
+    *,
+    nse_cache_dir: Path | None = None,
+    lookback: int = 20,
+) -> dict[str, dict[str, float | None]]:
+    """
+    Day-T delivery and trailing average (T-lookback..T-1) per symbol.
+
+    Returns ``{sym: {"delivery_t": float|None, "avg_delivery_20d": float|None}}``.
+    """
+    syms = sorted({str(s).strip().upper() for s in symbols if s})
+    empty = {"delivery_t": None, "avg_delivery_20d": None}
+    out: dict[str, dict[str, float | None]] = {sym: dict(empty) for sym in syms}
+    if not syms:
+        return out
+
+    as_of = as_of_date
+    if isinstance(as_of, date):
+        as_of = as_of.isoformat()
+    if as_of is None:
+        as_of = datetime.now(IST).date().isoformat()
+
+    buckets: dict[str, list[float]] = defaultdict(list)
+    client = _supabase_client()
+    if client is not None:
+        try:
+            res = (
+                client.table("delivery_daily")
+                .select("trade_date,symbol,deliv_per")
+                .in_("symbol", syms)
+                .lte("trade_date", as_of)
+                .order("trade_date", desc=True)
+                .limit(max(5000, len(syms) * (lookback + 5)))
+                .execute()
+            )
+            for row in list(getattr(res, "data", None) or []):
+                sym = str(row.get("symbol") or "").strip().upper()
+                if sym not in out or len(buckets[sym]) >= lookback + 1:
+                    continue
+                try:
+                    val = float(row.get("deliv_per"))
+                except (TypeError, ValueError):
+                    continue
+                if val >= 0:
+                    buckets[sym].append(val)
+        except APIError as exc:
+            payload = exc.args[0] if exc.args else {}
+            msg = payload.get("message", str(exc)) if isinstance(payload, dict) else str(exc)
+            code = payload.get("code", "") if isinstance(payload, dict) else ""
+            if code != "PGRST205" and "could not find the table" not in msg.lower():
+                logger.info("delivery_daily anomaly read failed: %s", exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.info("delivery_daily anomaly read failed: %s", exc)
+
+    missing_today = {sym for sym in syms if not buckets.get(sym)}
+    if missing_today and nse_cache_dir is not None:
+        bhav_avg = _avg_delivery_from_bhav_cache(nse_cache_dir, missing_today)
+        for sym, val in bhav_avg.items():
+            if sym in out and not buckets.get(sym):
+                buckets[sym] = [val]
+
+    for sym in syms:
+        vals = buckets.get(sym) or []
+        if not vals:
+            continue
+        out[sym]["delivery_t"] = round(vals[0], 4)
+        prior = vals[1 : lookback + 1]
+        if prior:
+            out[sym]["avg_delivery_20d"] = round(sum(prior) / len(prior), 4)
+
+    return out
+
+
+def load_days_to_next_earnings_by_symbol(
+    symbols: list[str],
+    as_of_date: str | date | None = None,
+    *,
+    lookahead_days: int = 30,
+) -> dict[str, int | None]:
+    """
+    Calendar days until the next earnings/results ex-date per symbol.
+
+    Reads ``corporate_actions_calendar`` when Supabase is configured.
+    """
+    syms = sorted({str(s).strip().upper() for s in symbols if s})
+    out: dict[str, int | None] = {sym: None for sym in syms}
+    if not syms:
+        return out
+
+    as_of = as_of_date
+    if isinstance(as_of, date):
+        anchor = as_of
+    elif as_of:
+        try:
+            anchor = date.fromisoformat(str(as_of).strip()[:10])
+        except ValueError:
+            anchor = datetime.now(IST).date()
+    else:
+        anchor = datetime.now(IST).date()
+
+    client = _supabase_client()
+    if client is None:
+        return out
+
+    end_date = (anchor + timedelta(days=max(1, lookahead_days))).isoformat()
+    try:
+        res = (
+            client.table("corporate_actions_calendar")
+            .select("symbol,ex_date,purpose")
+            .in_("symbol", syms)
+            .gte("ex_date", anchor.isoformat())
+            .lte("ex_date", end_date)
+            .order("ex_date")
+            .execute()
+        )
+        for row in list(getattr(res, "data", None) or []):
+            sym = str(row.get("symbol") or "").strip().upper()
+            if sym not in out or out[sym] is not None:
+                continue
+            if not _purpose_is_earnings_event(str(row.get("purpose") or "")):
+                continue
+            ex_raw = str(row.get("ex_date") or "").strip()[:10]
+            try:
+                ex_d = date.fromisoformat(ex_raw)
+            except ValueError:
+                continue
+            out[sym] = (ex_d - anchor).days
+    except APIError as exc:
+        payload = exc.args[0] if exc.args else {}
+        msg = payload.get("message", str(exc)) if isinstance(payload, dict) else str(exc)
+        code = payload.get("code", "") if isinstance(payload, dict) else ""
+        if code != "PGRST205" and "could not find the table" not in msg.lower():
+            logger.info("corporate_actions_calendar read failed: %s", exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.info("corporate_actions_calendar read failed: %s", exc)
+
+    return out
+
+
 def load_free_float_pct_by_symbol(
     symbols: list[str],
     as_of_date: str | date | None = None,

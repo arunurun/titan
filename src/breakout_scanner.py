@@ -23,6 +23,9 @@ try:
         composite_rank_score,
         compute_evidence_metrics,
         persistence_pass_min,
+        relative_strength_vs_benchmark,
+        return_5d_pct,
+        _atr_simple,
     )
     from .breakout_breeze_codes import build_breeze_code_map
     from .breakout_setup import (
@@ -40,6 +43,9 @@ except ImportError:
         composite_rank_score,
         compute_evidence_metrics,
         persistence_pass_min,
+        relative_strength_vs_benchmark,
+        return_5d_pct,
+        _atr_simple,
     )
     from breakout_breeze_codes import build_breeze_code_map
     from breakout_setup import (
@@ -64,7 +70,6 @@ ADX_SOFT_FLOOR = 20.0
 ADX_HARD_FLOOR = 25.0
 RSI_MIN = 50.0
 RSI_MAX_NORMAL = 70.0
-RSI_MAX_HOT = 75.0
 HOT_VOL_THRESHOLD = 5.0
 SMA20_RECLAIM_VOL_THRESHOLD = 5.0
 MICRO_CAP_VOL_CONTINUATION = 2.5
@@ -75,12 +80,17 @@ PRE_SIGNAL_FULL_LOOKBACK = 15
 PRE_SIGNAL_CUM_RETURN_LOOKBACK = 10
 PRE_SIGNAL_CUM_RETURN_MAX = 30.0
 PRE_SIGNAL_VOL_SPIKE_MULT = 2.0
-PRE_SIGNAL_VOL_SPIKE_DAYS_MAX = 2
+PRE_SIGNAL_VOL_SPIKE_DAYS_MAX = 4
 PRE_SIGNAL_ADX_TRAJECTORY_LOOKBACK = 10
 PRE_SIGNAL_ADX_SOFT_SHORT_LOOKBACK = 5
-PRE_SIGNAL_COOLDOWN_SESSIONS = 20
+PRE_SIGNAL_COOLDOWN_SESSIONS = 10
 PRE_SIGNAL_COOLDOWN_CONSOLIDATION_MAX = 12.0
 PRE_SIGNAL_COOLDOWN_DIST_20D_HIGH_MIN = -3.0
+UPPER_CIRCUIT_PCT_MIN = 4.9
+MARKET_REGIME_BENCHMARK = "NIFTY_SMALLCAP_100.NS"
+MARKET_REGIME_SMA_WINDOW = 20
+CLOSE_POSITION_MIN = 0.5
+IMMINENT_EARNINGS_DAYS = 3
 ADX_SOFT_VOL_BONUS = 0.5
 ADX_SOFT_CUM_RETURN_MAX = 20.0
 POWER_GAP_CUM_RETURN_MAX = 15.0
@@ -599,6 +609,61 @@ def _prior_volume_spike(
     return False
 
 
+def _prices_equal(a: float, b: float, *, rel_tol: float = 1e-6) -> bool:
+    """Float-safe equality for OHLC comparisons (e.g. upper-circuit lock)."""
+    if a == b:
+        return True
+    scale = max(abs(a), abs(b), 1.0)
+    return abs(a - b) <= rel_tol * scale
+
+
+def is_upper_circuit_locked(
+    close: float,
+    high: float,
+    pct_change: float,
+    *,
+    pct_min: float = UPPER_CIRCUIT_PCT_MIN,
+) -> bool:
+    """True when close pins the day high with a circuit-scale daily gain (~5/10/20% bands)."""
+    return _prices_equal(close, high) and pct_change >= pct_min
+
+
+def evaluate_market_regime(
+    benchmark_df: dict[str, Any] | None = None,
+    *,
+    benchmark_ticker: str = MARKET_REGIME_BENCHMARK,
+) -> dict[str, Any]:
+    """Benchmark trend gate: RISK_OFF when index close is below its 20-day SMA."""
+    df = benchmark_df
+    fetch_err: str | None = None
+    if df is None:
+        df, fetch_err = fetch_yahoo_data(benchmark_ticker)
+    n = len(df["close"]) if df and df.get("close") else 0
+    if not df or n < MARKET_REGIME_SMA_WINDOW:
+        return {
+            "market_regime": "UNKNOWN",
+            "benchmark_ticker": benchmark_ticker,
+            "benchmark_close": None,
+            "benchmark_sma20": None,
+            "fetch_error": fetch_err or "insufficient_benchmark_bars",
+        }
+    closes = df["close"]
+    sma20 = calculate_sma(closes, MARKET_REGIME_SMA_WINDOW)
+    last_close = float(closes[-1])
+    last_sma = float(sma20[-1])
+    regime = "RISK_OFF" if last_close < last_sma else "RISK_ON"
+    benchmark_5d_return = return_5d_pct(closes, n - 1)
+    return {
+        "market_regime": regime,
+        "benchmark_ticker": benchmark_ticker,
+        "benchmark_close": round(last_close, 4),
+        "benchmark_sma20": round(last_sma, 4),
+        "benchmark_5d_return": benchmark_5d_return,
+        "benchmark_df": df,
+        "fetch_error": fetch_err,
+    }
+
+
 def _volume_filter_passes(
     *,
     vol_mult: float,
@@ -706,12 +771,12 @@ def _adx_trajectory_gate(
     *,
     vol_mult: float | None = None,
 ) -> tuple[bool, str | None, dict[str, Any]]:
-    """Require rising ADX on standard, adx_soft, or rsi_hot paths.
+    """Require rising ADX on standard or adx_soft paths.
 
     Standard path (empty pass_paths): falling ADX allowed when vol_mult >= 7.0.
     """
     is_standard = not pass_paths
-    needs_gate = is_standard or "adx_soft" in pass_paths or "rsi_hot" in pass_paths
+    needs_gate = is_standard or "adx_soft" in pass_paths
     t = as_of_idx
     metrics: dict[str, Any] = {
         "adx_trajectory_required": needs_gate,
@@ -858,9 +923,16 @@ def _format_risk_flags(
     power_gap: bool,
     pass_paths: list[str],
     signal_tier: str | None = None,
+    upper_circuit: bool = False,
+    extra_flags: list[str] | None = None,
 ) -> str:
     if signal_tier == SIGNAL_TIER_WATCH:
         parts: list[str] = ["WATCHLIST"]
+        if upper_circuit:
+            parts.append("UPPER_CIRCUIT")
+        for flag in extra_flags or []:
+            if flag and flag not in parts:
+                parts.append(flag)
         if power_gap:
             parts.append("circuit-risk")
         suffix = (
@@ -872,6 +944,11 @@ def _format_risk_flags(
         return ": ".join(parts) + f": {suffix}"
 
     parts: list[str] = []
+    if upper_circuit:
+        parts.append("UPPER_CIRCUIT")
+    for flag in extra_flags or []:
+        if flag and flag not in parts:
+            parts.append(flag)
     if power_gap:
         parts.append("circuit-risk")
     parts.append("HIGH CIRCUIT RISK")
@@ -889,9 +966,15 @@ _V7_FAIL_REASONS = frozenset({
     "pre_filter_signal_cooldown",
     "pre_filter_adx_soft_chase",
     "pre_filter_liquidity",
+    "missing_liquidity_data",
     "pre_filter_micro_participation",
     "v7_low_volume_persistence",
     "v7_breakout_stage_3",
+    "circuit_locked",
+    "excessive_alternate_paths",
+    "market_regime_risk_off",
+    "upper_wick_rejection",
+    "imminent_earnings",
 })
 
 
@@ -928,10 +1011,7 @@ def _classic_filter_failures(eval_result: dict[str, Any], tier_name: str) -> lis
         failures.append("vol")
 
     rsi = eval_result.get("rsi_val", 0.0)
-    rsi_ok = RSI_MIN <= rsi <= RSI_MAX_NORMAL
-    if not rsi_ok and RSI_MAX_NORMAL < rsi <= RSI_MAX_HOT and vol_mult > HOT_VOL_THRESHOLD:
-        rsi_ok = True
-    if not rsi_ok:
+    if rsi < RSI_MIN:
         failures.append("RSI")
 
     adx = eval_result.get("adx_val", 0.0)
@@ -946,6 +1026,10 @@ def _classic_filter_failures(eval_result: dict[str, Any], tier_name: str) -> lis
         adx_ok = True
     if not adx_ok:
         failures.append("ADX")
+
+    close_pos = eval_result.get("close_position")
+    if close_pos is not None and float(close_pos) < CLOSE_POSITION_MIN:
+        failures.append("upper_wick_rejection")
 
     if eval_result.get("target_gain", 0.0) < 8.0:
         failures.append("target_gain")
@@ -990,8 +1074,12 @@ def evaluate_bars_as_of(
     last_pass_idx: int | None = None,
     bhav_turnover_lacs: float | None = None,
     delivery_pct: float | None = None,
+    avg_delivery_pct: float | None = None,
     free_float_pct: float | None = None,
     sector_lead: float | None = None,
+    market_regime: str | None = None,
+    days_to_next_earnings: int | None = None,
+    benchmark_5d_return: float | None = None,
 ) -> dict[str, Any]:
     """Point-in-time breakout filter evaluation using bars[0..as_of_idx] inclusive.
 
@@ -1000,7 +1088,6 @@ def evaluate_bars_as_of(
     - vol_continuation_cum3d: 3-session cumulative vol >= tier threshold
     - vol_continuation_prior_spike: micro-cap 2.5x after prior spike session
     - sma20_reclaim: price > SMA20 with vol > 5x despite below SMA50
-    - rsi_hot: RSI 70–75 when vol > 5x
     - adx_soft: ADX 20–25 with strong vol + above SMA50 + positive day
     """
     filt = FILTERS[tier_name]
@@ -1039,23 +1126,46 @@ def evaluate_bars_as_of(
     rsi_val = rsi[-1]
     adx_val = adx_arr[-1]
     sma20_last = sma_20[-1]
-    sma50_last = sma_50[-1]
+    t = as_of_idx
+    sma50_last = float(sma_50[t - 1]) if t >= 1 else float(sma_50[-1])
     vol_20_avg_last = vol_20_avg[-1]
     latest_volume = volume[-1]
 
     sma_200 = calculate_sma(close, 200) if len(close) > 200 else [0.0] * len(close)
     sma_200_last = sma_200[-1] if sma_200 else None
-    poc_window = close[-30:] if len(close) >= 30 else close
-    vol_window = volume[-30:] if len(volume) >= 30 else volume
+    poc_start = max(0, t - 30)
+    poc_window = close[poc_start:t] if t > poc_start else close[:t]
+    vol_window = volume[poc_start:t] if t > poc_start else volume[:t]
+    if not poc_window:
+        poc_window = close[:1]
+        vol_window = volume[:1]
     poc = get_volume_profile(poc_window, vol_window)
 
-    sl_price = min(sma_50[-1], poc) * 0.98
+    if t > 0:
+        w_start = max(0, t - 20)
+        recent_20d_swing_low = min(float(l) for l in low[w_start:t])
+    else:
+        recent_20d_swing_low = float(low[0])
+    atr_arr = _atr_simple(high, low, close, period=14)
+    atr_14 = float(atr_arr[-1]) if atr_arr[-1] > 0 else 0.0
+    atr_stop = latest_price - (2.5 * atr_14) if atr_14 > 0 else recent_20d_swing_low
+    sl_price = max(recent_20d_swing_low, atr_stop)
     risk = latest_price - sl_price
     target_price = latest_price + (2.0 * risk)
     target_gain = ((target_price - latest_price) / latest_price) * 100
 
+    daily_range = float(high[-1]) - float(low[-1])
+    if daily_range > 0:
+        close_position = round((latest_price - float(low[-1])) / daily_range, 4)
+    else:
+        close_position = 1.0
+
+    stock_5d_return = return_5d_pct(close, t)
+    rel_return_5d = relative_strength_vs_benchmark(stock_5d_return, benchmark_5d_return)
+
     pass_paths: list[str] = []
     power_gap = False
+    extra_risk_flags: list[str] = []
 
     metrics = {
         "latest_price": round(latest_price, 2),
@@ -1070,6 +1180,13 @@ def evaluate_bars_as_of(
         "sma50_last": round(sma50_last, 2),
         "sma_200_last": round(sma_200_last, 2) if sma_200_last is not None else None,
         "poc": poc,
+        "close_position": round(close_position, 4),
+        "daily_range": round(daily_range, 4),
+        "stock_5d_return": stock_5d_return,
+        "benchmark_5d_return": benchmark_5d_return,
+        "rel_return_5d_vs_benchmark": rel_return_5d,
+        "atr_14": round(atr_14, 4),
+        "recent_20d_swing_low": round(recent_20d_swing_low, 2),
         "vol_20_avg_last": round(vol_20_avg_last, 2),
         "latest_volume": latest_volume,
         "sl_price": round(sl_price, 2),
@@ -1117,12 +1234,11 @@ def evaluate_bars_as_of(
         elif vol_path:
             pass_paths.append(vol_path)
 
+    if fail_reason is None and close_position < CLOSE_POSITION_MIN:
+        fail_reason = "upper_wick_rejection"
+
     if fail_reason is None:
-        rsi_ok = RSI_MIN <= rsi_val <= RSI_MAX_NORMAL
-        if not rsi_ok and RSI_MAX_NORMAL < rsi_val <= RSI_MAX_HOT and vol_mult > HOT_VOL_THRESHOLD:
-            rsi_ok = True
-            pass_paths.append("rsi_hot")
-        if not rsi_ok:
+        if rsi_val < RSI_MIN:
             fail_reason = "RSI"
 
     if fail_reason is None:
@@ -1188,6 +1304,15 @@ def evaluate_bars_as_of(
         signal_tier = SIGNAL_TIER_WATCH
         metrics["adx_soft_solo_watch"] = True
 
+    upper_circuit = is_upper_circuit_locked(latest_price, float(high[-1]), pct_change)
+    metrics["upper_circuit_locked"] = upper_circuit
+
+    alternate_bypasses = [p for p in pass_paths if p != "power_gap"]
+    metrics["alternate_bypass_count"] = len(alternate_bypasses)
+    if fail_reason is None and len(alternate_bypasses) > 1:
+        signal_tier = SIGNAL_TIER_WATCH
+        metrics["excessive_alternate_paths"] = True
+
     evidence = compute_evidence_metrics(
         df,
         as_of_idx,
@@ -1195,6 +1320,7 @@ def evaluate_bars_as_of(
         vol_20_avg,
         bhav_turnover_lacs=bhav_turnover_lacs,
         delivery_pct=delivery_pct,
+        avg_delivery_pct=avg_delivery_pct,
         free_float_pct=free_float_pct,
     )
     metrics["evidence"] = evidence
@@ -1204,10 +1330,14 @@ def evaluate_bars_as_of(
     metrics["base_score"] = evidence.get("base_score")
     metrics["median_turnover_inr"] = evidence.get("median_turnover_inr")
     metrics["delivery_pct"] = evidence.get("delivery_pct")
+    metrics["avg_delivery_pct"] = evidence.get("avg_delivery_pct")
     metrics["free_float_pct"] = evidence.get("free_float_pct")
     metrics["vpr"] = evidence.get("vpr")
     metrics["cmf"] = evidence.get("cmf")
     metrics["sector_lead"] = sector_lead
+    part_risk = evidence.get("participation_risk_flag")
+    if part_risk:
+        extra_risk_flags.append(str(part_risk))
 
     if fail_reason is None and not evidence.get("liquidity_gate_pass", True):
         pre_filter_fail = evidence.get("liquidity_gate_fail") or "pre_filter_liquidity"
@@ -1231,24 +1361,47 @@ def evaluate_bars_as_of(
             signal_tier = SIGNAL_TIER_WATCH
             v7_watch_reason = "v7_breakout_stage_3"
 
+    if fail_reason is None and upper_circuit and signal_tier == SIGNAL_TIER_PASS:
+        signal_tier = SIGNAL_TIER_WATCH
+        v7_watch_reason = "circuit_locked"
+
+    if fail_reason is None and metrics.get("excessive_alternate_paths"):
+        if signal_tier == SIGNAL_TIER_PASS:
+            signal_tier = SIGNAL_TIER_WATCH
+        if v7_watch_reason is None:
+            v7_watch_reason = "excessive_alternate_paths"
+
+    if (
+        fail_reason is None
+        and market_regime == "RISK_OFF"
+        and signal_tier == SIGNAL_TIER_PASS
+    ):
+        signal_tier = SIGNAL_TIER_WATCH
+        v7_watch_reason = "market_regime_risk_off"
+        metrics["market_regime"] = market_regime
+
+    if fail_reason is None and days_to_next_earnings is not None:
+        metrics["days_to_next_earnings"] = days_to_next_earnings
+        if days_to_next_earnings <= IMMINENT_EARNINGS_DAYS:
+            extra_risk_flags.append("IMMINENT_EARNINGS")
+            if signal_tier == SIGNAL_TIER_PASS:
+                signal_tier = SIGNAL_TIER_WATCH
+                v7_watch_reason = "imminent_earnings"
+
     if v7_watch_reason:
         metrics["v7_watch_reason"] = v7_watch_reason
-        metrics["risk_flags"] = _format_risk_flags(
-            power_gap=power_gap,
-            pass_paths=pass_paths,
-            signal_tier=signal_tier,
-        )
 
     metrics["composite_rank"] = composite_rank_score(metrics, sector_lead=sector_lead)
 
     metrics["pass_paths"] = pass_paths
     metrics["signal_tier"] = signal_tier
-    if not v7_watch_reason:
-        metrics["risk_flags"] = _format_risk_flags(
-            power_gap=power_gap,
-            pass_paths=pass_paths,
-            signal_tier=signal_tier,
-        )
+    metrics["risk_flags"] = _format_risk_flags(
+        power_gap=power_gap,
+        pass_paths=pass_paths,
+        signal_tier=signal_tier,
+        upper_circuit=upper_circuit,
+        extra_flags=extra_risk_flags,
+    )
 
     return {
         "passed": fail_reason is None and signal_tier == SIGNAL_TIER_PASS,
@@ -1399,7 +1552,7 @@ Persistence: {setup_result.get('persistence_score')}/4
 Setup Rank: {setup_result.get('setup_rank')}
 
 Trigger (no trade until confirmed):
-* Close > {trigger} with volume >= {vol_thresh}x and day >= +{pct_min}%
+* Close >= {trigger} or High >= {trigger} with volume >= {vol_thresh}x and day >= +{pct_min}%
 * After trigger, re-run breakout scan for PASS confirmation before sizing.
 """
 
@@ -1414,7 +1567,7 @@ def _build_setup_candidate(
     filt = FILTERS[tier_name]
     sym = ticker.replace(".NS", "")
     trigger = setup_result.get("setup_trigger_price")
-    trigger_s = f">{trigger}" if trigger is not None else "—"
+    trigger_s = f">={trigger}" if trigger is not None else "—"
     return {
         "Ticker": sym,
         "Breeze Code": breeze_stock_code or sym,
@@ -1478,8 +1631,12 @@ def evaluate_and_audit_stock(
     breeze_stock_code: str | None = None,
     bhav_turnover_lacs: float | None = None,
     delivery_pct: float | None = None,
+    avg_delivery_pct: float | None = None,
     free_float_pct: float | None = None,
     sector_lead: float | None = None,
+    market_regime: str | None = None,
+    days_to_next_earnings: int | None = None,
+    benchmark_5d_return: float | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     filt = FILTERS[tier_name]
     vol_thresh = filt["vol_mult"]
@@ -1514,8 +1671,12 @@ def evaluate_and_audit_stock(
         tier_name,
         bhav_turnover_lacs=bhav_turnover_lacs,
         delivery_pct=delivery_pct,
+        avg_delivery_pct=avg_delivery_pct,
         free_float_pct=free_float_pct,
         sector_lead=sector_lead,
+        market_regime=market_regime,
+        days_to_next_earnings=days_to_next_earnings,
+        benchmark_5d_return=benchmark_5d_return,
     )
     latest_price = eval_result["latest_price"]
     prev_price = eval_result["prev_price"]
@@ -2312,6 +2473,8 @@ def run_breakout_scan(
                 emit_and_log(f"Supabase OHLCV bulk load skipped: {exc}")
 
             delivery_by_sym: dict[str, float | None] = {}
+            delivery_anomaly_by_sym: dict[str, dict[str, float | None]] = {}
+            earnings_days_by_sym: dict[str, int | None] = {}
             sector_lead_by_sym: dict[str, float] = {}
             free_float_by_sym: dict[str, float | None] = {}
             turnover_by_sym: dict[str, float] = {}
@@ -2319,13 +2482,17 @@ def run_breakout_scan(
             try:
                 from breakout_eod_context import (
                     load_bhav_turnover_lacs_by_symbol,
+                    load_delivery_anomaly_by_symbol,
                     load_delivery_pct_by_symbol,
+                    load_days_to_next_earnings_by_symbol,
                     load_free_float_pct_by_symbol,
                 )
             except ImportError:
                 from .breakout_eod_context import (
                     load_bhav_turnover_lacs_by_symbol,
+                    load_delivery_anomaly_by_symbol,
                     load_delivery_pct_by_symbol,
+                    load_days_to_next_earnings_by_symbol,
                     load_free_float_pct_by_symbol,
                 )
 
@@ -2343,16 +2510,38 @@ def run_breakout_scan(
                 delivery_by_sym = load_delivery_pct_by_symbol(
                     all_syms, as_of_date=scan_date_iso, nse_cache_dir=bhav_dir if bhav_dir.is_dir() else None,
                 )
+                delivery_anomaly_by_sym = load_delivery_anomaly_by_symbol(
+                    all_syms,
+                    as_of_date=scan_date_iso,
+                    nse_cache_dir=bhav_dir if bhav_dir.is_dir() else None,
+                )
+                earnings_days_by_sym = load_days_to_next_earnings_by_symbol(
+                    all_syms, as_of_date=scan_date_iso,
+                )
                 sector_lead_by_sym = load_sector_lead_scores(all_syms, as_of_date=scan_date_iso)
                 free_float_by_sym = load_free_float_pct_by_symbol(all_syms, as_of_date=scan_date_iso)
                 loaded_delivery = sum(1 for v in delivery_by_sym.values() if v is not None)
+                loaded_anomaly = sum(
+                    1 for ctx in delivery_anomaly_by_sym.values() if ctx.get("delivery_t") is not None
+                )
+                loaded_earnings = sum(1 for v in earnings_days_by_sym.values() if v is not None)
                 emit_and_log(
                     f"EOD context: delivery={loaded_delivery}/{len(all_syms)} "
+                    f"delivery_anomaly_t={loaded_anomaly}/{len(all_syms)} "
+                    f"earnings_calendar={loaded_earnings}/{len(all_syms)} "
                     f"sector_lead={len(sector_lead_by_sym)} free_float="
                     f"{sum(1 for v in free_float_by_sym.values() if v is not None)}",
                 )
             except Exception as exc:  # noqa: BLE001
                 emit_and_log(f"EOD context bulk load skipped: {exc}")
+
+            # TODO: When corporate_actions_calendar ingest is unavailable, manually verify
+            # earnings dates for any PASS/WATCH breakout candidates before sizing.
+            if not any(v is not None for v in earnings_days_by_sym.values()):
+                emit_and_log(
+                    "Earnings calendar: no upcoming results dates loaded — "
+                    "verify earnings manually for PASS/WATCH names."
+                )
 
             breeze_code_by_sym: dict[str, str] = {}
             try:
@@ -2362,6 +2551,19 @@ def run_breakout_scan(
             except ValueError as exc:
                 breeze_code_by_sym = build_breeze_code_map(all_syms)
                 emit_and_log(f"Breeze codes (scrip master only): {exc}")
+
+            regime_info = evaluate_market_regime()
+            market_regime = regime_info.get("market_regime")
+            benchmark_5d_return = regime_info.get("benchmark_5d_return")
+            emit_and_log(
+                f"Market regime: {market_regime} "
+                f"({regime_info.get('benchmark_ticker')} "
+                f"close={regime_info.get('benchmark_close')} "
+                f"sma20={regime_info.get('benchmark_sma20')} "
+                f"ret5d={benchmark_5d_return})"
+            )
+            if regime_info.get("fetch_error") and market_regime == "UNKNOWN":
+                emit_and_log(f"Market regime fetch note: {regime_info['fetch_error']}")
 
             for tier_key, tickers in tier_ticker_lists.items():
                 tier_label = FILTERS[tier_key]["type"]
@@ -2379,6 +2581,13 @@ def run_breakout_scan(
 
                 for ticker in tickers:
                     sym = ticker.replace(".NS", "").upper()
+                    anomaly_ctx = delivery_anomaly_by_sym.get(sym) or {}
+                    delivery_t = anomaly_ctx.get("delivery_t")
+                    delivery_for_eval = (
+                        float(delivery_t)
+                        if delivery_t is not None
+                        else delivery_by_sym.get(sym)
+                    )
                     candidate, analysis_record = evaluate_and_audit_stock(
                         ticker,
                         tier_key,
@@ -2387,9 +2596,13 @@ def run_breakout_scan(
                         scan_date=scan_date_iso,
                         breeze_stock_code=breeze_code_by_sym.get(sym),
                         bhav_turnover_lacs=turnover_by_sym.get(sym),
-                        delivery_pct=delivery_by_sym.get(sym),
+                        delivery_pct=delivery_for_eval,
+                        avg_delivery_pct=anomaly_ctx.get("avg_delivery_20d"),
                         free_float_pct=free_float_by_sym.get(sym),
                         sector_lead=sector_lead_by_sym.get(sym),
+                        market_regime=market_regime if market_regime != "UNKNOWN" else None,
+                        days_to_next_earnings=earnings_days_by_sym.get(sym),
+                        benchmark_5d_return=benchmark_5d_return,
                     )
                     analysis_records.append(analysis_record)
                     if candidate:
