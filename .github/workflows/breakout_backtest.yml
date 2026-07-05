@@ -1,0 +1,71 @@
+# Historical breakout scanner backtest (Yahoo bars → local cache → replay report).
+# Prerequisite: optional — run "Ingest breakout OHLCV" to warm Supabase; backtest fetches Yahoo directly.
+
+name: Breakout backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      range:
+        description: "Yahoo chart range (e.g. 3m for ~2–3 month efficacy window)"
+        required: false
+        default: "3m"
+      full_universe:
+        description: "Run full Smallcap 100 + Microcap 250 universe (~350 stocks)"
+        required: false
+        default: true
+        type: boolean
+      dry_run:
+        description: "Smoke test: first 5 symbols only"
+        required: false
+        default: false
+        type: boolean
+      setup_backtest:
+        description: "Run PRE_BREAKOUT setup→breakout precision backtest instead of signal hit-rate"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run breakout historical backtest
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          ARGS=(--range "${{ github.event.inputs.range || '3m' }}" --json)
+          if [ "${{ github.event.inputs.full_universe }}" = "true" ]; then
+            ARGS+=(--full-universe)
+          fi
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS+=(--dry-run)
+          fi
+          if [ "${{ github.event.inputs.setup_backtest }}" = "true" ]; then
+            ARGS+=(--setup-backtest)
+          fi
+          echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Starting breakout backtest: ${ARGS[*]}"
+          python -u scripts/breakout_backtest.py "${ARGS[@]}"
+
+      - name: Upload backtest reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: breakout-backtest-${{ github.run_number }}-${{ github.event.inputs.range || '3m' }}
+          path: |
+            output/breakoutcheck/**/*
+            data/cache/breakout_yahoo/backtest/*.json
+          if-no-files-found: warn
