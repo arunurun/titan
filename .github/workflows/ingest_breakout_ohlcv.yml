@@ -61,5 +61,7 @@ jobs:
           if [ "${{ github.event.inputs.full_backfill }}" = "true" ]; then
             ARGS+=(--full-backfill)
           fi
+          # Tolerate sparse Yahoo misses (delisted / thin symbols) without failing the whole job.
+          ARGS+=(--max-failures 10)
           echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Starting breakout OHLCV ingest with args: ${ARGS[*]}"
           python -u scripts/ingest_breakout_ohlcv.py "${ARGS[@]}"

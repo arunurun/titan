@@ -128,6 +128,12 @@ def main() -> int:
     ap.add_argument("--full-backfill", action="store_true", help="Upsert full ~1y history per symbol")
     ap.add_argument("--dry-run", action="store_true", help="Fetch and parse only; no Supabase writes")
     ap.add_argument("--workers", type=int, default=4, help="Parallel Yahoo workers (default 4)")
+    ap.add_argument(
+        "--max-failures",
+        type=int,
+        default=0,
+        help="Exit 0 when failed symbol count is at most N (default 0 = strict)",
+    )
     args = ap.parse_args()
 
     workers = max(1, min(6, int(args.workers)))
@@ -181,8 +187,17 @@ def main() -> int:
             failed += 1
             print(f"  {sym}: FAILED ({status})")
 
+    max_failures = max(0, int(args.max_failures))
     print(f"DONE. symbols_ok={ok} failed={failed} rows={total_rows}")
-    return 0 if failed == 0 else 1
+    if failed == 0:
+        return 0
+    if failed <= max_failures:
+        print(
+            f"WARNING: {failed} symbol(s) failed but within --max-failures={max_failures}; exiting 0",
+            file=sys.stderr,
+        )
+        return 0
+    return 1
 
 
 if __name__ == "__main__":
