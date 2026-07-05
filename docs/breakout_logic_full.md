@@ -6,7 +6,7 @@ Evidence layer: `src/breakout_evidence.py`.
 SETUP (PRE_BREAKOUT): `evaluate_setup_as_of` in `src/breakout_setup.py`.  
 Historical replay / backtest: `src/breakout_backtest.py` (same `evaluate_bars_as_of`).
 
-For a shorter operational summary see `docs/breakout_logic.md`.
+Reflects **PR #36** scanner refactor on `main` (ATR/swing stop, RSI cap removal, fail-closed liquidity, survivorship haircut in backtest, and related gates). For a shorter operational summary see `docs/breakout_logic.md`.
 
 ---
 
@@ -56,7 +56,7 @@ Report sort order: PASS → WATCH → SETUP, each by rank descending. SETUP capp
 3. `load_sector_lead_scores`
 4. `load_free_float_pct_by_symbol`
 
-Missing fields degrade gracefully: liquidity gate skipped if no turnover; sector lead defaults to 50 in rank.
+Missing EOD fields degrade gracefully: liquidity quality reweights; sector lead defaults to 50 in rank; micro participation skips when inputs are absent (delivery missing → `PENDING_DELIVERY_DATA` risk flag). Liquidity gate is **fail-closed** when both median and session turnover are missing (`missing_liquidity_data`).
 
 ---
 
@@ -85,17 +85,19 @@ Filters run in sequence; first failure sets `fail_reason`. Alternate paths accum
 | 2 | Daily change | 3% ≤ pct ≤ 20% | `pct_change` |
 | 3 | SMA50 trend | above SMA50 **or** `sma20_reclaim` | `SMA50` |
 | 4 | Volume | standard, cum-3d, or micro continuation | `vol` |
-| 5 | RSI | 50–70 **or** `rsi_hot` | `RSI` |
-| 6 | ADX | ≥ 25 **or** `adx_soft` | `ADX` |
-| 7 | Target R:R | `(target − price) / price ≥ 8%` | `target_gain` |
-| 8 | Pre-signal validation | cum return ≤ 30%; ≤ 2 vol-spike days | `pre_filter_cum_return`, `pre_filter_vol_spike` |
-| 9 | ADX trajectory | rising ADX T−1 vs T−10 (path-specific) | `pre_filter_*_adx_trajectory` |
-| 10 | Signal cooldown | no repeat PASS within 20 sessions (unless consolidation exempt) | `pre_filter_signal_cooldown` |
-| 11 | ADX-soft chase | if `adx_soft`: T−10..T−1 cum return ≤ 20% | `pre_filter_adx_soft_chase` |
-| 12 | Power-gap / adx_soft tiering | may set WATCH — see §7 | — |
-| 13 | Liquidity gate | median turnover ≥ tier floor | `pre_filter_liquidity` |
-| 14 | Micro participation | VPR/CMF/delivery rules | `pre_filter_micro_participation` |
-| 15 | v7 PASS gates | persistence min; stage ≠ 3 → WATCH | `v7_low_volume_persistence`, `v7_breakout_stage_3` |
+| 5 | Close position | `(close − low) / range ≥ 0.5` (no upper-wick rejection) | `upper_wick_rejection` |
+| 6 | RSI | RSI ≥ 50 (no upper cap; stage 3 handles exhaustion) | `RSI` |
+| 7 | ADX | ≥ 25 **or** `adx_soft` | `ADX` |
+| 8 | Target R:R | stop = max(20d swing low, price − 2.5×ATR14); target = price + 2×risk; gain ≥ 8% | `target_gain` |
+| 9 | Pre-signal validation | T−10 cum return ≤ 30%; ≤ 4 vol-spike days in T−15..T−1 | `pre_filter_cum_return`, `pre_filter_vol_spike` |
+| 10 | ADX trajectory | rising ADX T−1 vs T−10 (path-specific); standard allows vol ≥ 7× exception | `pre_filter_standard_adx_trajectory`, `pre_filter_adx_trajectory` |
+| 11 | Signal cooldown | no repeat PASS within **10** sessions (unless consolidation exempt) | `pre_filter_signal_cooldown` |
+| 12 | ADX-soft chase | if `adx_soft`: T−10..T−1 cum return ≤ 20% | `pre_filter_adx_soft_chase` |
+| 13 | Power-gap / adx_soft tiering | may set WATCH — see §7 | — |
+| 14 | Liquidity gate | median turnover ≥ tier floor (session notional fallback) | `pre_filter_liquidity`, `missing_liquidity_data` |
+| 15 | Micro participation | VPR/CMF/delivery rules | `pre_filter_micro_participation` |
+| 16 | v7 PASS gates | persistence min; stage ≠ 3 → WATCH | `v7_low_volume_persistence`, `v7_breakout_stage_3` |
+| 17 | Post-evidence WATCH | upper circuit, >1 alternate path, RISK_OFF regime, imminent earnings — see §7 | — |
 
 ### Threshold constants (`breakout_scanner.py`)
 
@@ -106,18 +108,26 @@ Filters run in sequence; first failure sets `fail_reason`. Alternate paths accum
 | `PCT_CHANGE_MAX_POWER_GAP` | 20.0% |
 | `ADX_HARD_FLOOR` / `ADX_SOFT_FLOOR` | 25 / 20 |
 | `ADX_SOFT_VOL_BONUS` | +0.5× on tier vol thresh |
-| `RSI_MIN` / `RSI_MAX_NORMAL` / `RSI_MAX_HOT` | 50 / 70 / 75 |
-| `HOT_VOL_THRESHOLD` | 5.0× |
+| `RSI_MIN` | 50 (no upper RSI cap) |
+| `HOT_VOL_THRESHOLD` | 5.0× (power-gap vol recovery only) |
 | `SMA20_RECLAIM_VOL_THRESHOLD` | 5.0× |
-| `PRE_SIGNAL_CUM_RETURN_MAX` | 30% |
-| `PRE_SIGNAL_VOL_SPIKE_MULT` | 2.0× |
-| `PRE_SIGNAL_VOL_SPIKE_DAYS_MAX` | 2 |
-| `PRE_SIGNAL_COOLDOWN_SESSIONS` | 20 |
+| `CLOSE_POSITION_MIN` | 0.5 |
+| `PRE_SIGNAL_FULL_LOOKBACK` | 15 sessions |
+| `PRE_SIGNAL_CUM_RETURN_LOOKBACK` | 10 sessions |
+| `PRE_SIGNAL_CUM_RETURN_MAX` | 30% (T−10→T−1) |
+| `PRE_SIGNAL_VOL_SPIKE_MULT` | 2.0× 20d avg |
+| `PRE_SIGNAL_VOL_SPIKE_DAYS_MAX` | 4 |
+| `PRE_SIGNAL_COOLDOWN_SESSIONS` | 10 |
 | `PRE_SIGNAL_COOLDOWN_CONSOLIDATION_MAX` | 12% range |
 | `PRE_SIGNAL_COOLDOWN_DIST_20D_HIGH_MIN` | −3% from 20d high |
+| `ADX_SOFT_CUM_RETURN_MAX` | 20% |
 | `POWER_GAP_CUM_RETURN_MAX` | 15% |
 | `POWER_GAP_VOL_RECOVERY_THRESHOLD` | 5.5× |
 | `STANDARD_ADX_TRAJECTORY_VOL_EXCEPTION` | 7.0× |
+| `UPPER_CIRCUIT_PCT_MIN` | 4.9% (close=high circuit lock → WATCH) |
+| `MARKET_REGIME_BENCHMARK` | `NIFTY_SMALLCAP_100.NS` |
+| `MARKET_REGIME_SMA_WINDOW` | 20 sessions |
+| `IMMINENT_EARNINGS_DAYS` | 3 (earnings within window → WATCH) |
 
 ---
 
@@ -131,7 +141,6 @@ Recorded in `pass_paths` and echoed in `risk_flags`.
 | `vol_continuation_cum3d` | 3-session cumulative vol ≥ tier threshold |
 | `vol_continuation_prior_spike` | Micro: prior spike + vol ≥ 2.5× |
 | `sma20_reclaim` | Below SMA50 but ≥ SMA20 with vol ≥ 5× |
-| `rsi_hot` | RSI 70–75 with vol > 5× |
 | `adx_soft` | ADX 20–25, vol ≥ tier+0.5, above SMA50, positive day |
 
 Helper functions: `_volume_filter_passes`, `_power_gap_confirmation_gate`, `_adx_trajectory_gate`, `_signal_cooldown_gate`, `_adx_soft_chase_gate`.
@@ -146,16 +155,20 @@ Helper functions: `_volume_filter_passes`, `_power_gap_confirmation_gate`, `_adx
 | `v6_adx_soft_solo` | Only alternate path is `adx_soft` |
 | `v7_low_volume_persistence` | `persistence_score` below tier minimum |
 | `v7_breakout_stage_3` | Parabolic stretch > 4 ATR |
+| `circuit_locked` | Upper circuit lock (close pins high, pct ≥ 4.9%) |
+| `excessive_alternate_paths` | More than one non–power-gap alternate path |
+| `market_regime_risk_off` | `NIFTY_SMALLCAP_100` close below 20d SMA |
+| `imminent_earnings` | Next earnings within 3 sessions |
 
-Set in `evaluate_bars_as_of` after evidence metrics; `passed` remains `false` for WATCH.
+Set in `evaluate_bars_as_of` after evidence metrics; `passed` remains `false` for WATCH. Risk flags may also include `IMMINENT_EARNINGS` and `PENDING_DELIVERY_DATA`.
 
 ---
 
 ## 8. Evidence layer (`breakout_evidence.py`)
 
-### 8.1 Liquidity gate (hard fail)
+### 8.1 Liquidity gate (hard fail, fail-closed)
 
-`liquidity_gate_pass(tier, median_turnover_inr)` — small ≥ ₹2 cr, micro ≥ ₹3 cr median daily. Missing turnover **skips** gate.
+`liquidity_gate_fail_reason(tier, median_turnover_inr, session_notional_inr)` — small ≥ ₹2 cr, micro ≥ ₹3 cr median daily turnover. Median from Yahoo 20d notional, **overridden** by bhav avg lacs × 1,00,000 when present. When median is missing, falls back to session `Volume(T)×Close(T)`. Both missing → `missing_liquidity_data` (fail-closed).
 
 ### 8.2 Liquidity quality (0–100, scoring)
 
@@ -168,14 +181,14 @@ Set in `evaluate_bars_as_of` after evidence metrics; `passed` remains `false` fo
 | Volume consistency (20d CV) | 0.20 |
 | Free-float % | 0.20 |
 
-### 8.3 Micro-cap participation (hard fail when `False`)
+### 8.3 Micro-cap participation (hard fail when decisively `False`)
 
-`micro_cap_participation_pass` — tier VPR/CMF/delivery floors:
+`micro_cap_participation_pass` — tier VPR/CMF/delivery floors. Result `None` → skip; `False` → `pre_filter_micro_participation`. Micro delivery uses day-T delivery vs `max(40%, avg[T−20..T−1] × 0.8)`; missing day-T delivery bypasses delivery leg (`PENDING_DELIVERY_DATA`).
 
 | Tier | VPR min | CMF min | Delivery min |
 |------|---------|---------|--------------|
 | Small | > 1.5 | > 0.0 | — |
-| Micro | > 2.0 | > 0.05 | > 40% |
+| Micro | > 2.0 | > 0.05 | dynamic floor (see above) |
 
 ### 8.4 Volume persistence (0–4)
 
@@ -206,8 +219,10 @@ Compression (0.40) + tight base (0.30) + pivot proximity (0.30).
 | Base | 0.15 |
 | Vol persistence | 0.15 |
 | Acceleration (ADX delta + pct) | 0.10 |
-| RS (RSI mapped) | 0.10 |
+| RS (5d vs benchmark; RSI fallback) | 0.10 |
 | Risk penalty (stage 3, power_gap) | 0.05 |
+
+RS subscore prefers `rel_return_5d_vs_benchmark` via `relative_strength_rank_subscore` (+10 bonus when benchmark flat/negative and stock outperforming); falls back to RSI 30–70 mapping when benchmark data unavailable.
 
 ---
 
@@ -249,12 +264,12 @@ Capped at top 10 SETUP rows per tier in report via `_cap_setup_per_tier`.
 
 | Field | Formula |
 |-------|---------|
-| Stop-loss | `min(SMA50, POC) × 0.98` |
+| Stop-loss | `max(min(low T−20..T−1), price − 2.5×ATR14)` |
 | Target | `price + 2 × (price − stop)` (1:2 R:R) |
 | Entry low | `price × 0.985` |
 | Entry high | `price × 1.01` |
 
-Target gain must be ≥ 8% for waterfall step 7.
+Target gain must be ≥ 8% for waterfall step 8. POC is still computed for diagnostics but is **not** used in stop placement.
 
 ---
 
@@ -263,7 +278,8 @@ Target gain must be ≥ 8% for waterfall step 7.
 ```mermaid
 flowchart TD
     A[run_breakout_scan] --> B[Download NSE index tickers]
-    B --> C[Bulk load EOD context]
+    B --> B1[evaluate_market_regime benchmark]
+    B1 --> C[Bulk load EOD context]
     C --> D[For each ticker]
     D --> E[fetch_yahoo_data / Supabase OHLCV]
     E --> F[evaluate_and_audit_stock]
@@ -296,14 +312,17 @@ Key functions:
 | SETUP | Full pipeline + report cap | Backtest typically PASS-only signals; reconcile omits SETUP |
 | Rate limits | 120s sleep every 50 tickers | Throttled fetch in `fetch_universe_history_throttled` |
 | Forward validation | N/A live | `validate_forward_path` — T+5/10/15 stop/target path |
-| Branch | Production workflow branch | Local feature branch may diverge from GHA `main` |
+| Universe | Current NSE index CSVs | Same; **survivorship bias** when replaying deep history |
+| Branch | Production `main` | Same evaluator as live after PR #36 |
+
+**Survivorship adjustment:** when backtests use today's index membership for historical dates, reports include a **15% haircut** on hit rates (`survivorship_haircut.expected_hit_rate_*`) and a warning to prefer point-in-time constituents when available.
 
 Forward validation (`breakout_backtest.validate_forward_path`):
 
 - Entry at signal-day close (`latest_price`)
-- Stop: `sl_price`, target: `target_price`
+- Stop: `sl_price` (ATR/swing formula), target: `target_price`
 - Horizons: T+5, T+10, T+15
-- Metrics: target hit rate, MFE ≥8%/15%, close return ≥8%/15%, stop-out rate
+- Metrics: target hit rate, MFE ≥8%/15%, close return ≥8%/15%, stop-out rate, mismatch taxonomy
 
 ---
 
