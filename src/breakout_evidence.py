@@ -34,6 +34,9 @@ _BASE_W_COMPRESSION = 0.40
 _BASE_W_TIGHT = 0.30
 _BASE_W_PIVOT = 0.30
 
+BASE_ACCUM_LOOKBACK = 30
+BASE_ACCUM_MIN_RATIO = 1.05
+
 BreakoutStage = Literal[1, 2, 3]
 _NEUTRAL_SUBSCORE = 50.0
 
@@ -234,6 +237,63 @@ def breakout_stage(
         return 3
 
     return None
+
+
+def base_accumulation_ratio(
+    opens: Sequence[float],
+    closes: Sequence[float],
+    volumes: Sequence[float],
+    as_of_idx: int,
+    *,
+    lookback: int = BASE_ACCUM_LOOKBACK,
+) -> dict[str, Any]:
+    """Up/down volume over [T-lookback .. T-1]: up = close>open, down = close<open."""
+    t = as_of_idx
+    start = max(0, t - lookback)
+    up_vol = 0.0
+    down_vol = 0.0
+    for i in range(start, t):
+        o = float(opens[i])
+        c = float(closes[i])
+        v = float(volumes[i])
+        if c > o:
+            up_vol += v
+        elif c < o:
+            down_vol += v
+    ratio: float | None
+    if down_vol > 0:
+        ratio = round(up_vol / down_vol, 4)
+    elif up_vol > 0:
+        ratio = None
+    else:
+        ratio = 1.0
+    return {
+        "up_volume": round(up_vol, 2),
+        "down_volume": round(down_vol, 2),
+        "ratio": ratio,
+        "lookback_bars": t - start,
+        "min_ratio_required": BASE_ACCUM_MIN_RATIO,
+    }
+
+
+def base_accumulation_pass(
+    opens: Sequence[float],
+    closes: Sequence[float],
+    volumes: Sequence[float],
+    as_of_idx: int,
+    *,
+    lookback: int = BASE_ACCUM_LOOKBACK,
+    min_ratio: float = BASE_ACCUM_MIN_RATIO,
+) -> tuple[bool, dict[str, Any]]:
+    """True when up-day volume >= down-day volume * min_ratio over the base window."""
+    stats = base_accumulation_ratio(
+        opens, closes, volumes, as_of_idx, lookback=lookback,
+    )
+    up_vol = float(stats["up_volume"])
+    down_vol = float(stats["down_volume"])
+    passed = up_vol >= down_vol * min_ratio
+    stats["passed"] = passed
+    return passed, stats
 
 
 def base_quality_score(

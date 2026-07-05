@@ -82,6 +82,7 @@ Filters run in sequence; first failure sets `fail_reason` and stops the primary 
 | 6 | ADX | ≥ 25 **or** adx_soft path | `ADX` |
 | 7 | Target R:R | Stop = max(20d swing low, price − 2.5×ATR14); target = price + 2×risk; gain ≥ 8% | `target_gain` |
 | 8 | Pre-signal validation | T−10 cum return ≤ 30%; ≤ 4 vol-spike days in T−15..T−1 | `pre_filter_cum_return`, `pre_filter_vol_spike` |
+| 8b | Base accumulation | Up-day volume ≥ down-day volume × 1.05 over T−30..T−1 | `distribution_base` |
 | 9 | ADX trajectory | Rising ADX T−1 vs T−10 (path-specific); standard allows vol ≥ 7× exception | `pre_filter_standard_adx_trajectory`, `pre_filter_adx_trajectory` |
 | 10 | Signal cooldown | No repeat PASS within 10 sessions unless consolidation exempt | `pre_filter_signal_cooldown` |
 | 11 | ADX-soft chase | If `adx_soft`: T−10..T−1 cum return ≤ 20% | `pre_filter_adx_soft_chase` |
@@ -115,6 +116,7 @@ Filters run in sequence; first failure sets `fail_reason` and stops the primary 
 | `UPPER_CIRCUIT_PCT_MIN` | 4.9% (close=high circuit lock → WATCH) |
 | `MARKET_REGIME_BENCHMARK` | `NIFTY_SMALLCAP_100.NS` |
 | `MARKET_REGIME_SMA_WINDOW` | 20 sessions |
+| `FORWARD_HORIZONS` (backtest) | T+10, T+20, T+30 sessions |
 
 ---
 
@@ -329,6 +331,12 @@ Scan continues if Supabase is unavailable; delivery/sector/free-float load error
 - Yahoo session warm-up captures cookies before bulk fetch.
 - 120s cool-down sleep every 50 tickers to reduce 429 rate limits.
 - NSE symbols with `&` (e.g. `GMRP&UI`) use alias normalization for Yahoo.
+
+---
+
+## Backtest replay
+
+`src/breakout_backtest.py` replays `evaluate_bars_as_of` with point-in-time market regime (`evaluate_market_regime(signal_date=…)`). Forward validation horizons are **T+10 / T+20 / T+30**; stops trigger on **EOD close** only (not intraday lows).
 
 ---
 

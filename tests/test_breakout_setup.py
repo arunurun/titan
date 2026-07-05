@@ -95,7 +95,7 @@ def test_setup_to_breakout_rate_empty():
 
     summary = setup_to_breakout_rate([])
     assert summary["total_setup_signals"] == 0
-    assert summary["precision_t5"] is None
+    assert summary["precision_t10"] is None
 
 
 def test_setup_trigger_hit_gap_up_high_only():
@@ -125,11 +125,11 @@ def test_setup_to_breakout_rate_precision():
     from breakout_backtest import setup_to_breakout_rate
 
     setups = [
-        {"horizons": {"t5": {"breakout_hit": True}, "t10": {"breakout_hit": True}, "t15": {"breakout_hit": True, "forward_breakout_session": 3}}},
-        {"horizons": {"t5": {"breakout_hit": False}, "t10": {"breakout_hit": False}, "t15": {"breakout_hit": False}}},
+        {"horizons": {"t10": {"breakout_hit": True}, "t20": {"breakout_hit": True}, "t30": {"breakout_hit": True, "forward_breakout_session": 3}}},
+        {"horizons": {"t10": {"breakout_hit": False}, "t20": {"breakout_hit": False}, "t30": {"breakout_hit": False}}},
     ]
     summary = setup_to_breakout_rate(setups)
     assert summary["total_setup_signals"] == 2
-    assert summary["hits_t5"] == 1
-    assert summary["precision_t5"] == 50.0
-    assert summary["median_lead_sessions_t15"] == 3
+    assert summary["hits_t10"] == 1
+    assert summary["precision_t10"] == 50.0
+    assert summary["median_lead_sessions_t30"] == 3

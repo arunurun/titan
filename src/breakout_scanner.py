@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 
 try:
     from .breakout_evidence import (
+        base_accumulation_pass,
         composite_rank_score,
         compute_evidence_metrics,
         persistence_pass_min,
@@ -40,6 +41,7 @@ try:
     from .config_loader import load_config
 except ImportError:
     from breakout_evidence import (
+        base_accumulation_pass,
         composite_rank_score,
         compute_evidence_metrics,
         persistence_pass_min,
@@ -628,12 +630,36 @@ def is_upper_circuit_locked(
     return _prices_equal(close, high) and pct_change >= pct_min
 
 
+def _benchmark_as_of_idx(
+    df: dict[str, Any],
+    signal_date: datetime.date | str | None,
+) -> int:
+    """Bar index for point-in-time regime (last bar on or before signal_date)."""
+    n = len(df["close"])
+    if signal_date is None:
+        return n - 1
+    target = str(signal_date)[:10]
+    dates = bar_dates_from_df(df)
+    as_of_idx = n - 1
+    for i, d in enumerate(dates):
+        if d == target:
+            return i
+        if d and d > target:
+            return max(0, i - 1)
+    return as_of_idx
+
+
 def evaluate_market_regime(
     benchmark_df: dict[str, Any] | None = None,
     *,
     benchmark_ticker: str = MARKET_REGIME_BENCHMARK,
+    signal_date: datetime.date | str | None = None,
 ) -> dict[str, Any]:
-    """Benchmark trend gate: RISK_OFF when index close is below its 20-day SMA."""
+    """Benchmark trend gate: RISK_OFF when index close is below its 20-day SMA.
+
+    When ``signal_date`` is set, uses benchmark bars on or before that date only
+    (point-in-time for backtest replay).
+    """
     df = benchmark_df
     fetch_err: str | None = None
     if df is None:
@@ -645,20 +671,33 @@ def evaluate_market_regime(
             "benchmark_ticker": benchmark_ticker,
             "benchmark_close": None,
             "benchmark_sma20": None,
+            "signal_date": str(signal_date)[:10] if signal_date else None,
             "fetch_error": fetch_err or "insufficient_benchmark_bars",
         }
-    closes = df["close"]
+    as_of_idx = _benchmark_as_of_idx(df, signal_date)
+    if as_of_idx + 1 < MARKET_REGIME_SMA_WINDOW:
+        return {
+            "market_regime": "UNKNOWN",
+            "benchmark_ticker": benchmark_ticker,
+            "benchmark_close": None,
+            "benchmark_sma20": None,
+            "signal_date": str(signal_date)[:10] if signal_date else None,
+            "fetch_error": "insufficient_benchmark_bars_as_of_date",
+        }
+    closes = df["close"][: as_of_idx + 1]
     sma20 = calculate_sma(closes, MARKET_REGIME_SMA_WINDOW)
     last_close = float(closes[-1])
     last_sma = float(sma20[-1])
     regime = "RISK_OFF" if last_close < last_sma else "RISK_ON"
-    benchmark_5d_return = return_5d_pct(closes, n - 1)
+    benchmark_5d_return = return_5d_pct(closes, as_of_idx)
     return {
         "market_regime": regime,
         "benchmark_ticker": benchmark_ticker,
         "benchmark_close": round(last_close, 4),
         "benchmark_sma20": round(last_sma, 4),
         "benchmark_5d_return": benchmark_5d_return,
+        "signal_date": str(signal_date)[:10] if signal_date else None,
+        "benchmark_as_of_idx": as_of_idx,
         "benchmark_df": df,
         "fetch_error": fetch_err,
     }
@@ -975,6 +1014,7 @@ _V7_FAIL_REASONS = frozenset({
     "market_regime_risk_off",
     "upper_wick_rejection",
     "imminent_earnings",
+    "distribution_base",
 })
 
 
@@ -1033,6 +1073,10 @@ def _classic_filter_failures(eval_result: dict[str, Any], tier_name: str) -> lis
 
     if eval_result.get("target_gain", 0.0) < 8.0:
         failures.append("target_gain")
+
+    base_acc = eval_result.get("base_accumulation") or {}
+    if base_acc.get("passed") is False:
+        failures.append("distribution_base")
     return failures
 
 
@@ -1265,6 +1309,14 @@ def evaluate_bars_as_of(
         if not pre_ok:
             pre_filter_fail = pre_fail
             fail_reason = pre_fail
+
+    if fail_reason is None:
+        accum_ok, accum_metrics = base_accumulation_pass(
+            df["open"], df["close"], df["volume"], as_of_idx,
+        )
+        metrics["base_accumulation"] = accum_metrics
+        if not accum_ok:
+            fail_reason = "distribution_base"
 
     if fail_reason is None:
         traj_ok, traj_fail, traj_metrics = _adx_trajectory_gate(
