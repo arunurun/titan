@@ -644,7 +644,7 @@ def test_vol_continuation_cum3d_pass_path(monkeypatch):
     import breakout_scanner
     from breakout_scanner import _volume_filter_passes, evaluate_bars_as_of
 
-    ok, path = _volume_filter_passes(
+    ok, path, metrics = _volume_filter_passes(
         vol_mult=1.1,
         vol_cum_mult=3.8,
         vol_thresh=3.5,
@@ -653,6 +653,7 @@ def test_vol_continuation_cum3d_pass_path(monkeypatch):
     )
     assert ok is True
     assert path == "vol_continuation_cum3d"
+    assert "vpcs_applied_threshold" not in metrics
 
     n = 80
     close = _uptrend_closes(n, start=40.0, step=0.35)
@@ -1522,12 +1523,12 @@ def test_evaluate_bars_as_of_excessive_alternate_paths_downgrades(monkeypatch):
     real_vol_filter = _volume_filter_passes
 
     def _vol_cum_bypass(**kwargs):
-        ok, path = real_vol_filter(**kwargs)
+        ok, path, metrics = real_vol_filter(**kwargs)
         if not ok:
-            return True, "vol_continuation_cum3d"
+            return True, "vol_continuation_cum3d", metrics
         if path is None:
-            return True, "vol_continuation_cum3d"
-        return ok, path
+            return True, "vol_continuation_cum3d", metrics
+        return ok, path, metrics
 
     monkeypatch.setattr("breakout_scanner._volume_filter_passes", _vol_cum_bypass)
     monkeypatch.setattr(
@@ -1740,3 +1741,229 @@ def test_evaluate_bars_as_of_distribution_base_fail(monkeypatch):
     monkeypatch.setattr("breakout_scanner.calculate_adx", _rising_adx_mock(28.0, 0.15))
     result = evaluate_bars_as_of(_synthetic_df(close, volume), n - 1, "SMALL_CAP_100")
     assert result["fail_reason"] == "distribution_base"
+
+
+def test_vpcs_applied_threshold_by_tier():
+    from breakout_scanner import (
+        VPCS_VOL_FLOOR,
+        _volume_filter_passes,
+        _vpcs_applied_threshold,
+    )
+
+    assert _vpcs_applied_threshold(3.5, "SMALL_CAP_100") == VPCS_VOL_FLOOR
+    assert _vpcs_applied_threshold(3.0, "MICRO_CAP_250") == VPCS_VOL_FLOOR
+
+    ok, path, metrics = _volume_filter_passes(
+        vol_mult=2.6,
+        vol_cum_mult=1.0,
+        vol_thresh=3.5,
+        tier_name="SMALL_CAP_100",
+        prior_spike=False,
+        pct_change=6.0,
+        close_position=0.99,
+    )
+    assert ok is True
+    assert path == "vpcs_price_compressed_accumulation"
+    assert metrics["vpcs_applied_threshold"] == VPCS_VOL_FLOOR
+
+    ok, path, _ = _volume_filter_passes(
+        vol_mult=2.4,
+        vol_cum_mult=1.0,
+        vol_thresh=3.5,
+        tier_name="SMALL_CAP_100",
+        prior_spike=False,
+        pct_change=6.0,
+        close_position=0.99,
+    )
+    assert ok is False
+    assert path is None
+
+
+def test_vpcs_requires_pct_and_close_position():
+    from breakout_scanner import _volume_filter_passes
+
+    ok, path, _ = _volume_filter_passes(
+        vol_mult=2.8,
+        vol_cum_mult=1.0,
+        vol_thresh=3.5,
+        tier_name="SMALL_CAP_100",
+        prior_spike=False,
+        pct_change=4.9,
+        close_position=0.99,
+    )
+    assert ok is False
+
+    ok, path, _ = _volume_filter_passes(
+        vol_mult=2.8,
+        vol_cum_mult=1.0,
+        vol_thresh=3.5,
+        tier_name="SMALL_CAP_100",
+        prior_spike=False,
+        pct_change=6.0,
+        close_position=0.64,
+    )
+    assert ok is False
+
+    ok, path, _ = _volume_filter_passes(
+        vol_mult=2.8,
+        vol_cum_mult=1.0,
+        vol_thresh=3.0,
+        tier_name="MICRO_CAP_250",
+        prior_spike=False,
+        pct_change=5.2,
+        close_position=0.70,
+    )
+    assert ok is True
+    assert path == "vpcs_price_compressed_accumulation"
+
+
+def test_vpcs_marginal_volume_downgrades_to_watch(monkeypatch):
+    from breakout_scanner import evaluate_bars_as_of
+
+    n = 80
+    close = _uptrend_closes(n, start=50.0, step=0.25)
+    close[-2] = close[-3]
+    close[-1] = close[-2] * 1.06
+    base_vol = 80000.0
+    volume = [base_vol] * (n - 1) + [base_vol * 3.2]
+    df = _synthetic_df(close, volume)
+    df["high"][-1] = close[-1]
+    df["low"][-1] = close[-1] * 0.97
+    _passing_eval_mocks(monkeypatch)
+    monkeypatch.setattr(
+        "breakout_scanner._atr_simple",
+        lambda high, low, close, period=14: [2.5] * len(close),
+    )
+
+    result = evaluate_bars_as_of(df, n - 1, "SMALL_CAP_100")
+    assert result["fail_reason"] is None
+    assert result["passed"] is False
+    assert result["signal_tier"] == "WATCH"
+    assert "vpcs_price_compressed_accumulation" in result["pass_paths"]
+    assert result.get("v7_watch_reason") == "vpcs_marginal_volume"
+    assert result.get("vpcs_applied_threshold") == 2.5
+
+
+def test_standard_volume_spike_still_passes(monkeypatch):
+    from breakout_scanner import evaluate_bars_as_of
+
+    n = 80
+    close = _uptrend_closes(n, start=50.0, step=0.25)
+    close[-2] = close[-3]
+    close[-1] = close[-2] * 1.06
+    volume = [80000.0] * (n - 1) + [400000.0]
+    df = _synthetic_df(close, volume)
+    df["high"][-1] = close[-1] + 0.5
+    _passing_eval_mocks(monkeypatch)
+    monkeypatch.setattr(
+        "breakout_scanner._atr_simple",
+        lambda high, low, close, period=14: [2.5] * len(close),
+    )
+
+    result = evaluate_bars_as_of(df, n - 1, "SMALL_CAP_100")
+    assert result["passed"] is True
+    assert result["signal_tier"] == "PASS"
+    assert "vpcs_price_compressed_accumulation" not in result.get("pass_paths", [])
+    assert result.get("v7_watch_reason") != "vpcs_marginal_volume"
+
+
+def test_jul3_pplpharma_like_still_fails_at_actual_vol(monkeypatch):
+    """Jul 3 PPLPHARMA: +6.01%, vol×1.90, close_pos 0.99 — below VPCS 2.5× floor."""
+    from breakout_scanner import _volume_filter_passes
+
+    ok, path, metrics = _volume_filter_passes(
+        vol_mult=1.90,
+        vol_cum_mult=0.95,
+        vol_thresh=3.5,
+        tier_name="SMALL_CAP_100",
+        prior_spike=False,
+        pct_change=6.01,
+        close_position=0.99,
+    )
+    assert ok is False
+    assert path is None
+    assert metrics["vpcs_applied_threshold"] == 2.5
+
+
+def test_jul3_eiel_like_blocked_by_close_position(monkeypatch):
+    """Jul 3 EIEL: +5.21%, vol×2.71 but close_pos 0.57 — VPCS needs ≥0.65."""
+    from breakout_scanner import _volume_filter_passes
+
+    ok, path, _ = _volume_filter_passes(
+        vol_mult=2.71,
+        vol_cum_mult=1.38,
+        vol_thresh=3.0,
+        tier_name="MICRO_CAP_250",
+        prior_spike=False,
+        pct_change=5.21,
+        close_position=0.57,
+    )
+    assert ok is False
+    assert path is None
+
+
+def test_jul3_nuvama_like_blocked_by_volume(monkeypatch):
+    """Jul 3 NUVAMA: +5.00%, close_pos 0.65 but vol×1.85 — below VPCS floor."""
+    from breakout_scanner import _volume_filter_passes
+
+    ok, path, _ = _volume_filter_passes(
+        vol_mult=1.85,
+        vol_cum_mult=0.88,
+        vol_thresh=3.5,
+        tier_name="SMALL_CAP_100",
+        prior_spike=False,
+        pct_change=5.00,
+        close_position=0.65,
+    )
+    assert ok is False
+    assert path is None
+
+
+def test_jul3_pcjeweller_adx_momentum_ignition(monkeypatch):
+    """Jul 3 PCJEWELLER-like: +10%, vol×5.63, ADX 19, close_pos 0.85 → adx_soft."""
+    from breakout_scanner import evaluate_bars_as_of
+
+    n = 80
+    close = _uptrend_closes(n, start=8.0, step=0.05)
+    close[-2] = close[-3]
+    close[-1] = close[-2] * 1.1005
+    volume = [50000.0] * (n - 1) + [280000.0]
+    df = _synthetic_df(close, volume)
+    df["high"][-1] = close[-1]
+    df["low"][-1] = close[-1] * 0.88
+    _passing_eval_mocks(monkeypatch)
+    monkeypatch.setattr("breakout_scanner.calculate_adx", _flat_adx_mock(19.0))
+    monkeypatch.setattr(
+        "breakout_scanner._atr_simple",
+        lambda high, low, close, period=14: [0.35] * len(close),
+    )
+
+    result = evaluate_bars_as_of(df, n - 1, "MICRO_CAP_250")
+    assert result["fail_reason"] is None
+    assert "adx_soft" in result["pass_paths"]
+    assert result["adx_val"] == 19.0
+
+
+def test_vpcs_excluded_from_alternate_path_cap(monkeypatch):
+    """VPCS bypass is excluded from exception cap (like power_gap)."""
+    from breakout_scanner import evaluate_bars_as_of
+
+    n = 80
+    close = _uptrend_closes(n, start=50.0, step=0.25)
+    close[-2] = close[-3]
+    close[-1] = close[-2] * 1.06
+    base_vol = 80000.0
+    volume = [base_vol] * (n - 1) + [base_vol * 3.2]
+    df = _synthetic_df(close, volume)
+    df["high"][-1] = close[-1]
+    df["low"][-1] = close[-1] * 0.97
+    _passing_eval_mocks(monkeypatch)
+    monkeypatch.setattr(
+        "breakout_scanner._atr_simple",
+        lambda high, low, close, period=14: [2.5] * len(close),
+    )
+
+    result = evaluate_bars_as_of(df, n - 1, "SMALL_CAP_100")
+    assert result.get("pass_paths") == ["vpcs_price_compressed_accumulation"]
+    assert result.get("alternate_bypass_count") == 0
+    assert result.get("excessive_alternate_paths") is not True

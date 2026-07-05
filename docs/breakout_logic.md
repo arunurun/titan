@@ -77,9 +77,11 @@ Filters run in sequence; first failure sets `fail_reason` and stops the primary 
 | 1 | Min price | `close[T] ≥` tier min | `min_price` |
 | 2 | Daily change | 3% ≤ `pct_change` ≤ 20% | `pct_change` |
 | 3 | SMA50 trend | `close[T] ≥ SMA50` **or** sma20_reclaim path | `SMA50` |
-| 4 | Volume | Standard, cum-3d, or micro continuation | `vol` |
+| 4 | Volume | Standard, cum-3d, micro continuation, or VPCS (uses `close_position` computed at step 3b) | `vol` |
+| 3b | Close position | Computed before volume for VPCS; hard wick fail at step 4b | — |
+| 4b | Upper wick | `close_position ≥ 0.5` | `upper_wick_rejection` |
 | 5 | RSI | RSI ≥ 50 (no upper cap; stage 3 handles exhaustion) | `RSI` |
-| 6 | ADX | ≥ 25 **or** adx_soft path | `ADX` |
+| 6 | ADX | ≥ 25 **or** adx_soft (20–25, or momentum ignition 18–20 when pct ≥ 8%, vol ≥ 4×, close_position ≥ 0.7) | `ADX` |
 | 7 | Target R:R | Stop = max(20d swing low, price − 2.5×ATR14); target = price + 2×risk; gain ≥ 8% | `target_gain` |
 | 8 | Pre-signal validation | T−10 cum return ≤ 30%; ≤ 4 vol-spike days in T−15..T−1 | `pre_filter_cum_return`, `pre_filter_vol_spike` |
 | 8b | Base accumulation | Up-day volume ≥ down-day volume × 1.05 over T−30..T−1 | `distribution_base` |
@@ -104,6 +106,10 @@ Filters run in sequence; first failure sets `fail_reason` and stops the primary 
 | `RSI_MIN` | 50 |
 | `HOT_VOL_THRESHOLD` | 5.0× (power-gap vol recovery only) |
 | `SMA20_RECLAIM_VOL_THRESHOLD` | 5.0× |
+| `VPCS_PCT_CHANGE_MIN` | 5.0% |
+| `VPCS_CLOSE_POSITION_MIN` | 0.65 |
+| `VPCS_VOL_FLOOR` | 2.5× (tier attenuation: SC100 ×0.70, MC250 ×0.75) |
+| `ADX_MOMENTUM_IGNITION_*` | pct ≥ 8%, vol ≥ 4×, close_position ≥ 0.7, ADX 18–20 |
 | `PRE_SIGNAL_CUM_RETURN_MAX` | 30% (T−10→T−1) |
 | `PRE_SIGNAL_VOL_SPIKE_MULT` | 2.0× 20d avg |
 | `PRE_SIGNAL_VOL_SPIKE_DAYS_MAX` | 4 days |
@@ -129,13 +135,16 @@ Paths are recorded in `pass_paths` and echoed in `risk_flags`.
 | `power_gap` | `pct_change` in (12%, 20%] — flags circuit risk |
 | `vol_continuation_cum3d` | 3-session cumulative vol ≥ tier threshold |
 | `vol_continuation_prior_spike` | Micro-cap: prior spike + vol ≥ 2.5× |
+| `vpcs_price_compressed_accumulation` | pct ≥ 5%, close_position ≥ 0.65, vol ≥ max(2.5×, tier×attenuation); marginal vs tier → WATCH |
 | `sma20_reclaim` | Below SMA50 but ≥ SMA20 with vol ≥ 5× |
-| `adx_soft` | ADX 20–25, vol ≥ tier+0.5, above SMA50, positive day |
+| `adx_soft` | ADX 20–25, vol ≥ tier+0.5, above SMA50, positive day; **or** ADX 18–20 with pct ≥ 8%, vol ≥ 4×, close_position ≥ 0.7 |
 
 **Path-specific post-rules**
 
 - `power_gap` unconfirmed → **WATCH** (`v6_power_gap_unconfirmed`). Confirmed if ADX rising T−1 vs T−10, or pre-trend cum return ≤ 15%, or vol ≥ 5.5×.
 - `adx_soft` as **only** path → **WATCH** (`v6_adx_soft_solo`).
+- `vpcs_price_compressed_accumulation` when vol still below tier threshold → **WATCH** (`vpcs_marginal_volume`).
+- Exception cap (>1 alternate bypass) excludes `power_gap` and `vpcs_price_compressed_accumulation`.
 
 ---
 
@@ -166,6 +175,7 @@ Paths are recorded in `pass_paths` and echoed in `risk_flags`.
 |-------------|-----------|
 | `v6_power_gap_unconfirmed` | `power_gap` path without ADX/cum-return/vol recovery |
 | `v6_adx_soft_solo` | Only alternate path is `adx_soft` |
+| `vpcs_marginal_volume` | Volume passed only via VPCS below tier threshold |
 | `v7_low_volume_persistence` | `persistence_score` below tier minimum |
 | `v7_breakout_stage_3` | Breakout stage classified as parabolic (stretch > 4 ATR) |
 

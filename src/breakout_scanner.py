@@ -76,6 +76,18 @@ HOT_VOL_THRESHOLD = 5.0
 SMA20_RECLAIM_VOL_THRESHOLD = 5.0
 MICRO_CAP_VOL_CONTINUATION = 2.5
 VOL_CUM_DAYS = 3
+VPCS_PCT_CHANGE_MIN = 5.0
+VPCS_CLOSE_POSITION_MIN = 0.65
+VPCS_VOL_FLOOR = 2.5
+VPCS_VOL_ATTENUATION = {
+    "SMALL_CAP_100": 0.70,
+    "MICRO_CAP_250": 0.75,
+}
+ADX_MOMENTUM_IGNITION_FLOOR = 18.0
+ADX_MOMENTUM_IGNITION_CEILING = 20.0
+ADX_MOMENTUM_IGNITION_PCT_MIN = 8.0
+ADX_MOMENTUM_IGNITION_VOL_MIN = 4.0
+ADX_MOMENTUM_IGNITION_CLOSE_POS_MIN = 0.7
 
 # Pre-signal validation (T-15..T-1 history before signal day T)
 PRE_SIGNAL_FULL_LOOKBACK = 15
@@ -703,6 +715,12 @@ def evaluate_market_regime(
     }
 
 
+def _vpcs_applied_threshold(vol_thresh: float, tier_name: str) -> float:
+    """Tier-attenuated VPCS volume floor (never below global 2.5×)."""
+    att = VPCS_VOL_ATTENUATION.get(tier_name, VPCS_VOL_ATTENUATION["SMALL_CAP_100"])
+    return max(VPCS_VOL_FLOOR, vol_thresh * att)
+
+
 def _volume_filter_passes(
     *,
     vol_mult: float,
@@ -710,15 +728,27 @@ def _volume_filter_passes(
     vol_thresh: float,
     tier_name: str,
     prior_spike: bool,
-) -> tuple[bool, str | None]:
-    """Standard spike, 3-day cumulative continuation, or micro-cap post-spike path."""
+    pct_change: float | None = None,
+    close_position: float | None = None,
+) -> tuple[bool, str | None, dict[str, Any]]:
+    """Standard spike, cum-3d, micro prior-spike, then VPCS compressed-accumulation path."""
+    metrics: dict[str, Any] = {}
     if vol_mult >= vol_thresh:
-        return True, None
+        return True, None, metrics
     if vol_cum_mult >= vol_thresh:
-        return True, "vol_continuation_cum3d"
+        return True, "vol_continuation_cum3d", metrics
     if tier_name == "MICRO_CAP_250" and prior_spike and vol_mult >= MICRO_CAP_VOL_CONTINUATION:
-        return True, "vol_continuation_prior_spike"
-    return False, None
+        return True, "vol_continuation_prior_spike", metrics
+    if pct_change is not None and close_position is not None:
+        vpcs_thresh = _vpcs_applied_threshold(vol_thresh, tier_name)
+        metrics["vpcs_applied_threshold"] = round(vpcs_thresh, 4)
+        if (
+            pct_change >= VPCS_PCT_CHANGE_MIN
+            and close_position >= VPCS_CLOSE_POSITION_MIN
+            and vol_mult >= vpcs_thresh
+        ):
+            return True, "vpcs_price_compressed_accumulation", metrics
+    return False, None, metrics
 
 
 def pre_signal_validation(
@@ -1040,12 +1070,15 @@ def _classic_filter_failures(eval_result: dict[str, Any], tier_name: str) -> lis
 
     vol_cum = eval_result.get("vol_cum_mult", 0.0)
     prior_spike = eval_result.get("prior_volume_spike", False)
-    vol_ok, _ = _volume_filter_passes(
+    close_pos = eval_result.get("close_position")
+    vol_ok, _, _ = _volume_filter_passes(
         vol_mult=vol_mult,
         vol_cum_mult=vol_cum,
         vol_thresh=filt["vol_mult"],
         tier_name=tier_name,
         prior_spike=prior_spike,
+        pct_change=pct,
+        close_position=float(close_pos) if close_pos is not None else None,
     )
     if not vol_ok:
         failures.append("vol")
@@ -1059,15 +1092,24 @@ def _classic_filter_failures(eval_result: dict[str, Any], tier_name: str) -> lis
     if (
         not adx_ok
         and ADX_SOFT_FLOOR <= adx < ADX_HARD_FLOOR
-        and vol_mult >= filt["vol_mult"]
+        and vol_mult >= filt["vol_mult"] + ADX_SOFT_VOL_BONUS
         and price > sma50
         and pct > 0
+    ):
+        adx_ok = True
+    elif (
+        not adx_ok
+        and ADX_MOMENTUM_IGNITION_FLOOR <= adx <= ADX_MOMENTUM_IGNITION_CEILING
+        and pct >= ADX_MOMENTUM_IGNITION_PCT_MIN
+        and vol_mult >= ADX_MOMENTUM_IGNITION_VOL_MIN
+        and close_pos is not None
+        and float(close_pos) >= ADX_MOMENTUM_IGNITION_CLOSE_POS_MIN
+        and price > sma50
     ):
         adx_ok = True
     if not adx_ok:
         failures.append("ADX")
 
-    close_pos = eval_result.get("close_position")
     if close_pos is not None and float(close_pos) < CLOSE_POSITION_MIN:
         failures.append("upper_wick_rejection")
 
@@ -1131,8 +1173,10 @@ def evaluate_bars_as_of(
     - power_gap: pct_change 12–20% with circuit-risk flag
     - vol_continuation_cum3d: 3-session cumulative vol >= tier threshold
     - vol_continuation_prior_spike: micro-cap 2.5x after prior spike session
+    - vpcs_price_compressed_accumulation: +5% day, close near high, attenuated vol floor
     - sma20_reclaim: price > SMA20 with vol > 5x despite below SMA50
     - adx_soft: ADX 20–25 with strong vol + above SMA50 + positive day
+      (or ADX 18–20 momentum ignition when pct ≥ 8%, vol ≥ 4×, close_position ≥ 0.7)
     """
     filt = FILTERS[tier_name]
     vol_thresh = filt["vol_mult"]
@@ -1210,6 +1254,7 @@ def evaluate_bars_as_of(
     pass_paths: list[str] = []
     power_gap = False
     extra_risk_flags: list[str] = []
+    vpcs_marginal_volume = False
 
     metrics = {
         "latest_price": round(latest_price, 2),
@@ -1266,17 +1311,26 @@ def evaluate_bars_as_of(
             fail_reason = "SMA50"
 
     if fail_reason is None:
-        vol_ok, vol_path = _volume_filter_passes(
+        vol_ok, vol_path, vol_metrics = _volume_filter_passes(
             vol_mult=vol_mult,
             vol_cum_mult=vol_cum_mult,
             vol_thresh=vol_thresh,
             tier_name=tier_name,
             prior_spike=prior_spike,
+            pct_change=pct_change,
+            close_position=close_position,
         )
+        if vol_metrics:
+            metrics.update(vol_metrics)
         if not vol_ok:
             fail_reason = "vol"
         elif vol_path:
             pass_paths.append(vol_path)
+            if (
+                vol_path == "vpcs_price_compressed_accumulation"
+                and vol_mult < vol_thresh
+            ):
+                vpcs_marginal_volume = True
 
     if fail_reason is None and close_position < CLOSE_POSITION_MIN:
         fail_reason = "upper_wick_rejection"
@@ -1293,6 +1347,16 @@ def evaluate_bars_as_of(
             and vol_mult >= vol_thresh + ADX_SOFT_VOL_BONUS
             and latest_price > sma50_last
             and pct_change > 0
+        ):
+            adx_ok = True
+            pass_paths.append("adx_soft")
+        elif (
+            not adx_ok
+            and ADX_MOMENTUM_IGNITION_FLOOR <= adx_val <= ADX_MOMENTUM_IGNITION_CEILING
+            and pct_change >= ADX_MOMENTUM_IGNITION_PCT_MIN
+            and vol_mult >= ADX_MOMENTUM_IGNITION_VOL_MIN
+            and close_position >= ADX_MOMENTUM_IGNITION_CLOSE_POS_MIN
+            and latest_price > sma50_last
         ):
             adx_ok = True
             pass_paths.append("adx_soft")
@@ -1356,10 +1420,17 @@ def evaluate_bars_as_of(
         signal_tier = SIGNAL_TIER_WATCH
         metrics["adx_soft_solo_watch"] = True
 
+    if fail_reason is None and vpcs_marginal_volume:
+        signal_tier = SIGNAL_TIER_WATCH
+        metrics["vpcs_marginal_volume"] = True
+
     upper_circuit = is_upper_circuit_locked(latest_price, float(high[-1]), pct_change)
     metrics["upper_circuit_locked"] = upper_circuit
 
-    alternate_bypasses = [p for p in pass_paths if p != "power_gap"]
+    alternate_bypasses = [
+        p for p in pass_paths
+        if p not in ("power_gap", "vpcs_price_compressed_accumulation")
+    ]
     metrics["alternate_bypass_count"] = len(alternate_bypasses)
     if fail_reason is None and len(alternate_bypasses) > 1:
         signal_tier = SIGNAL_TIER_WATCH
@@ -1404,6 +1475,9 @@ def evaluate_bars_as_of(
             signal_tier = None
 
     v7_watch_reason: str | None = None
+    if fail_reason is None and vpcs_marginal_volume:
+        if signal_tier == SIGNAL_TIER_WATCH and v7_watch_reason is None:
+            v7_watch_reason = "vpcs_marginal_volume"
     if fail_reason is None and signal_tier == SIGNAL_TIER_PASS:
         persist_min = persistence_pass_min(tier_name)
         if (evidence.get("persistence_score") or 0) < persist_min:
