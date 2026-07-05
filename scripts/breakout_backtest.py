@@ -66,6 +66,21 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     ap.add_argument("--range", dest="range_str", default="6m", help="Yahoo chart range (default 6m)")
     ap.add_argument(
+        "--prefer-supabase",
+        dest="prefer_supabase",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Prefer Supabase equity_ohlcv_daily (default: true when SUPABASE_* env set)",
+    )
+    ap.add_argument(
+        "--no-prefer-supabase",
+        dest="prefer_supabase",
+        action="store_const",
+        const=False,
+        help="Force Yahoo fetch even when Supabase is configured",
+    )
+    ap.add_argument(
         "--symbols",
         default="",
         help="Comma-separated subset of universe symbols (for dry-run smoke tests)",
@@ -182,6 +197,7 @@ def main(argv: list[str] | None = None) -> int:
             range_str=args.range_str,
             output_dir=out_dir,
             stock_filter=stock_filter,
+            prefer_supabase=args.prefer_supabase,
         )
         paths = setup_report.get("paths") or {}
         summary = setup_report.get("summary") or {}
@@ -209,6 +225,7 @@ def main(argv: list[str] | None = None) -> int:
         range_str=args.range_str,
         output_dir=out_dir,
         stock_filter=stock_filter,
+        prefer_supabase=args.prefer_supabase,
     )
 
     summary = report.get("summary") or {}
@@ -219,6 +236,9 @@ def main(argv: list[str] | None = None) -> int:
         hr = summary.get(f"hit_rate_t{h}")
         print(f"Hit rate T+{h}: {hr}%" if hr is not None else f"Hit rate T+{h}: n/a", flush=True)
     print(f"Fetch failures: {summary.get('stocks_failed', 0)}", flush=True)
+    if summary.get("supabase_hits") is not None:
+        print(f"Supabase OHLCV hits: {summary.get('supabase_hits', 0)}", flush=True)
+        print(f"Yahoo fetches: {summary.get('yahoo_fetches', 0)}", flush=True)
     print(f"Report: {paths.get('markdown')}", flush=True)
     print(f"Duration: {(report.get('meta') or {}).get('duration_sec')}s", flush=True)
 

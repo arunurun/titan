@@ -36,6 +36,106 @@ FETCH_CHUNK_SIZE = 50
 FETCH_CHUNK_COOLDOWN_SEC = 120
 
 
+def _ohlcv_store():
+    try:
+        from . import breakout_ohlcv_store as store
+    except ImportError:
+        import breakout_ohlcv_store as store  # type: ignore[no-redef]
+    return store
+
+
+def _resolve_prefer_supabase(prefer_supabase: bool | None) -> bool:
+    if prefer_supabase is not None:
+        return prefer_supabase
+    return _ohlcv_store().is_supabase_configured()
+
+
+def _pack_stock_data(entry: dict[str, Any], df: dict[str, Any]) -> dict[str, Any]:
+    sym = entry["symbol"]
+    ticker = entry["yahoo_ticker"]
+    return {
+        "df": df,
+        "dates": bar_dates_from_df(df),
+        "tier_key": entry["tier_key"],
+        "tier_label": entry["tier_label"],
+        "yahoo_ticker": ticker,
+        "bar_count": len(df["close"]),
+        "liquidity_turnover_lacs_avg": entry.get("liquidity_turnover_lacs_avg"),
+    }
+
+
+def _manifest_success_row(entry: dict[str, Any], df: dict[str, Any], *, source: str) -> dict[str, Any]:
+    sym = entry["symbol"]
+    ticker = entry["yahoo_ticker"]
+    dates = bar_dates_from_df(df)
+    return {
+        "symbol": sym,
+        "yahoo_ticker": ticker,
+        "bar_count": len(df["close"]),
+        "first_date": dates[0] if df.get("timestamp") else None,
+        "last_date": dates[-1] if df.get("timestamp") else None,
+        "ohlcv_source": source,
+    }
+
+
+def _fetch_one_symbol_history(
+    entry: dict[str, Any],
+    *,
+    range_str: str,
+    prefer_supabase: bool,
+) -> tuple[dict[str, Any] | None, str | None, str]:
+    """Load OHLCV for one universe member: Supabase first, then Yahoo backtest cache/API."""
+    sym = entry["symbol"]
+    ticker = entry["yahoo_ticker"]
+    if prefer_supabase:
+        store = _ohlcv_store()
+        df, err = store.load_ohlcv_from_supabase(sym, min_bars=MIN_HISTORY_BARS)
+        if df and not err:
+            return df, None, "supabase"
+
+    df, err = fetch_yahoo_history(ticker, range_str=range_str, min_bars=MIN_HISTORY_BARS)
+    if df and not err:
+        try:
+            _ohlcv_store().record_yahoo_fetch()
+        except Exception:  # noqa: BLE001
+            pass
+        return df, None, "yahoo"
+    return None, err or "fetch_failed", "none"
+
+
+def _prime_supabase_bulk_cache(
+    universe: list[dict[str, Any]],
+    *,
+    prefer_supabase: bool,
+) -> int:
+    if not prefer_supabase:
+        return 0
+    store = _ohlcv_store()
+    if not store.is_supabase_configured():
+        return 0
+    symbols = [entry["symbol"] for entry in universe]
+    bulk = store.load_ohlcv_bulk_from_supabase(
+        symbols,
+        min_bars=MIN_HISTORY_BARS,
+    )
+    if bulk:
+        print(
+            f"Supabase OHLCV bulk cache: {len(bulk)}/{len(symbols)} symbols.",
+            flush=True,
+        )
+    return len(bulk)
+
+
+def _attach_ohlcv_stats(manifest: dict[str, Any]) -> None:
+    stats = _ohlcv_store().get_ohlcv_stats()
+    manifest["ohlcv_stats"] = stats
+    print(
+        f"OHLCV sources: supabase_hits={stats.get('supabase_hits', 0)} "
+        f"yahoo_fetches={stats.get('yahoo_fetches', 0)}",
+        flush=True,
+    )
+
+
 def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
@@ -144,44 +244,40 @@ def fetch_universe_history(
     *,
     range_str: str = "6m",
     warm_session: bool = True,
+    prefer_supabase: bool | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
-    """Fetch Yahoo OHLCV for each universe member; return data map + manifest."""
-    if warm_session:
+    """Fetch OHLCV for each universe member (Supabase when configured, else Yahoo)."""
+    prefer = _resolve_prefer_supabase(prefer_supabase)
+    _ohlcv_store().reset_ohlcv_stats()
+    _ohlcv_store().clear_bulk_cache()
+    _prime_supabase_bulk_cache(universe, prefer_supabase=prefer)
+    if warm_session and not prefer:
         warm_yahoo_session()
 
     data_by_symbol: dict[str, dict[str, Any]] = {}
     manifest: dict[str, Any] = {
         "range": range_str,
         "fetched_at": dt.now().isoformat(timespec="seconds"),
+        "prefer_supabase": prefer,
         "success": [],
         "failed": [],
     }
     for entry in universe:
         sym = entry["symbol"]
         ticker = entry["yahoo_ticker"]
-        df, err = fetch_yahoo_history(ticker, range_str=range_str, min_bars=MIN_HISTORY_BARS)
+        df, err, source = _fetch_one_symbol_history(
+            entry, range_str=range_str, prefer_supabase=prefer,
+        )
         if df and not err:
-            data_by_symbol[sym] = {
-                "df": df,
-                "dates": bar_dates_from_df(df),
-                "tier_key": entry["tier_key"],
-                "tier_label": entry["tier_label"],
-                "yahoo_ticker": ticker,
-                "bar_count": len(df["close"]),
-            }
-            manifest["success"].append({
-                "symbol": sym,
-                "yahoo_ticker": ticker,
-                "bar_count": len(df["close"]),
-                "first_date": bar_dates_from_df(df)[0] if df.get("timestamp") else None,
-                "last_date": bar_dates_from_df(df)[-1] if df.get("timestamp") else None,
-            })
+            data_by_symbol[sym] = _pack_stock_data(entry, df)
+            manifest["success"].append(_manifest_success_row(entry, df, source=source))
         else:
             manifest["failed"].append({
                 "symbol": sym,
                 "yahoo_ticker": ticker,
                 "error": err or "fetch_failed",
             })
+    _attach_ohlcv_stats(manifest)
     return data_by_symbol, manifest
 
 
@@ -192,53 +288,53 @@ def fetch_universe_history_throttled(
     warm_session: bool = True,
     chunk_size: int = FETCH_CHUNK_SIZE,
     chunk_cooldown_sec: int = FETCH_CHUNK_COOLDOWN_SEC,
+    prefer_supabase: bool | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
-    """Fetch Yahoo OHLCV with scanner-style chunk cool-down between batches."""
-    if warm_session:
+    """Fetch OHLCV with chunk cool-down between Yahoo batches (Supabase skips throttling)."""
+    prefer = _resolve_prefer_supabase(prefer_supabase)
+    _ohlcv_store().reset_ohlcv_stats()
+    _ohlcv_store().clear_bulk_cache()
+    _prime_supabase_bulk_cache(universe, prefer_supabase=prefer)
+    if warm_session and not prefer:
         warm_yahoo_session()
 
     data_by_symbol: dict[str, dict[str, Any]] = {}
     manifest: dict[str, Any] = {
         "range": range_str,
         "fetched_at": dt.now().isoformat(timespec="seconds"),
+        "prefer_supabase": prefer,
         "chunk_size": chunk_size,
         "chunk_cooldown_sec": chunk_cooldown_sec,
         "success": [],
         "failed": [],
     }
+    yahoo_in_chunk = 0
     for i, entry in enumerate(universe, start=1):
         sym = entry["symbol"]
         ticker = entry["yahoo_ticker"]
-        df, err = fetch_yahoo_history(ticker, range_str=range_str, min_bars=MIN_HISTORY_BARS)
+        df, err, source = _fetch_one_symbol_history(
+            entry, range_str=range_str, prefer_supabase=prefer,
+        )
         if df and not err:
-            data_by_symbol[sym] = {
-                "df": df,
-                "dates": bar_dates_from_df(df),
-                "tier_key": entry["tier_key"],
-                "tier_label": entry["tier_label"],
-                "yahoo_ticker": ticker,
-                "bar_count": len(df["close"]),
-            }
-            manifest["success"].append({
-                "symbol": sym,
-                "yahoo_ticker": ticker,
-                "bar_count": len(df["close"]),
-                "first_date": bar_dates_from_df(df)[0] if df.get("timestamp") else None,
-                "last_date": bar_dates_from_df(df)[-1] if df.get("timestamp") else None,
-            })
+            data_by_symbol[sym] = _pack_stock_data(entry, df)
+            manifest["success"].append(_manifest_success_row(entry, df, source=source))
+            if source == "yahoo":
+                yahoo_in_chunk += 1
         else:
             manifest["failed"].append({
                 "symbol": sym,
                 "yahoo_ticker": ticker,
                 "error": err or "fetch_failed",
             })
-        if i % chunk_size == 0 and i < len(universe):
+        if yahoo_in_chunk >= chunk_size and i < len(universe):
             print(
-                f"Chunk cool-down: {i}/{len(universe)} tickers fetched, "
-                f"sleeping {chunk_cooldown_sec}s...",
+                f"Chunk cool-down: {i}/{len(universe)} tickers processed, "
+                f"sleeping {chunk_cooldown_sec}s after {yahoo_in_chunk} Yahoo fetches...",
                 flush=True,
             )
             time.sleep(chunk_cooldown_sec)
+            yahoo_in_chunk = 0
+    _attach_ohlcv_stats(manifest)
     return data_by_symbol, manifest
 
 
@@ -863,6 +959,7 @@ def run_backtest(
     output_dir: Path | None = None,
     warm_session: bool = True,
     stock_filter: list[str] | None = None,
+    prefer_supabase: bool | None = None,
 ) -> dict[str, Any]:
     """Full pipeline: universe -> fetch -> replay -> report artifacts."""
     started = dt.now()
@@ -889,11 +986,17 @@ def run_backtest(
 
     if len(universe) > FETCH_CHUNK_SIZE:
         data_by_symbol, fetch_manifest = fetch_universe_history_throttled(
-            universe, range_str=range_str, warm_session=warm_session,
+            universe,
+            range_str=range_str,
+            warm_session=warm_session,
+            prefer_supabase=prefer_supabase,
         )
     else:
         data_by_symbol, fetch_manifest = fetch_universe_history(
-            universe, range_str=range_str, warm_session=warm_session,
+            universe,
+            range_str=range_str,
+            warm_session=warm_session,
+            prefer_supabase=prefer_supabase,
         )
 
     per_stock: dict[str, Any] = {}
@@ -919,6 +1022,9 @@ def run_backtest(
     summary["stocks_fetched"] = len(fetch_manifest.get("success") or [])
     summary["stocks_failed"] = len(fetch_manifest.get("failed") or [])
     summary["stocks_replayed"] = len([s for s in per_stock.values() if not s.get("error")])
+    ohlcv_stats = fetch_manifest.get("ohlcv_stats") or {}
+    summary["supabase_hits"] = ohlcv_stats.get("supabase_hits", 0)
+    summary["yahoo_fetches"] = ohlcv_stats.get("yahoo_fetches", 0)
 
     report = {
         "meta": {
@@ -929,6 +1035,8 @@ def run_backtest(
             "forward_horizons": list(FORWARD_HORIZONS),
             "min_history_bars": MIN_HISTORY_BARS,
             "output_dir": str(out_dir),
+            "prefer_supabase": fetch_manifest.get("prefer_supabase"),
+            "ohlcv_stats": ohlcv_stats,
         },
         "universe_summary": {
             "total": universe_payload.get("total", len(universe)),
@@ -995,6 +1103,9 @@ def build_report_markdown(report: dict[str, Any]) -> str:
     )
     lines.append(f"| Stocks fetched | {summary.get('stocks_fetched', 0)} |")
     lines.append(f"| Fetch failures | {summary.get('stocks_failed', 0)} |")
+    if summary.get("supabase_hits") is not None:
+        lines.append(f"| Supabase OHLCV hits | {summary.get('supabase_hits', 0)} |")
+        lines.append(f"| Yahoo fetches | {summary.get('yahoo_fetches', 0)} |")
 
     taxonomy = summary.get("mismatch_taxonomy") or {}
     if taxonomy:
@@ -1241,6 +1352,7 @@ def run_setup_backtest(
     output_dir: Path | None = None,
     warm_session: bool = True,
     stock_filter: list[str] | None = None,
+    prefer_supabase: bool | None = None,
 ) -> dict[str, Any]:
     """Replay PRE_BREAKOUT setups and measure forward breakout conversion."""
     started = dt.now()
@@ -1255,11 +1367,17 @@ def run_setup_backtest(
 
     if len(universe) > FETCH_CHUNK_SIZE:
         data_by_symbol, fetch_manifest = fetch_universe_history_throttled(
-            universe, range_str=range_str, warm_session=warm_session,
+            universe,
+            range_str=range_str,
+            warm_session=warm_session,
+            prefer_supabase=prefer_supabase,
         )
     else:
         data_by_symbol, fetch_manifest = fetch_universe_history(
-            universe, range_str=range_str, warm_session=warm_session,
+            universe,
+            range_str=range_str,
+            warm_session=warm_session,
+            prefer_supabase=prefer_supabase,
         )
 
     per_stock: dict[str, Any] = {}
@@ -1278,6 +1396,9 @@ def run_setup_backtest(
     summary["stocks_fetched"] = len(fetch_manifest.get("success") or [])
     summary["stocks_failed"] = len(fetch_manifest.get("failed") or [])
     summary["stocks_replayed"] = len([s for s in per_stock.values() if not s.get("error")])
+    ohlcv_stats = fetch_manifest.get("ohlcv_stats") or {}
+    summary["supabase_hits"] = ohlcv_stats.get("supabase_hits", 0)
+    summary["yahoo_fetches"] = ohlcv_stats.get("yahoo_fetches", 0)
 
     report = {
         "meta": {
@@ -1287,6 +1408,8 @@ def run_setup_backtest(
             "range": range_str,
             "forward_horizons": list(FORWARD_HORIZONS),
             "stocks_replayed": summary["stocks_replayed"],
+            "prefer_supabase": fetch_manifest.get("prefer_supabase"),
+            "ohlcv_stats": ohlcv_stats,
         },
         "summary": summary,
         "per_stock": per_stock,

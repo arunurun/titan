@@ -1,5 +1,6 @@
-# Historical breakout scanner backtest (Yahoo bars → local cache → replay report).
-# Prerequisite: optional — run "Ingest breakout OHLCV" to warm Supabase; backtest fetches Yahoo directly.
+# Historical breakout scanner backtest (Supabase OHLCV preferred, Yahoo fallback → replay report).
+# Prerequisite: run "Ingest breakout OHLCV" workflow first so equity_ohlcv_daily is warm;
+# backtest falls back to Yahoo + file cache on Supabase miss/stale data.
 
 name: Breakout backtest
 
@@ -46,6 +47,8 @@ jobs:
       - name: Run breakout historical backtest
         env:
           PYTHONUNBUFFERED: "1"
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           ARGS=(--range "${{ github.event.inputs.range || '3m' }}" --json)
           if [ "${{ github.event.inputs.full_universe }}" = "true" ]; then
