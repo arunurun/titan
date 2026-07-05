@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
+import pytest
 from postgrest.exceptions import APIError
 
 from config_loader import TitanConfig
@@ -889,6 +890,74 @@ def test_map_news_to_sector_scores_includes_data_centre():
     assert scores["data_centre"]["score"] > 0
     assert scores["defence"]["matched_items"] >= 1
     assert scores["defence"]["score"] < 0
+
+
+def test_sector_theme_keywords_cover_tradable_sectors():
+    from sector_priority import _SECTOR_THEME_KEYWORDS
+
+    expected = {
+        "ai",
+        "auto",
+        "auto_ancillary",
+        "banks_private",
+        "banks_psu",
+        "capital_goods_industrials",
+        "cement_building_materials",
+        "chemicals",
+        "consumer_discretionary",
+        "data_centre",
+        "defence",
+        "electronics_ems",
+        "fmcg_staples",
+        "infrastructure_construction",
+        "insurance",
+        "it",
+        "logistics",
+        "media",
+        "metals_mining",
+        "nbfc_financial_services",
+        "oil_gas_energy",
+        "pharma_healthcare",
+        "power_utilities",
+        "railways_transport_infra",
+        "realty_reits",
+        "renewables_clean_energy",
+        "telecom",
+        "textiles",
+    }
+    assert expected == set(_SECTOR_THEME_KEYWORDS.keys())
+    for sector_key, terms in _SECTOR_THEME_KEYWORDS.items():
+        assert terms, f"{sector_key} must have at least one theme keyword"
+
+
+@pytest.mark.parametrize(
+    ("sector_key", "title", "summary"),
+    [
+        ("banks_psu", "PSU bank recapitalisation plan boosts lending outlook", "Public sector bank credit growth"),
+        ("pharma_healthcare", "USFDA approves generic drug from Indian pharma", "Healthcare sector export win"),
+        ("auto", "Passenger vehicle sales surge on EV adoption", "Automobile demand recovery"),
+        ("telecom", "5G rollout accelerates as mobile subscriber base expands", "Telecom sector tariff hike"),
+        ("textiles", "Garment export orders rise on cotton yarn demand", "Textile export growth"),
+    ],
+)
+def test_score_sector_news_matches_new_sector_themes(sector_key, title, summary):
+    from sector_priority import score_sector_news
+
+    out = score_sector_news(
+        [
+            {
+                "title": title,
+                "summary": summary,
+                "source": "TestWire",
+                "url": "https://x/news",
+                "published_at": "2026-01-02T10:00:00+00:00",
+            }
+        ],
+        sector_key=sector_key,
+    )
+    assert out["matched_items"] >= 1
+    assert out["drivers_top"]
+    assert out["drivers_top"][0]["affected_theme"] == sector_key
 
 
 def test_build_sector_rankings_news_blend_bounded(monkeypatch):
